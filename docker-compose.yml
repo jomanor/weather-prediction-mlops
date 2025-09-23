@@ -59,6 +59,22 @@ services:
     networks:
       - weather-network
 
+  # Kafa Consumer
+  weather-consumer:
+    build: ./kafka-consumer
+    container_name: weather-consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mongodb:
+        condition: service_started 
+    environment:
+      KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+    restart: unless-stopped
+    networks:
+      - weather-network
+
 volumes:
   mongo-data:
 
