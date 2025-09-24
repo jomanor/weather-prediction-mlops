@@ -70,7 +70,21 @@ services:
         condition: service_started 
     environment:
       KAFKA_BROKER: kafka:9092
-      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+    restart: unless-stopped
+    networks:
+      - weather-network
+
+  # Fastapi API
+  weather-api:
+    build: ./api
+    container_name: weather-api
+    ports:
+      - 8000:8000
+    environment:
+      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+    depends_on:
+      - mongodb
     restart: unless-stopped
     networks:
       - weather-network

@@ -18,8 +18,8 @@ class WeatherConsumer:
             value_deserializer=lambda m: json.loads(m.decode('utf-8'))
         )
         
-        mongo_uri = os.getenv('MONGO_URI', 'mongodb://mongodb:27017')
-        self.mongo_client = MongoClient(mongo_uri)
+        mongo_url = os.getenv('MONGO_URL')
+        self.mongo_client = MongoClient(mongo_url)
         self.db = self.mongo_client['weather_db']
         self.collection = self.db['weather_data']
         
