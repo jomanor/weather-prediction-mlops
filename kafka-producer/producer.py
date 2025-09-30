@@ -4,9 +4,6 @@ import os
 from datetime import datetime
 from kafka import KafkaProducer
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 class WeatherProducer:
     def __init__(self):

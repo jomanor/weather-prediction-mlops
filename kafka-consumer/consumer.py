@@ -3,9 +3,6 @@ import os
 from datetime import datetime
 from kafka import KafkaConsumer
 from pymongo import MongoClient
-from dotenv import load_dotenv
-
-load_dotenv()
 
 class WeatherConsumer:
     def __init__(self):
