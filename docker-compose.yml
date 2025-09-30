@@ -13,6 +13,12 @@ services:
       MONGO_INITDB_DATABASE: ${MONGO_DATABASE}
     volumes:
       - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - weather-network
 
@@ -59,7 +65,7 @@ services:
     networks:
       - weather-network
 
-  # Kafa Consumer
+  # Kafka Consumer
   weather-consumer:
     build: ./kafka-consumer
     container_name: weather-consumer
@@ -67,10 +73,10 @@ services:
       kafka:
         condition: service_healthy
       mongodb:
-        condition: service_started 
+        condition: service_healthy 
     environment:
       KAFKA_BROKER: kafka:9092
-      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     restart: unless-stopped
     networks:
       - weather-network
@@ -82,7 +88,7 @@ services:
     ports:
       - 8000:8000
     environment:
-      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather-mongodb?authSource=admin
+      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     depends_on:
       - mongodb
     restart: unless-stopped
