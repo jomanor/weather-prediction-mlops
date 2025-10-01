@@ -13,12 +13,6 @@ services:
       MONGO_INITDB_DATABASE: ${MONGO_DATABASE}
     volumes:
       - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     networks:
       - weather-network
 
@@ -73,7 +67,7 @@ services:
       kafka:
         condition: service_healthy
       mongodb:
-        condition: service_healthy 
+        condition: service_started
     environment:
       KAFKA_BROKER: kafka:9092
       MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
