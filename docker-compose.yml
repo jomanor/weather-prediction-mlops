@@ -36,6 +36,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
       interval: 30s
@@ -89,8 +91,63 @@ services:
     networks:
       - weather-network
 
+  # Spark Master
+  spark-master:
+    image: apache/spark:3.5.5-python3
+    container_name: spark-master
+    command: >
+      bash -c "/opt/spark/sbin/start-master.sh && tail -f /dev/null"
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark:/opt/spark-jobs
+      - spark-logs:/opt/spark/spark-events
+    networks:
+      - weather-network
+  
+  # Spark Worker
+  spark-worker:
+    image: apache/spark:3.5.5-python3
+    container_name: spark-worker
+    command: >
+      bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
+    environment:
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8081:8081"
+    depends_on:
+      - spark-master
+    volumes:
+      - ./spark:/opt/spark-jobs
+      - spark-logs:/opt/spark/spark-events
+    networks:
+      - weather-network
+
+  # Spark History
+  spark-history:
+    image: apache/spark:3.5.5-python3
+    container_name: spark-history
+    command: >
+      bash -c "/opt/spark/sbin/start-history-server.sh && tail -f /dev/null"
+    environment:
+      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=/opt/spark/spark-events
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "18080:18080"
+    volumes:
+      - spark-logs:/opt/spark/spark-events
+    networks:
+      - weather-network
+
 volumes:
   mongo-data:
+  kafka-data:
+  spark-logs:
 
 networks:
   weather-network:
