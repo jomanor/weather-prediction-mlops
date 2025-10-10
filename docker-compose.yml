@@ -99,6 +99,7 @@ services:
       bash -c "/opt/spark/sbin/start-master.sh && tail -f /dev/null"
     environment:
       - SPARK_NO_DAEMONIZE=true
+      - SPARK_MASTER_OPTS=-Dspark.rpc.message.maxSize=256
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -118,6 +119,7 @@ services:
       - SPARK_WORKER_MEMORY=2G
       - SPARK_WORKER_CORES=2
       - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_OPTS=-Dspark.rpc.message.maxSize=256
     ports:
       - "8081:8081"
     depends_on:
@@ -143,6 +145,22 @@ services:
       - spark-logs:/opt/spark/spark-events
     networks:
       - weather-network
+
+  # Spark Scheduler
+  spark-scheduler:
+    build: ./spark-scheduler
+    container_name: spark-scheduler
+    environment:
+      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+    depends_on:
+      - spark-master
+      - spark-worker
+      - mongodb
+    volumes:
+      - ./spark:/opt/spark-jobs
+    networks:
+      - weather-network
+    restart: unless-stopped
 
 volumes:
   mongo-data:
