@@ -3,13 +3,18 @@ from pyspark.sql.window import Window
 from pyspark.sql.types import *
 from datetime import datetime, timedelta
 import sys
+import os
 sys.path.append('/opt/spark-jobs')
 from config.spark_config import create_spark_session, FEATURES_CONFIG
 
 def extract_weather_data(spark):
 
+    mongo_url = os.getenv("MONGO_URL")
+
     df = spark.read \
         .format("mongodb") \
+        .option("connection.uri", mongo_url) \
+        .option("database", "weather_db") \
         .option("collection", "weather_data") \
         .load()
 
@@ -125,11 +130,15 @@ def create_target_variable(df, horizon=1):
     return df
 
 def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
+    
+    mongo_url = os.getenv("MONGO_URL")
 
     df_clean = df.dropna(subset=[f"target_temp_{horizon}h"])
 
     df_clean.write \
         .format("mongodb") \
+        .option("connection.uri", mongo_url) \
+        .option("database", "weather_db") \
         .option("collection", collection_name) \
         .mode("overwrite") \
         .save()
@@ -138,6 +147,7 @@ def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
 
 def main():
 
+    # TODO Move all the disperse configuration here (config/spark_config.py)
     spark = create_spark_session("WeatherFeatureEngineering")
 
     try:

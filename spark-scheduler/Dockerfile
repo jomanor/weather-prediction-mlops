@@ -11,4 +11,5 @@ COPY scheduler.py /opt/scheduler.py
 
 USER spark
 
+ENTRYPOINT []
 CMD ["python3", "/opt/scheduler.py"]

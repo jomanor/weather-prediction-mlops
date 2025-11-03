@@ -13,7 +13,7 @@ def create_spark_session(app_name="WeatherMLOps"):
         .config("spark.mongodb.input.uri", mongo_uri) \
         .config("spark.mongodb.output.uri", mongo_uri) \
         .config("spark.jars.packages", 
-                "org.mongodb.spark:mongo-spark-connector_2.12:10.2.0") \
+                "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0") \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .getOrCreate()
