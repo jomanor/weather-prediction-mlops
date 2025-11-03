@@ -104,7 +104,7 @@ services:
       - "8080:8080"
       - "7077:7077"
     volumes:
-      - ./spark:/opt/spark-jobs
+      - ./spark-jobs:/opt/spark-jobs
       - spark-logs:/opt/spark/spark-events
     networks:
       - weather-network
@@ -125,7 +125,7 @@ services:
     depends_on:
       - spark-master
     volumes:
-      - ./spark:/opt/spark-jobs
+      - ./spark-jobs:/opt/spark-jobs
       - spark-logs:/opt/spark/spark-events
     networks:
       - weather-network
@@ -157,7 +157,7 @@ services:
       - spark-worker
       - mongodb
     volumes:
-      - ./spark:/opt/spark-jobs
+      - ./spark-jobs:/opt/spark-jobs
     networks:
       - weather-network
     restart: unless-stopped

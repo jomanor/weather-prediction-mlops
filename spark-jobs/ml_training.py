@@ -9,14 +9,21 @@ import sys
 sys.path.append('/opt/spark-jobs')
 from config.spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
 from datetime import datetime
+import os
 
 def load_features(spark):
 
+    mongo_url = os.getenv("MONGO_URL")
+
     df = spark.read \
         .format("mongodb") \
+        .option("connection.uri", mongo_url) \
+        .option("database", "weather_db") \
         .option("collection", "weather_features") \
         .load()
-
+    
+    # TODO this should be done in other part
+    df = df.drop("_id")
     df_clean = df.dropna()
 
     return df_clean
@@ -155,6 +162,21 @@ def train_temperature_prediction_model(df, horizon=1):
         for feature, importance in important_features:
             print(f"  {feature}: {importance:.4f}")
 
+    elif best_model_name == "LinearRegression":
+        model_stage = best_model.stages[-1]
+        coefficients = model_stage.coefficients.toArray()
+        
+        important_features = sorted(
+            [(feature_cols[i], abs(float(coef)))
+             for i, coef in enumerate(coefficients)],
+            key=lambda x: x[1],
+            reverse=True
+        )[:10]
+        
+        print("\nTop 10 Important Features (by absolute coefficient):")
+        for feature, coef in important_features:
+            print(f"  {feature}: {coef:.4f}")
+
     return best_model, best_model_name, important_features
 
 def train_rain_prediction_model(df, horizon=1):
@@ -257,6 +279,7 @@ def train_rain_prediction_model(df, horizon=1):
 
 def save_model(model, model_name, path="/opt/spark-jobs/models"):
 
+    os.makedirs(path, exist_ok=True)
     model_path = f"{path}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model.write().overwrite().save(model_path)
 
@@ -264,8 +287,12 @@ def save_model(model, model_name, path="/opt/spark-jobs/models"):
 
 def create_prediction_batch(spark, model, collection="weather_predictions"):
 
+    mongo_url = os.getenv("MONGO_URL")
+
     df = spark.read \
         .format("mongodb") \
+        .option("connection.uri", mongo_url) \
+        .option("database", "weather_db") \
         .option("collection", "weather_features") \
         .load()
 
@@ -285,6 +312,8 @@ def create_prediction_batch(spark, model, collection="weather_predictions"):
 
     predictions_to_save.write \
         .format("mongodb") \
+        .option("connection.uri", mongo_url) \
+        .option("database", "weather_db") \
         .option("collection", collection) \
         .mode("append") \
         .save()

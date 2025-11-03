@@ -14,7 +14,7 @@ def run_spark_job(job_file, job_name):
 
     cmd = [
         "/opt/spark/bin/spark-submit",
-        "--packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.2.0",
+        "--packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0",
         "--master", "spark://spark-master:7077",
         f"/opt/spark-jobs/{job_file}"
     ]
@@ -34,6 +34,7 @@ def run_feature_engineering():
 def run_ml_training():
     run_spark_job("ml_training.py", "ML Training")
 
+# TODO create an inference script
 def run_quick_predictions():
     logger.info("Running quick predictions...")
     pass
