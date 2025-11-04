@@ -127,6 +127,7 @@ services:
     volumes:
       - ./spark-jobs:/opt/spark-jobs
       - spark-logs:/opt/spark/spark-events
+      - spark-tmp:/opt/spark-tmp
     networks:
       - weather-network
 
@@ -158,6 +159,7 @@ services:
       - mongodb
     volumes:
       - ./spark-jobs:/opt/spark-jobs
+      - spark-tmp:/opt/spark-tmp
     networks:
       - weather-network
     restart: unless-stopped
@@ -166,7 +168,7 @@ volumes:
   mongo-data:
   kafka-data:
   spark-logs:
-
+  spark-tmp:
 networks:
   weather-network:
     driver: bridge
