@@ -10,6 +10,9 @@ sys.path.append('/opt/spark-jobs')
 from config.spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
 from datetime import datetime
 import os
+from pymongo import MongoClient
+from gridfs import GridFS
+import shutil
 
 def load_features(spark):
 
@@ -277,13 +280,51 @@ def train_rain_prediction_model(df, horizon=1):
 
     return best_model, best_model_name, important_features
 
-def save_model(model, model_name, path="/opt/spark-jobs/models"):
+def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
+    
+    mongo_url = os.getenv("MONGO_URL")
+    temp_dir = "/opt/spark-tmp"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    model_dir_path = f"{temp_dir}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    model_zip_path = f"{model_dir_path}.zip"
 
-    os.makedirs(path, exist_ok=True)
-    model_path = f"{path}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    model.write().overwrite().save(model_path)
+    try:
+        model.write().overwrite().save(model_dir_path)
+        shutil.make_archive(base_name=model_dir_path, format='zip', root_dir=model_dir_path)
 
-    return model_path
+        client = MongoClient(mongo_url)
+        db = client[db_name]
+        fs = GridFS(db)
+
+        with open(model_zip_path, 'rb') as model_zip_file:
+            file_id = fs.put(model_zip_file, filename=model_zip_path.split('/')[-1])
+
+        print(f"Successfully uploaded model zip to GridFS with file_id: {file_id}")
+
+        metadata = {
+            "model_name": model_name,
+            "model_type": model.__class__.__name__,
+            "gridfs_file_id": file_id,
+            "timestamp": datetime.now(),
+            "version": datetime.now().strftime('%Y%m%d_%H%M%S')
+        }
+
+        db[metadata_collection].insert_one(metadata)
+
+    except Exception as e:
+        print(f"Error during model and metadata save: {e}")
+        raise
+    
+    finally:
+        if os.path.exists(model_dir_path):
+            print(f"Cleaning up temporary directory: {model_dir_path}")
+            shutil.rmtree(model_dir_path)
+        if os.path.exists(model_zip_path):
+            print(f"Cleaning up temporary zip file: {model_zip_path}")
+            os.remove(model_zip_path)
+        if 'client' in locals():
+            client.close()
 
 def create_prediction_batch(spark, model, collection="weather_predictions"):
 
