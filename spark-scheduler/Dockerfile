@@ -10,6 +10,9 @@ RUN mkdir -p /home/spark/.ivy2/cache && \
 RUN mkdir -p /opt/spark-tmp && \
     chown -R spark:spark /opt/spark-tmp
 
+RUN mkdir -p /opt/spark/spark-events && \
+    chown -R spark:spark /opt/spark/spark-events
+
 COPY scheduler.py /opt/scheduler.py
 
 USER spark
