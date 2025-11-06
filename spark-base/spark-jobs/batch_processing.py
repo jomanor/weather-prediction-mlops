@@ -4,8 +4,8 @@ from pyspark.sql.types import *
 from datetime import datetime, timedelta
 import sys
 import os
-sys.path.append('/opt/spark-jobs')
-from config.spark_config import create_spark_session, FEATURES_CONFIG
+sys.path.append('/opt/config')
+from spark_config import create_spark_session, FEATURES_CONFIG
 
 def extract_weather_data(spark):
 

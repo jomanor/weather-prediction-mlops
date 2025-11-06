@@ -6,8 +6,8 @@ from pyspark.ml.evaluation import RegressionEvaluator, BinaryClassificationEvalu
 from pyspark.ml import Pipeline
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 import sys
-sys.path.append('/opt/spark-jobs')
-from config.spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
+sys.path.append('/opt/config')
+from spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
 from datetime import datetime
 import os
 from pymongo import MongoClient

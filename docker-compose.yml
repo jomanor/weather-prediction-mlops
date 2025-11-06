@@ -93,7 +93,9 @@ services:
 
   # Spark Master
   spark-master:
-    image: apache/spark:3.5.5-python3
+    build: 
+      context: .
+      dockerfile: spark-base/Dockerfile
     container_name: spark-master
     command: >
       bash -c "/opt/spark/sbin/start-master.sh && tail -f /dev/null"
@@ -104,14 +106,15 @@ services:
       - "8080:8080"
       - "7077:7077"
     volumes:
-      - ./spark-jobs:/opt/spark-jobs
       - spark-logs:/opt/spark/spark-events
     networks:
       - weather-network
   
   # Spark Worker
   spark-worker:
-    image: apache/spark:3.5.5-python3
+    build: 
+      context: .
+      dockerfile: spark-base/Dockerfile
     container_name: spark-worker
     command: >
       bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
@@ -125,7 +128,6 @@ services:
     depends_on:
       - spark-master
     volumes:
-      - ./spark-jobs:/opt/spark-jobs
       - spark-logs:/opt/spark/spark-events
       - spark-tmp:/opt/spark-tmp
     networks:
@@ -149,7 +151,9 @@ services:
 
   # Spark Scheduler
   spark-scheduler:
-    build: ./spark-scheduler
+    build: 
+      context: .
+      dockerfile: spark-scheduler/Dockerfile
     container_name: spark-scheduler
     environment:
       MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
@@ -160,7 +164,6 @@ services:
     ports:
       - "4040:4040"
     volumes:
-      - ./spark-jobs:/opt/spark-jobs
       - spark-tmp:/opt/spark-tmp
       - spark-logs:/opt/spark/spark-events
     networks:
@@ -172,6 +175,7 @@ volumes:
   kafka-data:
   spark-logs:
   spark-tmp:
+
 networks:
   weather-network:
     driver: bridge

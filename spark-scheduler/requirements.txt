@@ -1,0 +1,4 @@
+schedule
+pymongo==4.6.0
+numpy
+pyarrow
