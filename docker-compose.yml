@@ -157,9 +157,12 @@ services:
       - spark-master
       - spark-worker
       - mongodb
+    ports:
+      - "4040:4040"
     volumes:
       - ./spark-jobs:/opt/spark-jobs
       - spark-tmp:/opt/spark-tmp
+      - spark-logs:/opt/spark/spark-events
     networks:
       - weather-network
     restart: unless-stopped
