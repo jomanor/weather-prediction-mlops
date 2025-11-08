@@ -49,7 +49,7 @@ services:
 
   # Kafka Producer
   weather-producer:
-    build: ./kafka-producer
+    build: ./kafka/kafka-producer
     container_name: weather-producer
     depends_on:
       kafka:
@@ -63,7 +63,7 @@ services:
 
   # Kafka Consumer
   weather-consumer:
-    build: ./kafka-consumer
+    build: ./kafka/kafka-consumer
     container_name: weather-consumer
     depends_on:
       kafka:
@@ -93,9 +93,7 @@ services:
 
   # Spark Master
   spark-master:
-    build: 
-      context: .
-      dockerfile: spark-base/Dockerfile
+    image: apache/spark:3.5.5-python3
     container_name: spark-master
     command: >
       bash -c "/opt/spark/sbin/start-master.sh && tail -f /dev/null"
@@ -112,9 +110,7 @@ services:
   
   # Spark Worker
   spark-worker:
-    build: 
-      context: .
-      dockerfile: spark-base/Dockerfile
+    image: apache/spark:3.5.5-python3
     container_name: spark-worker
     command: >
       bash -c "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 && tail -f /dev/null"
@@ -151,9 +147,7 @@ services:
 
   # Spark Scheduler
   spark-scheduler:
-    build: 
-      context: .
-      dockerfile: spark-scheduler/Dockerfile
+    build: ./spark
     container_name: spark-scheduler
     environment:
       MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
