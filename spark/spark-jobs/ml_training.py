@@ -379,6 +379,7 @@ def main():
         save_model(temp_model, f"temp_prediction_{horizon}h_{temp_model_name}")
         save_model(rain_model, f"rain_prediction_{horizon}h_{rain_model_name}")
 
+        # TODO: Add also the rain model. MLFlow
         create_prediction_batch(spark, temp_model)
 
     except Exception as e:

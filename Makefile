@@ -1,4 +1,4 @@
-.PHONY: build up down restart logs
+.PHONY: build up down restart clean logs
 
 build:
 	docker compose build
@@ -13,7 +13,7 @@ restart: down build up
 
 clean:
 	docker compose down --rmi local
-	docker rmi mongo:6.0 apache/kafka:4.1.0 apache/spark:3.5.5-python3
+	docker rmi mongo:6.0 apache/kafka:4.1.0 apache/spark
 	docker image prune -f
 
 logs:
