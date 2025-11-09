@@ -132,9 +132,27 @@ def create_target_variable(df, horizon=1):
 def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
     
     mongo_url = os.getenv("MONGO_URL")
+    
+    print(f"BEFORE dropna: {df.count()} rows")
 
-    df_clean = df.dropna(subset=[f"target_temp_{horizon}h"])
+    null_check = df.select([
+        F.sum(F.col(c).isNull().cast("int")).alias(c) 
+            for c in df.columns
+        ])
+    print("Null counts BEFORE:")
+    null_check.show()
 
+    df_clean = df.dropna(how='any')
+    print(f"AFTER dropna: {df_clean.count()} rows")
+    
+    null_check_after = df_clean.select([
+        F.sum(F.col(c).isNull().cast("int")).alias(c) 
+        for c in df_clean.columns
+    ])
+    print("Null counts AFTER:")
+    null_check_after.show()
+    
+    # f"{collection_name} + {horizon}h"
     df_clean.write \
         .format("mongodb") \
         .option("connection.uri", mongo_url) \
