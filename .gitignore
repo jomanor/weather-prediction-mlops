@@ -2,3 +2,9 @@
 __pycache__/
 .env
 notes.md
+*.nc
+pruebas.py
+pyproject.toml
+uv.lock
+torchcast/
+*.pdf
