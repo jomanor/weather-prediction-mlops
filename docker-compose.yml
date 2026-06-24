@@ -56,7 +56,6 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BROKER: kafka:9092
-      WEATHER_API_KEY: ${WEATHER_API_KEY}
     restart: unless-stopped
     networks:
       - weather-network
