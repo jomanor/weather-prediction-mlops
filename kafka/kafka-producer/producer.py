@@ -1,7 +1,6 @@
 import json
 import time
 import os
-from datetime import datetime
 from kafka import KafkaProducer
 import requests
 
@@ -28,9 +27,12 @@ class WeatherProducer:
             "Bilbao": (43.2630, -2.9350),
             "Alicante": (38.3452, -0.4810)
         }
+
+        # Pressure levels for upper-air atmospheric variables
+        self.pressure_levels = [200, 500, 700, 850, 925, 1000]
     
     def fetch_weather(self, city, coords):
-        """Fetch real-time weather data from Open-Meteo API"""
+        """Fetch real-time weather data from Open-Meteo API (current + hourly + pressure levels)"""
         lat, lon = coords
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
@@ -38,6 +40,7 @@ class WeatherProducer:
             'timeformat': 'unixtime',
             'latitude': lat,
             'longitude': lon,
+            # Current conditions
             'current': [
                 'temperature_2m',
                 'relative_humidity_2m',
@@ -57,19 +60,51 @@ class WeatherProducer:
                 'visibility',
                 'shortwave_radiation',
                 'dew_point_2m',
-                'uv_index'
-
+                'uv_index',
             ],
-            'timezone': 'auto'
+            # Hourly atmospheric variables for model features
+            'hourly': [
+                'temperature_2m',
+                'relative_humidity_2m',
+                'dew_point_2m',
+                'precipitation',
+                'rain',
+                'snowfall',
+                'weather_code',
+                'pressure_msl',
+                'surface_pressure',
+                'cloud_cover',
+                'visibility',
+                'wind_speed_10m',
+                'wind_direction_10m',
+                'wind_gusts_10m',
+                'shortwave_radiation',
+                'cape',                     # Convective Available Potential Energy
+                'wind_speed_80m',
+                'wind_direction_80m',
+            ],
+            # Upper-air variables at pressure levels
+            'pressure_level': self.pressure_levels,
+            'hourly_pressure_level': [
+                'geopotential_height',
+                'temperature',
+                'relative_humidity',
+                'u_component_of_wind',
+                'v_component_of_wind',
+                'vertical_velocity',
+            ],
+            'forecast_hours': 24,   # Only need next 24h of hourly data
+            'timezone': 'auto',
         }
         
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=30)
             if response.status_code == 200:
                 data = response.json()
                 data['city'] = city
-                data['coordinates'] = {'lat': lat, 'lon': lon} # this is no use, the api gives the coord also
                 return data
+            else:
+                print(f"HTTP {response.status_code} for {city}: {response.text[:200]}", flush=True)
         
         except Exception as e:
             print(f"Error fetching {city}: {e}", flush=True)
@@ -82,14 +117,14 @@ class WeatherProducer:
             for city, coords in self.cities.items():
                 data = self.fetch_weather(city, coords)
                 if data:
-                    print(data)
                     self.producer.send('weather-data', value=data)
-                    print(f"\n{'='*60}", flush=True)
-                    print(f"Successfully sent data for {city}", flush=True)
-                    print(f"Temperature: {data['current']['temperature_2m']}°C", flush=True)
-                    print(f"Humidity: {data['current']['relative_humidity_2m']}%", flush=True)
-                    print(f"Wind Speed: {data['current']['wind_speed_10m']} km/h", flush=True)
-                    print(f"Full data structure: {json.dumps(data, indent=2)}", flush=True)
+                    current = data.get('current', {})
+                    print(f"{'='*60}", flush=True)
+                    print(f"Sent data for {city}", flush=True)
+                    print(f"  Temperature : {current.get('temperature_2m')} °C", flush=True)
+                    print(f"  Humidity    : {current.get('relative_humidity_2m')} %", flush=True)
+                    print(f"  Wind speed  : {current.get('wind_speed_10m')} m/s", flush=True)
+                    print(f"  Hourly rows : {len(data.get('hourly', {}).get('time', []))}", flush=True)
                     print(f"{'='*60}\n", flush=True)
                 else:
                     print(f"✗ Failed to fetch data for {city}", flush=True)
