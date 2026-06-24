@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from kafka import KafkaConsumer
 from pymongo import MongoClient
 
@@ -18,131 +18,147 @@ class WeatherConsumer:
         mongo_url = os.getenv('MONGO_URL')
         self.mongo_client = MongoClient(mongo_url)
         self.db = self.mongo_client['weather_db']
-        self.collection = self.db['weather_data']
-    
-    def map_weather_code(self, code):
-        """Map Open-Meteo weather codes to OpenWeatherMap-like format"""
-        weather_mapping = {
-            0: {'main': 'Clear', 'description': 'clear sky', 'icon': '01d'},
-            1: {'main': 'Clouds', 'description': 'mainly clear', 'icon': '02d'},
-            2: {'main': 'Clouds', 'description': 'partly cloudy', 'icon': '03d'},
-            3: {'main': 'Clouds', 'description': 'overcast clouds', 'icon': '04d'},
-            45: {'main': 'Fog', 'description': 'fog', 'icon': '50d'},
-            48: {'main': 'Fog', 'description': 'depositing rime fog', 'icon': '50d'},
-            51: {'main': 'Drizzle', 'description': 'light drizzle', 'icon': '09d'},
-            53: {'main': 'Drizzle', 'description': 'moderate drizzle', 'icon': '09d'},
-            55: {'main': 'Drizzle', 'description': 'dense drizzle', 'icon': '09d'},
-            61: {'main': 'Rain', 'description': 'slight rain', 'icon': '10d'},
-            63: {'main': 'Rain', 'description': 'moderate rain', 'icon': '10d'},
-            65: {'main': 'Rain', 'description': 'heavy rain', 'icon': '10d'},
-            71: {'main': 'Snow', 'description': 'slight snow', 'icon': '13d'},
-            73: {'main': 'Snow', 'description': 'moderate snow', 'icon': '13d'},
-            75: {'main': 'Snow', 'description': 'heavy snow', 'icon': '13d'},
-            95: {'main': 'Thunderstorm', 'description': 'thunderstorm', 'icon': '11d'},
-        }
-        return weather_mapping.get(code, {'main': 'Unknown', 'description': 'unknown', 'icon': '01d'})
+
+        # raw_weather  → everything that arrives from open-meteo, untouched
+        # weather_data → only the current snapshot, used by the API
+        self.raw_collection = self.db['raw_weather']
+        self.current_collection = self.db['weather_data']
         
-    def process_message(self, message):
-        """Process and store weather data from Open-Meteo in OpenWeatherMap-compatible format"""
-        data = message.value
-        
-        city = data.get('city', 'unknown')
-        coords = data.get('coordinates', {})
-        current = data.get('current', {})
-        hourly = data.get('hourly', {})
-        
-        current_time = current.get('time', '')
+    def _unix_to_datetime(self, unix_ts):
+        """Convert a unix integer timestamp to a UTC-aware datetime."""
         try:
-            timestamp_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-            timestamp_unix = int(timestamp_dt.timestamp())
-        except:
-            timestamp_dt = datetime.now()
-            timestamp_unix = int(timestamp_dt.timestamp())
-        
-        visibility = None
-        if hourly.get('time') and hourly.get('visibility'):
-            try:
-                hourly_times = [datetime.fromisoformat(t.replace('Z', '+00:00')) for t in hourly['time']]
-                current_hour_index = min(range(len(hourly_times)), 
-                                       key=lambda i: abs((hourly_times[i] - timestamp_dt).total_seconds()))
-                visibility = hourly['visibility'][current_hour_index]
-            except:
-                visibility = None
-        
-        doc_id = f"{city}_{timestamp_unix}"
-        
-        weather_code = current.get('weather_code', 0)
-        weather_info = self.map_weather_code(weather_code)
-        
-        data_obj = {
-            "coord": {
-                "lon": coords.get('lon'),
-                "lat": coords.get('lat')
-            },
-            "weather": [{
-                "id": weather_code,
-                "main": weather_info['main'],
-                "description": weather_info['description'],
-                "icon": weather_info['icon']
-            }],
-            "base": "open-meteo",
-            "main": {
-                "temp": current.get('temperature_2m'),
-                "feels_like": current.get('apparent_temperature'),
-                "pressure": current.get('surface_pressure'),
-                "humidity": current.get('relative_humidity_2m'),
-                "sea_level": current.get('pressure_msl')
-            },
-            "visibility": visibility,
-            "wind": {
-                "speed": current.get('wind_speed_10m'),
-                "deg": current.get('wind_direction_10m'),
-                "gust": current.get('wind_gusts_10m')
-            },
-            "rain": current.get('rain'),
-            "showers": current.get('showers'),
-            "snow": current.get('snowfall'),
-            "precipitation": current.get('precipitation'),
-            "clouds": {
-                "all": current.get('cloud_cover')
-            },
-            "is_day": current.get('is_day'),
-            "dt": timestamp_unix,
-            "sys": {
-                "country": "ES"
-            },
-            "timezone": data.get('utc_offset_seconds'),
-            "name": city,
-            "cod": 200,
-        }
-        
-        document = {
-            "_id": doc_id,
+            return datetime.fromtimestamp(int(unix_ts), tz=timezone.utc)
+        except Exception:
+            return datetime.now(tz=timezone.utc)
+
+    def process_message(self, message):
+        """Store raw Open-Meteo payload and a clean current-conditions snapshot."""
+        data = message.value
+
+        city = data.get('city', 'unknown')
+        current = data.get('current', {})
+
+        # --- timestamp (open-meteo returns unix int when timeformat=unixtime) ---
+        timestamp_dt = self._unix_to_datetime(current.get('time', 0))
+        timestamp_unix = int(timestamp_dt.timestamp())
+
+        # -----------------------------------------------------------------------
+        # 1. Save full raw payload to raw_weather
+        # -----------------------------------------------------------------------
+        raw_doc = {
+            "_id": f"{city}_{timestamp_unix}",
             "city": city,
-            "data": data_obj,
+            "fetched_at": datetime.now(tz=timezone.utc),
             "timestamp": timestamp_dt,
-            "processed_at": datetime.now()
+            # store the entire open-meteo response as-is
+            "payload": data,
         }
-        
-        self.collection.replace_one(
-            {"_id": doc_id},
-            document,
+
+        self.raw_collection.replace_one(
+            {"_id": raw_doc["_id"]},
+            raw_doc,
             upsert=True
         )
-        
+
+        # -----------------------------------------------------------------------
+        # 2. Save current-only snapshot to weather_data (used by the API)
+        # -----------------------------------------------------------------------
+        current_doc = {
+            "_id": f"{city}_{timestamp_unix}",
+            "city": city,
+            "timestamp": timestamp_dt,
+            "processed_at": datetime.now(tz=timezone.utc),
+            "data": {
+                "main": {
+                    "temp": current.get('temperature_2m'),
+                    "feels_like": current.get('apparent_temperature'),
+                    "humidity": current.get('relative_humidity_2m'),
+                    "pressure": current.get('surface_pressure'),
+                    "sea_level": current.get('pressure_msl'),
+                    "dew_point": current.get('dew_point_2m'),
+                },
+                "wind": {
+                    "speed": current.get('wind_speed_10m'),
+                    "deg": current.get('wind_direction_10m'),
+                    "gust": current.get('wind_gusts_10m'),
+                },
+                "clouds": {
+                    "all": current.get('cloud_cover'),
+                },
+                "weather": [{
+                    "id": current.get('weather_code'),
+                    "description": _weather_code_description(current.get('weather_code', 0)),
+                }],
+                "precipitation": current.get('precipitation'),
+                "rain": current.get('rain'),
+                "showers": current.get('showers'),
+                "snowfall": current.get('snowfall'),
+                "visibility": current.get('visibility'),
+                "shortwave_radiation": current.get('shortwave_radiation'),
+                "uv_index": current.get('uv_index'),
+                "is_day": current.get('is_day'),
+            },
+            "latitude": data.get('latitude'),
+            "longitude": data.get('longitude'),
+            "utc_offset_seconds": data.get('utc_offset_seconds'),
+            "timezone": data.get('timezone'),
+        }
+
+        self.current_collection.replace_one(
+            {"_id": current_doc["_id"]},
+            current_doc,
+            upsert=True
+        )
+
         temp = current.get('temperature_2m', 'N/A')
-        print(f"Processed: {city} at {timestamp_unix} - Temp: {temp}°C", flush=True)
-        
+        print(f"Stored: {city} @ {timestamp_dt.isoformat()} — {temp} °C", flush=True)
+
     def run(self):
         """Main consumer loop"""
-        print("Starting Weather Consumer for Open-Meteo data...", flush=True)
+        print("Starting Weather Consumer (Open-Meteo → raw_weather + weather_data)...", flush=True)
         for message in self.consumer:
             try:
                 self.process_message(message)
                 self.consumer.commit()
             except Exception as e:
                 print(f"Error processing message: {e}", flush=True)
-                print(f"Message value: {message.value}", flush=True)
+                print(f"Message value keys: {list(message.value.keys())}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _weather_code_description(code: int) -> str:
+    """Return a human-readable description for an Open-Meteo WMO weather code."""
+    descriptions = {
+        0: "clear sky",
+        1: "mainly clear",
+        2: "partly cloudy",
+        3: "overcast",
+        45: "fog",
+        48: "depositing rime fog",
+        51: "light drizzle",
+        53: "moderate drizzle",
+        55: "dense drizzle",
+        61: "slight rain",
+        63: "moderate rain",
+        65: "heavy rain",
+        71: "slight snow",
+        73: "moderate snow",
+        75: "heavy snow",
+        77: "snow grains",
+        80: "slight rain showers",
+        81: "moderate rain showers",
+        82: "violent rain showers",
+        85: "slight snow showers",
+        86: "heavy snow showers",
+        95: "thunderstorm",
+        96: "thunderstorm with slight hail",
+        99: "thunderstorm with heavy hail",
+    }
+    return descriptions.get(code, f"weather code {code}")
+
 
 if __name__ == "__main__":
     consumer = WeatherConsumer()
