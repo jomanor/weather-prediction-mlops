@@ -8,7 +8,13 @@ from contextlib import asynccontextmanager
 import logging
 
 # Pydantic models
-from models import CurrentWeatherResponse, WeatherStatsResponse, HistoricalWeatherResponse
+from models import (
+    CurrentWeatherResponse,
+    WeatherStatsResponse,
+    HistoricalWeatherResponse,
+    WeatherPredictionResponse,
+    LatestPredictionsResponse,
+)
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +44,7 @@ async def lifespan(app: FastAPI):
     db = motor_client['weather_db']
     
     await db.weather_data.create_index([("city", 1), ("timestamp", -1)])
+    await db.weather_predictions.create_index([("city", 1), ("prediction_timestamp", -1)])
     logger.info("Indexes created")
     
     yield 
@@ -64,25 +71,25 @@ async def root():
 
 @app.get("/weather/current/{city}", response_model=CurrentWeatherResponse)
 async def get_current_weather(city: str):
-    
+
     try:
         result = await db.weather_data.find_one(
             {"city": city},
             sort=[("timestamp", -1)]
         )
-        
+
         if not result:
             raise HTTPException(status_code=404, detail=f"City '{city}' not found")
-        
+
         return CurrentWeatherResponse(
             city=result['city'],
-            temperature=result['data']['main']['temp'],
-            feels_like=result['data']['main']['feels_like'],
-            humidity=result['data']['main']['humidity'],
-            pressure=result['data']['main']['pressure'],
-            wind_speed=result['data']['wind']['speed'],
-            description=result['data']['weather'][0]['description'],
-            timestamp=result['timestamp']
+            temperature=result.get('temperature', result.get('data', {}).get('main', {}).get('temp')),
+            feels_like=result.get('feels_like', result.get('data', {}).get('main', {}).get('feels_like')),
+            humidity=result.get('humidity', result.get('data', {}).get('main', {}).get('humidity')),
+            pressure=result.get('pressure', result.get('data', {}).get('main', {}).get('pressure')),
+            wind_speed=result.get('wind_speed', result.get('data', {}).get('wind', {}).get('speed')),
+            description=result.get('description', 'N/A'),
+            timestamp=result['timestamp'],
         )
     except HTTPException:
         raise
@@ -102,7 +109,7 @@ async def get_all_cities():
 
 @app.get("/weather/current", response_model=List[CurrentWeatherResponse])
 async def get_all_current_weather():
-    
+
     try:
         pipeline = [
             {"$sort": {"timestamp": -1}},
@@ -112,22 +119,22 @@ async def get_all_current_weather():
             }},
             {"$replaceRoot": {"newRoot": "$latest"}}
         ]
-        
+
         cursor = db.weather_data.aggregate(pipeline)
         results = []
-        
+
         async for doc in cursor:
             results.append(CurrentWeatherResponse(
                 city=doc['city'],
-                temperature=doc['data']['main']['temp'],
-                feels_like=doc['data']['main']['feels_like'],
-                humidity=doc['data']['main']['humidity'],
-                pressure=doc['data']['main']['pressure'],
-                wind_speed=doc['data']['wind']['speed'],
-                description=doc['data']['weather'][0]['description'],
-                timestamp=doc['timestamp']
+                temperature=doc.get('temperature', doc.get('data', {}).get('main', {}).get('temp')),
+                feels_like=doc.get('feels_like', doc.get('data', {}).get('main', {}).get('feels_like')),
+                humidity=doc.get('humidity', doc.get('data', {}).get('main', {}).get('humidity')),
+                pressure=doc.get('pressure', doc.get('data', {}).get('main', {}).get('pressure')),
+                wind_speed=doc.get('wind_speed', doc.get('data', {}).get('wind', {}).get('speed')),
+                description=doc.get('description', 'N/A'),
+                timestamp=doc['timestamp'],
             ))
-        
+
         return results
     except Exception as e:
         logger.error(f"Error fetching all current weather: {e}")
@@ -153,18 +160,18 @@ async def get_historical_weather(
         }
         
         cursor = db.weather_data.find(query).sort("timestamp", -1).limit(limit)
-        
+
         data = []
         async for doc in cursor:
             data.append(CurrentWeatherResponse(
                 city=doc['city'],
-                temperature=doc['data']['main']['temp'],
-                feels_like=doc['data']['main']['feels_like'],
-                humidity=doc['data']['main']['humidity'],
-                pressure=doc['data']['main']['pressure'],
-                wind_speed=doc['data']['wind']['speed'],
-                description=doc['data']['weather'][0]['description'],
-                timestamp=doc['timestamp']
+                temperature=doc.get('temperature', doc.get('data', {}).get('main', {}).get('temp')),
+                feels_like=doc.get('feels_like', doc.get('data', {}).get('main', {}).get('feels_like')),
+                humidity=doc.get('humidity', doc.get('data', {}).get('main', {}).get('humidity')),
+                pressure=doc.get('pressure', doc.get('data', {}).get('main', {}).get('pressure')),
+                wind_speed=doc.get('wind_speed', doc.get('data', {}).get('wind', {}).get('speed')),
+                description=doc.get('description', 'N/A'),
+                timestamp=doc['timestamp'],
             ))
         
         if not data:
@@ -305,6 +312,80 @@ async def compare_cities(
     except Exception as e:
         logger.error(f"Error comparing cities: {e}")
         raise HTTPException(status_code=500, detail="Failed to compare cities")
+
+# ---------------------------------------------------------------------------
+# Predictions endpoints
+# ---------------------------------------------------------------------------
+
+def _doc_to_prediction(doc: dict) -> WeatherPredictionResponse:
+    """Convert a MongoDB weather_predictions document to the response model."""
+    return WeatherPredictionResponse(
+        city=doc['city'],
+        source_timestamp=doc['source_timestamp'],
+        prediction_timestamp=doc['prediction_timestamp'],
+        predicted_temperature=doc.get('predicted_temperature'),
+        predicted_rain=doc.get('predicted_rain'),
+        observed_temperature=doc.get('observed_temperature'),
+        horizon_hours=doc.get('horizon_hours', 1),
+        temp_model_name=doc.get('temp_model_name'),
+        temp_model_version=doc.get('temp_model_version'),
+        rain_model_name=doc.get('rain_model_name'),
+        rain_model_version=doc.get('rain_model_version'),
+    )
+
+
+@app.get("/predictions/latest", response_model=LatestPredictionsResponse)
+async def get_latest_predictions():
+    """Return the single most-recent prediction for every city."""
+    try:
+        pipeline = [
+            {"$sort": {"prediction_timestamp": -1}},
+            {"$group": {
+                "_id": "$city",
+                "latest": {"$first": "$$ROOT"}
+            }},
+            {"$replaceRoot": {"newRoot": "$latest"}},
+            {"$sort": {"city": 1}},
+        ]
+
+        cursor = db.weather_predictions.aggregate(pipeline)
+        predictions = [_doc_to_prediction(doc) async for doc in cursor]
+
+        return LatestPredictionsResponse(count=len(predictions), predictions=predictions)
+    except Exception as e:
+        logger.error(f"Error fetching latest predictions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch latest predictions")
+
+
+@app.get("/predictions/{city}", response_model=List[WeatherPredictionResponse])
+async def get_predictions_for_city(
+    city: str,
+    limit: int = Query(default=24, ge=1, le=500, description="Maximum number of records to return"),
+):
+    """Return the most recent model predictions for *city*, newest first."""
+    try:
+        cursor = (
+            db.weather_predictions
+            .find({"city": city})
+            .sort("prediction_timestamp", -1)
+            .limit(limit)
+        )
+        results = [_doc_to_prediction(doc) async for doc in cursor]
+
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No predictions found for city '{city}'. "
+                       "Run the inference job (ml_training.py → inference.py) first."
+            )
+
+        return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching predictions for {city}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch predictions")
+
 
 if __name__ == "__main__":
     import uvicorn
