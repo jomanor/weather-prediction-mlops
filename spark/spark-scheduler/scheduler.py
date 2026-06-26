@@ -34,10 +34,8 @@ def run_feature_engineering():
 def run_ml_training():
     run_spark_job("ml_training.py", "ML Training")
 
-# TODO create an inference script
 def run_quick_predictions():
-    logger.info("Running quick predictions...")
-    pass
+    run_spark_job("inference.py", "Quick Predictions")
 
 logger.info("Setting up job schedule...")
 
