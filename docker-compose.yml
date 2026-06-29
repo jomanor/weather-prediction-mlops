@@ -144,16 +144,36 @@ services:
     networks:
       - weather-network
 
+  # MLflow Tracking Server
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.19.0
+    container_name: weather-mlflow
+    command: >
+      mlflow server
+        --backend-store-uri /mlflow/experiments
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    networks:
+      - weather-network
+    restart: unless-stopped
+
   # Spark Scheduler
   spark-scheduler:
     build: ./spark
     container_name: spark-scheduler
     environment:
       MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
       - spark-master
       - spark-worker
       - mongodb
+      - mlflow
     ports:
       - "4040:4040"
     volumes:
@@ -168,6 +188,7 @@ volumes:
   kafka-data:
   spark-logs:
   spark-tmp:
+  mlflow-data:
 
 networks:
   weather-network:
