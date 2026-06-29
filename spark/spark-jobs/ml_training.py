@@ -10,9 +10,12 @@ sys.path.append('/opt/config')
 from spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
 from datetime import datetime
 import os
+import json
 from pymongo import MongoClient
 from gridfs import GridFS
 import shutil
+import mlflow
+import mlflow.spark
 
 def load_features(spark):
 
@@ -105,6 +108,16 @@ def train_temperature_prediction_model(df, horizon=1):
         predictionCol="prediction",
         metricName="rmse"
     )
+    mae_evaluator = RegressionEvaluator(
+        labelCol=target_col,
+        predictionCol="prediction",
+        metricName="mae"
+    )
+    r2_evaluator = RegressionEvaluator(
+        labelCol=target_col,
+        predictionCol="prediction",
+        metricName="r2"
+    )
 
     best_model = None
     best_rmse = float('inf')
@@ -141,9 +154,13 @@ def train_temperature_prediction_model(df, horizon=1):
 
     test_predictions = best_model.transform(test_df)
     test_rmse = evaluator.evaluate(test_predictions)
+    test_mae = mae_evaluator.evaluate(test_predictions)
+    test_r2 = r2_evaluator.evaluate(test_predictions)
 
     print(f"\n=== FINAL TEST SET PERFORMANCE FOR TEMPERATURE MODEL ===")
     print(f"\nTest RMSE: {test_rmse:.4f}")
+    print(f"Test MAE : {test_mae:.4f}")
+    print(f"Test R²  : {test_r2:.4f}")
 
     test_predictions.select(
         "city", "temperature", target_col, "prediction",
@@ -180,7 +197,9 @@ def train_temperature_prediction_model(df, horizon=1):
         for feature, coef in important_features:
             print(f"  {feature}: {coef:.4f}")
 
-    return best_model, best_model_name, important_features
+    return best_model, best_model_name, important_features, {
+        "rmse": test_rmse, "mae": test_mae, "r2": test_r2,
+    }
 
 def train_rain_prediction_model(df, horizon=1):
 
@@ -278,7 +297,58 @@ def train_rain_prediction_model(df, horizon=1):
         reverse=True
     )[:10]
 
-    return best_model, best_model_name, important_features
+    return best_model, best_model_name, important_features, {
+        "auc_roc": test_auc, "auc_pr": test_pr_auc,
+    }
+
+# ---------------------------------------------------------------------------
+# MLflow logging helper
+# ---------------------------------------------------------------------------
+
+def _log_to_mlflow(
+    run_name: str,
+    model_type: str,
+    model_name: str,
+    params: dict,
+    metrics: dict,
+    important_features: list,
+    model,
+    horizon: int,
+):
+    """Log a single training run (temp or rain) to MLflow."""
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(f"weather-{model_type}-prediction")
+
+    with mlflow.start_run(run_name=run_name):
+        # --- params ---
+        mlflow.log_param("model_algorithm", model_name)
+        mlflow.log_param("horizon_hours", horizon)
+        mlflow.log_param("train_ratio", ML_CONFIG['data_split']['train'])
+        mlflow.log_param("cv_folds", ML_CONFIG['cross_validation']['num_folds'])
+        for k, v in params.items():
+            mlflow.log_param(k, v)
+
+        # --- metrics ---
+        for k, v in metrics.items():
+            mlflow.log_metric(k, v)
+
+        # --- feature importance as JSON artifact ---
+        fi_dict = {f: imp for f, imp in important_features}
+        fi_path = f"/tmp/{run_name}_feature_importance.json"
+        with open(fi_path, "w") as fh:
+            json.dump(fi_dict, fh, indent=2)
+        mlflow.log_artifact(fi_path, artifact_path="feature_importance")
+
+        # --- log the Spark PipelineModel ---
+        mlflow.spark.log_model(
+            spark_model=model,
+            artifact_path="model",
+            registered_model_name=f"weather_{model_type}_{horizon}h",
+        )
+
+        print(f"MLflow run '{run_name}' logged successfully.")
+
 
 def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
     
@@ -372,14 +442,36 @@ def main():
 
         print(f"\n=== Training models with {horizon}h prediction horizon ===\n")
 
-        # TODO: Use temp_features and rain_features in dashboard for feature importance visualization
-        temp_model, temp_model_name, temp_features = train_temperature_prediction_model(df, horizon)
-        rain_model, rain_model_name, rain_features = train_rain_prediction_model(df, horizon)
+        temp_model, temp_model_name, temp_features, temp_metrics = train_temperature_prediction_model(df, horizon)
+        rain_model, rain_model_name, rain_features, rain_metrics = train_rain_prediction_model(df, horizon)
 
+        # --- persist to GridFS (used by inference.py) ---
         save_model(temp_model, f"temp_prediction_{horizon}h_{temp_model_name}")
         save_model(rain_model, f"rain_prediction_{horizon}h_{rain_model_name}")
 
-        # TODO: Add also the rain model. MLFlow
+        # --- log to MLflow ---
+        _log_to_mlflow(
+            run_name=f"temp_{temp_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            model_type="temperature",
+            model_name=temp_model_name,
+            params={},
+            metrics=temp_metrics,
+            important_features=temp_features,
+            model=temp_model,
+            horizon=horizon,
+        )
+        _log_to_mlflow(
+            run_name=f"rain_{rain_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            model_type="rain",
+            model_name=rain_model_name,
+            params={},
+            metrics=rain_metrics,
+            important_features=rain_features,
+            model=rain_model,
+            horizon=horizon,
+        )
+
+        # TODO: Add also the rain model.
         create_prediction_batch(spark, temp_model)
 
     except Exception as e:
@@ -387,6 +479,7 @@ def main():
         raise
     finally:
         spark.stop()
+
 
 if __name__ == "__main__":
     main()
