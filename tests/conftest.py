@@ -8,13 +8,12 @@ Mongo tests use mongomock to avoid a real connection.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone
-
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # Spark
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def spark():
@@ -22,8 +21,7 @@ def spark():
     from pyspark.sql import SparkSession
 
     session = (
-        SparkSession.builder
-        .master("local[1]")
+        SparkSession.builder.master("local[1]")
         .appName("weather-unit-tests")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
@@ -38,6 +36,7 @@ def spark():
 # MongoDB mock
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def mock_mongo_client():
     """Return a MagicMock that mimics MongoClient well enough for unit tests."""
@@ -50,6 +49,7 @@ def mock_mongo_client():
 # ---------------------------------------------------------------------------
 # Sample document factories
 # ---------------------------------------------------------------------------
+
 
 def make_open_meteo_message(city: str = "Madrid", unix_ts: int = 1_750_000_000) -> dict:
     """Minimal Open-Meteo-shaped Kafka message value."""

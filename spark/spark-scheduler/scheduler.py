@@ -4,19 +4,21 @@ import subprocess
 import logging
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 
 def run_spark_job(job_file, job_name):
     logger.info(f"Starting {job_name}...")
 
     cmd = [
         "/opt/spark/bin/spark-submit",
-        "--packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0",
-        "--master", "spark://spark-master:7077",
-        f"/opt/spark-jobs/{job_file}"
+        "--packages",
+        "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0",
+        "--master",
+        "spark://spark-master:7077",
+        f"/opt/spark-jobs/{job_file}",
     ]
 
     try:
@@ -28,14 +30,18 @@ def run_spark_job(job_file, job_name):
     except Exception as e:
         logger.error(f"Error running {job_name}: {e}")
 
+
 def run_feature_engineering():
     run_spark_job("batch_processing.py", "Feature Engineering")
+
 
 def run_ml_training():
     run_spark_job("ml_training.py", "ML Training")
 
+
 def run_quick_predictions():
     run_spark_job("inference.py", "Quick Predictions")
+
 
 logger.info("Setting up job schedule...")
 

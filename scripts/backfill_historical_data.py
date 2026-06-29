@@ -40,24 +40,24 @@ from pymongo.errors import BulkWriteError
 # ---------------------------------------------------------------------------
 
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
-REQUEST_DELAY_SECONDS = 0.5   # Be polite to the free API
-BATCH_UPSERT_SIZE = 100       # MongoDB upsert batch size
+REQUEST_DELAY_SECONDS = 0.5  # Be polite to the free API
+BATCH_UPSERT_SIZE = 100  # MongoDB upsert batch size
 
 CITIES = {
-    "El Ejido":  (36.7756, -2.8144),
-    "Almería":   (36.8381, -2.4597),
-    "Granada":   (37.1773, -3.5986),
-    "Paterna":   (39.5028, -0.4408),
-    "Madrid":    (40.4168, -3.7038),
-    "Barcelona": (41.3851,  2.1734),
-    "Valencia":  (39.4699, -0.3763),
-    "Sevilla":   (37.3891, -5.9845),
-    "Zaragoza":  (41.6488, -0.8891),
-    "Malaga":    (36.7213, -4.4214),
-    "Murcia":    (37.9922, -1.1307),
-    "Palma":     (39.5696,  2.6502),
-    "Bilbao":    (43.2630, -2.9350),
-    "Alicante":  (38.3452, -0.4810),
+    "El Ejido": (36.7756, -2.8144),
+    "Almería": (36.8381, -2.4597),
+    "Granada": (37.1773, -3.5986),
+    "Paterna": (39.5028, -0.4408),
+    "Madrid": (40.4168, -3.7038),
+    "Barcelona": (41.3851, 2.1734),
+    "Valencia": (39.4699, -0.3763),
+    "Sevilla": (37.3891, -5.9845),
+    "Zaragoza": (41.6488, -0.8891),
+    "Malaga": (36.7213, -4.4214),
+    "Murcia": (37.9922, -1.1307),
+    "Palma": (39.5696, 2.6502),
+    "Bilbao": (43.2630, -2.9350),
+    "Alicante": (38.3452, -0.4810),
 }
 
 # Hourly variables requested from the historical archive
@@ -100,8 +100,10 @@ PRESSURE_LEVELS = [200, 500, 700, 850, 925, 1000]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def fetch_historical_chunk(city: str, lat: float, lon: float,
-                            start: date, end: date) -> dict | None:
+
+def fetch_historical_chunk(
+    city: str, lat: float, lon: float, start: date, end: date
+) -> dict | None:
     """
     Fetch one city's historical data for [start, end] from Open-Meteo.
     Returns the parsed JSON or None on error.
@@ -126,8 +128,10 @@ def fetch_historical_chunk(city: str, lat: float, lon: float,
             data["city"] = city
             return data
         else:
-            print(f"  [WARN] HTTP {resp.status_code} for {city} "
-                  f"({start} – {end}): {resp.text[:200]}")
+            print(
+                f"  [WARN] HTTP {resp.status_code} for {city} "
+                f"({start} – {end}): {resp.text[:200]}"
+            )
     except Exception as exc:
         print(f"  [ERROR] Request failed for {city}: {exc}")
 
@@ -185,8 +189,7 @@ def build_documents(city: str, payload: dict) -> list[dict]:
                 # Keep a reference to the pressure-level payload for the
                 # upper-air features without duplicating the full timeseries.
                 "hourly_meta": {
-                    k: v for k, v in payload.items()
-                    if k not in ("hourly", "city")
+                    k: v for k, v in payload.items() if k not in ("hourly", "city")
                 },
             },
         }
@@ -200,10 +203,7 @@ def upsert_batch(collection, docs: list[dict]) -> tuple[int, int]:
     if not docs:
         return 0, 0
 
-    ops = [
-        UpdateOne({"_id": d["_id"]}, {"$setOnInsert": d}, upsert=True)
-        for d in docs
-    ]
+    ops = [UpdateOne({"_id": d["_id"]}, {"$setOnInsert": d}, upsert=True) for d in docs]
 
     inserted = 0
     skipped = 0
@@ -223,20 +223,34 @@ def upsert_batch(collection, docs: list[dict]) -> tuple[int, int]:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     today = date.today()
     four_years_ago = date(today.year - 4, today.month, today.day)
     yesterday = today - timedelta(days=1)
 
     parser = argparse.ArgumentParser(description="Backfill historical weather data")
-    parser.add_argument("--start", default=four_years_ago.isoformat(),
-                        help="Start date YYYY-MM-DD (default: 4 years ago)")
-    parser.add_argument("--end", default=yesterday.isoformat(),
-                        help="End date YYYY-MM-DD (default: yesterday)")
-    parser.add_argument("--chunk-days", type=int, default=180,
-                        help="Days per API request chunk (default: 180)")
-    parser.add_argument("--mongo-url", default=os.getenv("MONGO_URL"),
-                        help="MongoDB connection string (or set MONGO_URL env var)")
+    parser.add_argument(
+        "--start",
+        default=four_years_ago.isoformat(),
+        help="Start date YYYY-MM-DD (default: 4 years ago)",
+    )
+    parser.add_argument(
+        "--end",
+        default=yesterday.isoformat(),
+        help="End date YYYY-MM-DD (default: yesterday)",
+    )
+    parser.add_argument(
+        "--chunk-days",
+        type=int,
+        default=180,
+        help="Days per API request chunk (default: 180)",
+    )
+    parser.add_argument(
+        "--mongo-url",
+        default=os.getenv("MONGO_URL"),
+        help="MongoDB connection string (or set MONGO_URL env var)",
+    )
     return parser.parse_args()
 
 
@@ -257,7 +271,7 @@ def main():
     print(f"Backfill range : {start_date} → {end_date}")
     print(f"Cities         : {len(CITIES)}")
     print(f"Chunk size     : {args.chunk_days} days")
-    print(f"MongoDB        : {args.mongo_url.split('@')[-1]}")   # hide credentials
+    print(f"MongoDB        : {args.mongo_url.split('@')[-1]}")  # hide credentials
     print()
 
     client = MongoClient(args.mongo_url)
@@ -293,7 +307,7 @@ def main():
             city_inserted = 0
             city_skipped = 0
             for i in range(0, len(docs), BATCH_UPSERT_SIZE):
-                batch = docs[i:i + BATCH_UPSERT_SIZE]
+                batch = docs[i : i + BATCH_UPSERT_SIZE]
                 ins, skp = upsert_batch(collection, batch)
                 city_inserted += ins
                 city_skipped += skp
@@ -306,7 +320,7 @@ def main():
             time.sleep(REQUEST_DELAY_SECONDS)
 
     print()
-    print(f"Backfill complete.")
+    print("Backfill complete.")
     print(f"  Total inserted : {total_inserted}")
     print(f"  Total skipped  : {total_skipped}")
 

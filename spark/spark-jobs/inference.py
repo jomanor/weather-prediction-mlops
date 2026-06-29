@@ -27,7 +27,6 @@ import sys
 import shutil
 import zipfile
 import logging
-from datetime import datetime
 
 from pymongo import MongoClient
 from gridfs import GridFS
@@ -35,7 +34,7 @@ from gridfs import GridFS
 from pyspark.ml import PipelineModel
 from pyspark.sql import functions as F
 
-sys.path.append('/opt/config')
+sys.path.append("/opt/config")
 from spark_config import create_spark_session, FEATURES_CONFIG
 
 logging.basicConfig(
@@ -93,7 +92,9 @@ def load_latest_model(db, fs, model_name_prefix: str, spark):
 
     try:
         model = PipelineModel.load(local_dir)
-        logger.info("Loaded model '%s' (version %s).", entry["model_name"], entry.get("version"))
+        logger.info(
+            "Loaded model '%s' (version %s).", entry["model_name"], entry.get("version")
+        )
         return model, entry
     finally:
         # Clean up extracted directory; keep nothing on disk
@@ -104,12 +105,12 @@ def load_latest_model(db, fs, model_name_prefix: str, spark):
 # Feature loading
 # ---------------------------------------------------------------------------
 
+
 def load_latest_features(spark, mongo_url: str):
     """Read weather_features from Mongo and return only the most-recent row
     per city (using MAX(timestamp))."""
     df = (
-        spark.read
-        .format("mongodb")
+        spark.read.format("mongodb")
         .option("connection.uri", mongo_url)
         .option("database", "weather_db")
         .option("collection", "weather_features")
@@ -132,20 +133,34 @@ def load_latest_features(spark, mongo_url: str):
 # Prediction
 # ---------------------------------------------------------------------------
 
-def run_inference(spark, temp_model, rain_model, df_features, mongo_url: str,
-                  temp_meta: dict, rain_meta: dict):
+
+def run_inference(
+    spark,
+    temp_model,
+    rain_model,
+    df_features,
+    mongo_url: str,
+    temp_meta: dict,
+    rain_meta: dict,
+):
     """Apply both models to *df_features* and upsert predictions into
     weather_predictions."""
 
     pred_df = df_features
 
     if temp_model is not None:
-        pred_df = temp_model.transform(pred_df).withColumnRenamed("prediction", "predicted_temperature")
+        pred_df = temp_model.transform(pred_df).withColumnRenamed(
+            "prediction", "predicted_temperature"
+        )
     else:
-        pred_df = pred_df.withColumn("predicted_temperature", F.lit(None).cast("double"))
+        pred_df = pred_df.withColumn(
+            "predicted_temperature", F.lit(None).cast("double")
+        )
 
     if rain_model is not None:
-        pred_df = rain_model.transform(pred_df).withColumnRenamed("prediction", "predicted_rain")
+        pred_df = rain_model.transform(pred_df).withColumnRenamed(
+            "prediction", "predicted_rain"
+        )
     else:
         pred_df = pred_df.withColumn("predicted_rain", F.lit(None).cast("double"))
 
@@ -160,22 +175,26 @@ def run_inference(spark, temp_model, rain_model, df_features, mongo_url: str,
         # Include the observed temperature so callers can compute error on-the-fly
         F.col("temperature").alias("observed_temperature"),
         F.lit(horizon).alias("horizon_hours"),
-        F.lit(temp_meta["model_name"] if temp_meta else "unknown").alias("temp_model_name"),
-        F.lit(temp_meta["version"] if temp_meta else "unknown").alias("temp_model_version"),
-        F.lit(rain_meta["model_name"] if rain_meta else "unknown").alias("rain_model_name"),
-        F.lit(rain_meta["version"] if rain_meta else "unknown").alias("rain_model_version"),
+        F.lit(temp_meta["model_name"] if temp_meta else "unknown").alias(
+            "temp_model_name"
+        ),
+        F.lit(temp_meta["version"] if temp_meta else "unknown").alias(
+            "temp_model_version"
+        ),
+        F.lit(rain_meta["model_name"] if rain_meta else "unknown").alias(
+            "rain_model_name"
+        ),
+        F.lit(rain_meta["version"] if rain_meta else "unknown").alias(
+            "rain_model_version"
+        ),
     )
 
     row_count = output.count()
     logger.info("Writing %d prediction rows to weather_predictions…", row_count)
 
-    output.write \
-        .format("mongodb") \
-        .option("connection.uri", mongo_url) \
-        .option("database", "weather_db") \
-        .option("collection", "weather_predictions") \
-        .mode("append") \
-        .save()
+    output.write.format("mongodb").option("connection.uri", mongo_url).option(
+        "database", "weather_db"
+    ).option("collection", "weather_predictions").mode("append").save()
 
     logger.info("Predictions saved successfully.")
     output.show(truncate=False)
@@ -184,6 +203,7 @@ def run_inference(spark, temp_model, rain_model, df_features, mongo_url: str,
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     mongo_url = os.getenv("MONGO_URL")
@@ -213,11 +233,20 @@ def main():
         df_features = load_latest_features(spark, mongo_url)
 
         if df_features.count() == 0:
-            logger.warning("No feature rows found in weather_features. Nothing to predict.")
+            logger.warning(
+                "No feature rows found in weather_features. Nothing to predict."
+            )
             return
 
-        run_inference(spark, temp_model, rain_model, df_features, mongo_url,
-                      temp_meta or {}, rain_meta or {})
+        run_inference(
+            spark,
+            temp_model,
+            rain_model,
+            df_features,
+            mongo_url,
+            temp_meta or {},
+            rain_meta or {},
+        )
 
     except Exception as exc:
         logger.error("Inference job failed: %s", exc)
