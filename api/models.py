@@ -2,20 +2,22 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import List, Optional
 
-
 # ---------------------------------------------------------------------------
 # Internal / legacy raw-format helpers (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
+
 class Coordinates(BaseModel):
     lon: float
     lat: float
+
 
 class Weather(BaseModel):
     id: int
     main: str
     description: str
     icon: str
+
 
 class MainWeather(BaseModel):
     temp: float
@@ -27,13 +29,16 @@ class MainWeather(BaseModel):
     sea_level: Optional[int] = None
     grnd_level: Optional[int] = None
 
+
 class Wind(BaseModel):
     speed: float
     deg: int
     gust: Optional[float] = None
 
+
 class Clouds(BaseModel):
     all: int
+
 
 class Sys(BaseModel):
     country: str
@@ -44,6 +49,7 @@ class Sys(BaseModel):
 # ---------------------------------------------------------------------------
 # Response models for /weather/* endpoints
 # ---------------------------------------------------------------------------
+
 
 class CurrentWeatherResponse(BaseModel):
     city: str
@@ -99,6 +105,7 @@ class CityComparisonResponse(BaseModel):
 # Response models for /predictions/* endpoints
 # ---------------------------------------------------------------------------
 
+
 class WeatherPredictionResponse(BaseModel):
     """A single model-generated forecast record stored in weather_predictions."""
 
@@ -106,9 +113,7 @@ class WeatherPredictionResponse(BaseModel):
     source_timestamp: datetime = Field(
         description="Timestamp of the latest observed features used as input"
     )
-    prediction_timestamp: datetime = Field(
-        description="When the inference job ran"
-    )
+    prediction_timestamp: datetime = Field(description="When the inference job ran")
     predicted_temperature: Optional[float] = Field(
         None, description="Predicted temperature in Celsius (horizon_hours ahead)"
     )
@@ -116,13 +121,22 @@ class WeatherPredictionResponse(BaseModel):
         None, description="Rain probability / binary flag (1 = will rain)"
     )
     observed_temperature: Optional[float] = Field(
-        None, description="Observed temperature at source_timestamp (for error calculation)"
+        None,
+        description="Observed temperature at source_timestamp (for error calculation)",
     )
     horizon_hours: int = Field(description="Forecast horizon in hours")
-    temp_model_name: Optional[str] = Field(None, description="Name of the temperature model used")
-    temp_model_version: Optional[str] = Field(None, description="Version tag of the temperature model")
-    rain_model_name: Optional[str] = Field(None, description="Name of the rain model used")
-    rain_model_version: Optional[str] = Field(None, description="Version tag of the rain model")
+    temp_model_name: Optional[str] = Field(
+        None, description="Name of the temperature model used"
+    )
+    temp_model_version: Optional[str] = Field(
+        None, description="Version tag of the temperature model"
+    )
+    rain_model_name: Optional[str] = Field(
+        None, description="Name of the rain model used"
+    )
+    rain_model_version: Optional[str] = Field(
+        None, description="Version tag of the rain model"
+    )
 
     class Config:
         json_schema_extra = {

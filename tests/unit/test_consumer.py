@@ -9,8 +9,7 @@ We mock KafkaConsumer and MongoClient so no real infrastructure is needed.
 import sys
 import os
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, call
-import pytest
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Path setup — consumer.py lives outside the package root
@@ -25,6 +24,7 @@ sys.path.insert(0, CONSUMER_DIR)
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_consumer(mock_mongo_client):
     """Instantiate WeatherConsumer with all external deps mocked."""
     client, db = mock_mongo_client
@@ -32,12 +32,16 @@ def _make_consumer(mock_mongo_client):
     with (
         patch("consumer.KafkaConsumer"),
         patch("consumer.MongoClient", return_value=client),
-        patch.dict(os.environ, {
-            "KAFKA_BROKER": "localhost:9092",
-            "MONGO_URL": "mongodb://localhost:27017",
-        }),
+        patch.dict(
+            os.environ,
+            {
+                "KAFKA_BROKER": "localhost:9092",
+                "MONGO_URL": "mongodb://localhost:27017",
+            },
+        ),
     ):
         from consumer import WeatherConsumer  # noqa: PLC0415
+
         c = WeatherConsumer()
 
     # Attach the mocks so tests can assert on them
@@ -50,6 +54,7 @@ def _make_consumer(mock_mongo_client):
 # _unix_to_datetime
 # ---------------------------------------------------------------------------
 
+
 class TestUnixToDatetime:
     def test_known_timestamp(self, mock_mongo_client):
         """1_750_000_000 → 2025-06-15 19:26:40 UTC"""
@@ -59,6 +64,7 @@ class TestUnixToDatetime:
             patch.dict(os.environ, {"MONGO_URL": "x", "KAFKA_BROKER": "x"}),
         ):
             from consumer import WeatherConsumer  # noqa: PLC0415
+
             c = WeatherConsumer.__new__(WeatherConsumer)
 
         result = c._unix_to_datetime(1_750_000_000)
@@ -72,6 +78,7 @@ class TestUnixToDatetime:
             patch.dict(os.environ, {"MONGO_URL": "x", "KAFKA_BROKER": "x"}),
         ):
             from consumer import WeatherConsumer  # noqa: PLC0415
+
             c = WeatherConsumer.__new__(WeatherConsumer)
 
         result = c._unix_to_datetime("not-a-number")
@@ -81,6 +88,7 @@ class TestUnixToDatetime:
 # ---------------------------------------------------------------------------
 # process_message — idempotency
 # ---------------------------------------------------------------------------
+
 
 class TestProcessMessage:
     def _make_message(self, city="Madrid", unix_ts=1_750_000_000):
@@ -162,13 +170,16 @@ class TestProcessMessage:
 # _weather_code_description
 # ---------------------------------------------------------------------------
 
+
 class TestWeatherCodeDescription:
     def test_known_code(self):
         from consumer import _weather_code_description  # noqa: PLC0415
+
         assert _weather_code_description(0) == "clear sky"
         assert _weather_code_description(95) == "thunderstorm"
 
     def test_unknown_code(self):
         from consumer import _weather_code_description  # noqa: PLC0415
+
         result = _weather_code_description(999)
         assert "999" in result

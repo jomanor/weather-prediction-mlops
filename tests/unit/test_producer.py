@@ -9,7 +9,6 @@ We mock requests.get and KafkaProducer so no network calls happen.
 import sys
 import os
 from unittest.mock import MagicMock, patch
-import pytest
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -26,12 +25,14 @@ def _make_producer():
         patch.dict(os.environ, {"KAFKA_BROKER": "localhost:9092"}),
     ):
         from producer import WeatherProducer  # noqa: PLC0415
+
         return WeatherProducer()
 
 
 # ---------------------------------------------------------------------------
 # Cities
 # ---------------------------------------------------------------------------
+
 
 class TestCities:
     def test_has_14_cities(self):
@@ -60,6 +61,7 @@ class TestCities:
 # Pressure levels
 # ---------------------------------------------------------------------------
 
+
 class TestPressureLevels:
     def test_has_6_pressure_levels(self):
         p = _make_producer()
@@ -74,6 +76,7 @@ class TestPressureLevels:
 # fetch_weather — request params
 # ---------------------------------------------------------------------------
 
+
 class TestFetchWeather:
     def _mock_response(self, city="Madrid"):
         resp = MagicMock()
@@ -84,16 +87,24 @@ class TestFetchWeather:
     def test_includes_hourly_pressure_level(self):
         """The request must include hourly_pressure_level in params."""
         p = _make_producer()
-        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
+        with patch(
+            "producer.requests.get", return_value=self._mock_response()
+        ) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args
-        params = kwargs.get("params", mock_get.call_args[0][1] if len(mock_get.call_args[0]) > 1 else {})
-        assert "hourly_pressure_level" in params, "hourly_pressure_level must be in API params"
+        params = kwargs.get(
+            "params", mock_get.call_args[0][1] if len(mock_get.call_args[0]) > 1 else {}
+        )
+        assert (
+            "hourly_pressure_level" in params
+        ), "hourly_pressure_level must be in API params"
 
     def test_pressure_level_param_has_6_levels(self):
         p = _make_producer()
-        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
+        with patch(
+            "producer.requests.get", return_value=self._mock_response()
+        ) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args
@@ -117,7 +128,9 @@ class TestFetchWeather:
 
     def test_city_injected_into_response(self):
         p = _make_producer()
-        with patch("producer.requests.get", return_value=self._mock_response("Sevilla")):
+        with patch(
+            "producer.requests.get", return_value=self._mock_response("Sevilla")
+        ):
             result = p.fetch_weather("Sevilla", (37.3891, -5.9845))
         assert result is not None
         assert result["city"] == "Sevilla"
@@ -125,7 +138,9 @@ class TestFetchWeather:
     def test_uses_unixtime_format(self):
         """timeformat must be 'unixtime' so consumer can parse timestamps correctly."""
         p = _make_producer()
-        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
+        with patch(
+            "producer.requests.get", return_value=self._mock_response()
+        ) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args
