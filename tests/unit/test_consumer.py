@@ -6,17 +6,15 @@ Unit tests for kafka/kafka-consumer/consumer.py
 We mock KafkaConsumer and MongoClient so no real infrastructure is needed.
 """
 
-import sys
 import os
+import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Path setup — consumer.py lives outside the package root
 # ---------------------------------------------------------------------------
-CONSUMER_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "kafka", "kafka-consumer"
-)
+CONSUMER_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "kafka", "kafka-consumer")
 sys.path.insert(0, CONSUMER_DIR)
 
 
@@ -147,7 +145,7 @@ class TestProcessMessage:
         assert kwargs.get("upsert") is True
 
     def test_duplicate_message_same_id(self, mock_mongo_client):
-        """Sending the same message twice → replace_one called twice (upsert handles dedup in Mongo)."""
+        """Sending same message twice → replace_one called twice (upsert handles dedup)."""
         c = _make_consumer(mock_mongo_client)
         msg = self._make_message(city="Barcelona", unix_ts=1_750_000_000)
         c.process_message(msg)

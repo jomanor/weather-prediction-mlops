@@ -7,28 +7,26 @@ Uses a local SparkSession (no cluster, no MongoDB).
 All DB read/writes are stubbed out.
 """
 
-import sys
 import os
+import sys
 import unittest.mock as mock
-import pytest
+from datetime import datetime
 
+import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
     DoubleType,
+    StringType,
+    StructField,
+    StructType,
     TimestampType,
 )
-from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Path setup — batch_processing.py imports spark_config from /opt/config
 # We mock that import so we can run offline.
 # ---------------------------------------------------------------------------
-SPARK_JOBS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "spark", "spark-jobs"
-)
+SPARK_JOBS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "spark", "spark-jobs")
 sys.path.insert(0, SPARK_JOBS_DIR)
 
 # Stub spark_config before importing batch_processing
@@ -128,9 +126,7 @@ class TestAddAtmosphericFeatures:
     def test_specific_humidity_no_nulls_for_valid_input(self, sample_df):
         result = bp.add_atmospheric_features(sample_df)
         null_count = result.filter(result["specific_humidity"].isNull()).count()
-        assert (
-            null_count == 0
-        ), "specific_humidity should not be null when inputs are valid"
+        assert null_count == 0, "specific_humidity should not be null when inputs are valid"
 
     def test_specific_humidity_positive(self, sample_df):
         """Specific humidity is a ratio (kg/kg) and must be positive."""
@@ -144,9 +140,7 @@ class TestAddAtmosphericFeatures:
         row = result.select("wind_u", "wind_v").first()
         # 270° → u = -speed * sin(270°) = -speed * (-1) = +speed
         assert row["wind_u"] > 0, "Westerly wind should have positive u component"
-        assert (
-            abs(row["wind_v"]) < 0.5
-        ), "Westerly wind should have v component near zero"
+        assert abs(row["wind_v"]) < 0.5, "Westerly wind should have v component near zero"
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +183,7 @@ class TestCreateTargetVariable:
         from pyspark.sql import functions as F
 
         null_count = result.filter(F.col("target_temp_1h").isNull()).count()
-        assert (
-            null_count >= 1
-        ), "At least one row should have null target (no future data)"
+        assert null_count >= 1, "At least one row should have null target (no future data)"
 
     def test_rain_target_is_binary(self, sample_df):
         """target_will_rain must be 0 or 1 (or null for the last row)."""
@@ -199,8 +191,7 @@ class TestCreateTargetVariable:
 
         result = bp.create_target_variable(sample_df, horizon=1)
         non_binary = result.filter(
-            F.col("target_will_rain_1h").isNotNull()
-            & ~F.col("target_will_rain_1h").isin([0, 1])
+            F.col("target_will_rain_1h").isNotNull() & ~F.col("target_will_rain_1h").isin([0, 1])
         ).count()
         assert non_binary == 0
 

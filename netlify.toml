@@ -1,0 +1,15 @@
+[build]
+  publish = "public"
+  command = "echo 'Netlify build ready'"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Cache-Control = "public, max-age=3600, s-maxage=86400"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://weather-api.onrender.com/:splat"
+  status = 200

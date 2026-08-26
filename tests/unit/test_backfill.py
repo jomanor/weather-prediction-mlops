@@ -9,8 +9,8 @@ We mock requests and MongoClient to verify:
 - HTTP errors are handled gracefully
 """
 
-import sys
 import os
+import sys
 from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ sys.path.insert(0, SCRIPTS_DIR)
 def _import_backfill():
     with patch.dict(os.environ, {"MONGO_URL": "mongodb://localhost:27017"}):
         import importlib
+
         import backfill_historical_data as bh
 
         importlib.reload(bh)

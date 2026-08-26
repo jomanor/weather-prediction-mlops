@@ -71,7 +71,7 @@ services:
         condition: service_started
     environment:
       KAFKA_BROKER: kafka:9092
-      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     restart: unless-stopped
     networks:
       - weather-network
@@ -83,7 +83,7 @@ services:
     ports:
       - 8000:8000
     environment:
-      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     depends_on:
       - mongodb
     restart: unless-stopped
@@ -167,7 +167,7 @@ services:
     build: ./spark
     container_name: spark-scheduler
     environment:
-      MONGO_URL: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
       MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
       - spark-master
@@ -179,6 +179,23 @@ services:
     volumes:
       - spark-tmp:/opt/spark-tmp
       - spark-logs:/opt/spark/spark-events
+    networks:
+      - weather-network
+    restart: unless-stopped
+
+  # Streamlit Dashboard
+  weather-dashboard:
+    build: ./dashboard
+    container_name: weather-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      AEMET_API_KEY: ${AEMET_API_KEY}
+    depends_on:
+      - mongodb
+      - weather-api
     networks:
       - weather-network
     restart: unless-stopped
