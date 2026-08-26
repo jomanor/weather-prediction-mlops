@@ -1,27 +1,29 @@
-from pyspark.sql import functions as F
-from pyspark.ml.feature import VectorAssembler, StandardScaler
-from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor
-from pyspark.ml.classification import RandomForestClassifier, GBTClassifier
-from pyspark.ml.evaluation import RegressionEvaluator, BinaryClassificationEvaluator
-from pyspark.ml import Pipeline
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 import sys
 
+from pyspark.ml import Pipeline
+from pyspark.ml.classification import GBTClassifier, RandomForestClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator, RegressionEvaluator
+from pyspark.ml.feature import StandardScaler, VectorAssembler
+from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.sql import functions as F
+
 sys.path.append("/opt/config")
-from spark_config import create_spark_session, ML_CONFIG, FEATURES_CONFIG
-from datetime import datetime
-import os
 import json
-from pymongo import MongoClient
-from gridfs import GridFS
+import os
 import shutil
+from datetime import datetime
+
 import mlflow
 import mlflow.spark
+from gridfs import GridFS
+from pymongo import MongoClient
+from spark_config import FEATURES_CONFIG, ML_CONFIG, create_spark_session
 
 
 def load_features(spark):
 
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
         spark.read.format("mongodb")
@@ -73,24 +75,18 @@ def train_temperature_prediction_model(df, horizon=1):
     test_ratio = ML_CONFIG["data_split"]["test"]
     seed = ML_CONFIG["data_split"]["seed"]
 
-    train_df, val_df, test_df = df.randomSplit(
-        [train_ratio, val_ratio, test_ratio], seed=seed
-    )
+    train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
 
     print(
-        f"Train size: {train_df.count()}, Validation size: {val_df.count()}, Test size: {test_df.count()}"
+        f"Train size: {train_df.count()}, "
+        f"Validation size: {val_df.count()}, "
+        f"Test size: {test_df.count()}"
     )
 
     models = {
-        "GradientBoostedTrees": GBTRegressor(
-            featuresCol="features", labelCol=target_col
-        ),
-        "RandomForest": RandomForestRegressor(
-            featuresCol="features", labelCol=target_col
-        ),
-        "LinearRegression": LinearRegression(
-            featuresCol="features", labelCol=target_col
-        ),
+        "GradientBoostedTrees": GBTRegressor(featuresCol="features", labelCol=target_col),
+        "RandomForest": RandomForestRegressor(featuresCol="features", labelCol=target_col),
+        "LinearRegression": LinearRegression(featuresCol="features", labelCol=target_col),
     }
 
     param_grids = {
@@ -217,10 +213,7 @@ def train_temperature_prediction_model(df, horizon=1):
         coefficients = model_stage.coefficients.toArray()
 
         important_features = sorted(
-            [
-                (feature_cols[i], abs(float(coef)))
-                for i, coef in enumerate(coefficients)
-            ],
+            [(feature_cols[i], abs(float(coef))) for i, coef in enumerate(coefficients)],
             key=lambda x: x[1],
             reverse=True,
         )[:10]
@@ -252,21 +245,17 @@ def train_rain_prediction_model(df, horizon=1):
     test_ratio = ML_CONFIG["data_split"]["test"]
     seed = ML_CONFIG["data_split"]["seed"]
 
-    train_df, val_df, test_df = df.randomSplit(
-        [train_ratio, val_ratio, test_ratio], seed=seed
-    )
+    train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
 
     print(
-        f"Train size: {train_df.count()}, Validation size: {val_df.count()}, Test size: {test_df.count()}"
+        f"Train size: {train_df.count()}, "
+        f"Validation size: {val_df.count()}, "
+        f"Test size: {test_df.count()}"
     )
 
     models = {
-        "GradientBoostedTrees": GBTClassifier(
-            featuresCol="features", labelCol=target_col
-        ),
-        "RandomForest": RandomForestClassifier(
-            featuresCol="features", labelCol=target_col
-        ),
+        "GradientBoostedTrees": GBTClassifier(featuresCol="features", labelCol=target_col),
+        "RandomForest": RandomForestClassifier(featuresCol="features", labelCol=target_col),
     }
 
     param_grids = {
@@ -349,10 +338,7 @@ def train_rain_prediction_model(df, horizon=1):
     feature_importance = model_stage.featureImportances
 
     important_features = sorted(
-        [
-            (feature_cols[i], float(importance))
-            for i, importance in enumerate(feature_importance)
-        ],
+        [(feature_cols[i], float(importance)) for i, importance in enumerate(feature_importance)],
         key=lambda x: x[1],
         reverse=True,
     )[:10]
@@ -418,24 +404,18 @@ def _log_to_mlflow(
         print(f"MLflow run '{run_name}' logged successfully.")
 
 
-def save_model(
-    model, model_name, db_name="weather_db", metadata_collection="model_registry"
-):
+def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
 
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     temp_dir = "/opt/spark-tmp"
     os.makedirs(temp_dir, exist_ok=True)
 
-    model_dir_path = (
-        f"{temp_dir}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    )
+    model_dir_path = f"{temp_dir}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model_zip_path = f"{model_dir_path}.zip"
 
     try:
         model.write().overwrite().save(model_dir_path)
-        shutil.make_archive(
-            base_name=model_dir_path, format="zip", root_dir=model_dir_path
-        )
+        shutil.make_archive(base_name=model_dir_path, format="zip", root_dir=model_dir_path)
 
         client = MongoClient(mongo_url)
         db = client[db_name]
@@ -473,7 +453,7 @@ def save_model(
 
 def create_prediction_batch(spark, model, collection="weather_predictions"):
 
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
         spark.read.format("mongodb")
@@ -499,11 +479,9 @@ def create_prediction_batch(spark, model, collection="weather_predictions"):
         "temperature",
     )
 
-    predictions_to_save.write.format("mongodb").option(
-        "connection.uri", mongo_url
-    ).option("database", "weather_db").option("collection", collection).mode(
-        "append"
-    ).save()
+    predictions_to_save.write.format("mongodb").option("connection.uri", mongo_url).option(
+        "database", "weather_db"
+    ).option("collection", collection).mode("append").save()
 
     predictions_to_save.show()
 
@@ -522,8 +500,8 @@ def main():
         temp_model, temp_model_name, temp_features, temp_metrics = (
             train_temperature_prediction_model(df, horizon)
         )
-        rain_model, rain_model_name, rain_features, rain_metrics = (
-            train_rain_prediction_model(df, horizon)
+        rain_model, rain_model_name, rain_features, rain_metrics = train_rain_prediction_model(
+            df, horizon
         )
 
         # --- persist to GridFS (used by inference.py) ---

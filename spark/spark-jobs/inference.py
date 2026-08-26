@@ -22,20 +22,19 @@ Design decisions
   for local testing with master="local[*]").
 """
 
-import os
-import sys
-import shutil
-import zipfile
 import logging
+import os
+import shutil
+import sys
+import zipfile
 
-from pymongo import MongoClient
 from gridfs import GridFS
-
+from pymongo import MongoClient
 from pyspark.ml import PipelineModel
 from pyspark.sql import functions as F
 
 sys.path.append("/opt/config")
-from spark_config import create_spark_session, FEATURES_CONFIG
+from spark_config import FEATURES_CONFIG, create_spark_session
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,8 +79,38 @@ def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:
 
 
 def load_latest_model(db, fs, model_name_prefix: str, spark):
-    """Fetch the latest matching model from GridFS and load it as a
+    """Fetch the latest matching model from MLflow Registry or GridFS fallback and load it as a
     PipelineModel. Returns (PipelineModel, metadata_dict) or (None, None)."""
+    mlflow_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if mlflow_uri:
+        try:
+            import mlflow.spark
+
+            mlflow.set_tracking_uri(mlflow_uri)
+            candidate_names = [model_name_prefix]
+            if "temp_prediction" in model_name_prefix:
+                candidate_names.append(
+                    model_name_prefix.replace("temp_prediction", "weather_temperature")
+                )
+            elif "rain_prediction" in model_name_prefix:
+                candidate_names.append(model_name_prefix.replace("rain_prediction", "weather_rain"))
+
+            for cand in candidate_names:
+                for stage in ["Production", "latest", "None"]:
+                    try:
+                        model_uri = f"models:/{cand}/{stage}"
+                        logger.info(
+                            "Attempting to load model '%s' from MLflow Registry...", model_uri
+                        )
+                        model = mlflow.spark.load_model(model_uri)
+                        meta = {"model_name": cand, "version": f"MLflow-{stage}"}
+                        logger.info("Successfully loaded model from MLflow Registry: %s", model_uri)
+                        return model, meta
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.info("MLflow model load skipped/failed (%s), falling back to GridFS...", e)
+
     entry = _latest_model_entry(db, model_name_prefix)
     if entry is None:
         logger.warning("No model found for prefix '%s'. Skipping.", model_name_prefix)
@@ -92,9 +121,7 @@ def load_latest_model(db, fs, model_name_prefix: str, spark):
 
     try:
         model = PipelineModel.load(local_dir)
-        logger.info(
-            "Loaded model '%s' (version %s).", entry["model_name"], entry.get("version")
-        )
+        logger.info("Loaded model '%s' (version %s).", entry["model_name"], entry.get("version"))
         return model, entry
     finally:
         # Clean up extracted directory; keep nothing on disk
@@ -153,14 +180,10 @@ def run_inference(
             "prediction", "predicted_temperature"
         )
     else:
-        pred_df = pred_df.withColumn(
-            "predicted_temperature", F.lit(None).cast("double")
-        )
+        pred_df = pred_df.withColumn("predicted_temperature", F.lit(None).cast("double"))
 
     if rain_model is not None:
-        pred_df = rain_model.transform(pred_df).withColumnRenamed(
-            "prediction", "predicted_rain"
-        )
+        pred_df = rain_model.transform(pred_df).withColumnRenamed("prediction", "predicted_rain")
     else:
         pred_df = pred_df.withColumn("predicted_rain", F.lit(None).cast("double"))
 
@@ -175,18 +198,10 @@ def run_inference(
         # Include the observed temperature so callers can compute error on-the-fly
         F.col("temperature").alias("observed_temperature"),
         F.lit(horizon).alias("horizon_hours"),
-        F.lit(temp_meta["model_name"] if temp_meta else "unknown").alias(
-            "temp_model_name"
-        ),
-        F.lit(temp_meta["version"] if temp_meta else "unknown").alias(
-            "temp_model_version"
-        ),
-        F.lit(rain_meta["model_name"] if rain_meta else "unknown").alias(
-            "rain_model_name"
-        ),
-        F.lit(rain_meta["version"] if rain_meta else "unknown").alias(
-            "rain_model_version"
-        ),
+        F.lit(temp_meta["model_name"] if temp_meta else "unknown").alias("temp_model_name"),
+        F.lit(temp_meta["version"] if temp_meta else "unknown").alias("temp_model_version"),
+        F.lit(rain_meta["model_name"] if rain_meta else "unknown").alias("rain_model_name"),
+        F.lit(rain_meta["version"] if rain_meta else "unknown").alias("rain_model_version"),
     )
 
     row_count = output.count()
@@ -206,9 +221,9 @@ def run_inference(
 
 
 def main():
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     if not mongo_url:
-        raise RuntimeError("MONGO_URL environment variable is not set.")
+        raise RuntimeError("MONGO_URI environment variable is not set.")
 
     spark = create_spark_session("WeatherInference")
 
@@ -233,9 +248,7 @@ def main():
         df_features = load_latest_features(spark, mongo_url)
 
         if df_features.count() == 0:
-            logger.warning(
-                "No feature rows found in weather_features. Nothing to predict."
-            )
+            logger.warning("No feature rows found in weather_features. Nothing to predict.")
             return
 
         run_inference(

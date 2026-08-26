@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
     needs: lint
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +68,11 @@ jobs:
             pymongo \
             requests \
             python-dotenv \
-            mlflow
+            mlflow \
+            httpx \
+            mongomock \
+            fastapi \
+            motor
 
       - name: Run unit tests with coverage
         run: |
@@ -77,6 +81,7 @@ jobs:
             --cov=kafka/kafka-producer \
             --cov=spark/spark-jobs \
             --cov=scripts \
+            --cov=api \
             --cov-report=xml:coverage.xml \
             --cov-report=html:htmlcov \
             -v
@@ -151,6 +156,8 @@ jobs:
             context: api
           - service: spark
             context: spark
+          - service: dashboard
+            context: dashboard
 
     steps:
       - uses: actions/checkout@v4

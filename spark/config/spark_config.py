@@ -1,10 +1,11 @@
-from pyspark.sql import SparkSession
 import os
+
+from pyspark.sql import SparkSession
 
 
 def create_spark_session(app_name="WeatherMLOps"):
 
-    mongo_uri = os.getenv(
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv(
         "MONGO_URL",
         "mongodb://admin:admin123@mongodb:27017/weather_db?authSource=admin",
     )
@@ -13,9 +14,7 @@ def create_spark_session(app_name="WeatherMLOps"):
         SparkSession.builder.appName(app_name)
         .config("spark.mongodb.input.uri", mongo_uri)
         .config("spark.mongodb.output.uri", mongo_uri)
-        .config(
-            "spark.jars.packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0"
-        )
+        .config("spark.jars.packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .getOrCreate()

@@ -6,16 +6,14 @@ Unit tests for kafka/kafka-producer/producer.py
 We mock requests.get and KafkaProducer so no network calls happen.
 """
 
-import sys
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------------
-PRODUCER_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "kafka", "kafka-producer"
-)
+PRODUCER_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "kafka", "kafka-producer")
 sys.path.insert(0, PRODUCER_DIR)
 
 
@@ -87,24 +85,18 @@ class TestFetchWeather:
     def test_includes_hourly_pressure_level(self):
         """The request must include hourly_pressure_level in params."""
         p = _make_producer()
-        with patch(
-            "producer.requests.get", return_value=self._mock_response()
-        ) as mock_get:
+        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args
         params = kwargs.get(
             "params", mock_get.call_args[0][1] if len(mock_get.call_args[0]) > 1 else {}
         )
-        assert (
-            "hourly_pressure_level" in params
-        ), "hourly_pressure_level must be in API params"
+        assert "hourly_pressure_level" in params, "hourly_pressure_level must be in API params"
 
     def test_pressure_level_param_has_6_levels(self):
         p = _make_producer()
-        with patch(
-            "producer.requests.get", return_value=self._mock_response()
-        ) as mock_get:
+        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args
@@ -128,9 +120,7 @@ class TestFetchWeather:
 
     def test_city_injected_into_response(self):
         p = _make_producer()
-        with patch(
-            "producer.requests.get", return_value=self._mock_response("Sevilla")
-        ):
+        with patch("producer.requests.get", return_value=self._mock_response("Sevilla")):
             result = p.fetch_weather("Sevilla", (37.3891, -5.9845))
         assert result is not None
         assert result["city"] == "Sevilla"
@@ -138,9 +128,7 @@ class TestFetchWeather:
     def test_uses_unixtime_format(self):
         """timeformat must be 'unixtime' so consumer can parse timestamps correctly."""
         p = _make_producer()
-        with patch(
-            "producer.requests.get", return_value=self._mock_response()
-        ) as mock_get:
+        with patch("producer.requests.get", return_value=self._mock_response()) as mock_get:
             p.fetch_weather("Madrid", (40.4168, -3.7038))
 
         _, kwargs = mock_get.call_args

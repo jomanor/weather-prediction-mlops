@@ -1,8 +1,10 @@
 import json
-import time
 import os
-from kafka import KafkaProducer
+import time
+
 import requests
+
+from kafka import KafkaProducer
 
 
 class WeatherProducer:

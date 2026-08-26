@@ -7,8 +7,9 @@ All Spark tests use master("local[1]") — no cluster needed in CI.
 Mongo tests use mongomock to avoid a real connection.
 """
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Spark

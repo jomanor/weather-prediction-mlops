@@ -1,8 +1,10 @@
 import json
 import os
 from datetime import datetime, timezone
-from kafka import KafkaConsumer
+
 from pymongo import MongoClient
+
+from kafka import KafkaConsumer
 
 
 class WeatherConsumer:
@@ -16,7 +18,7 @@ class WeatherConsumer:
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
         )
 
-        mongo_url = os.getenv("MONGO_URL")
+        mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
         self.mongo_client = MongoClient(mongo_url)
         self.db = self.mongo_client["weather_db"]
 
@@ -85,9 +87,7 @@ class WeatherConsumer:
                 "weather": [
                     {
                         "id": current.get("weather_code"),
-                        "description": _weather_code_description(
-                            current.get("weather_code", 0)
-                        ),
+                        "description": _weather_code_description(current.get("weather_code", 0)),
                     }
                 ],
                 "precipitation": current.get("precipitation"),
@@ -105,9 +105,7 @@ class WeatherConsumer:
             "timezone": data.get("timezone"),
         }
 
-        self.current_collection.replace_one(
-            {"_id": current_doc["_id"]}, current_doc, upsert=True
-        )
+        self.current_collection.replace_one({"_id": current_doc["_id"]}, current_doc, upsert=True)
 
         temp = current.get("temperature_2m", "N/A")
         print(f"Stored: {city} @ {timestamp_dt.isoformat()} — {temp} °C", flush=True)

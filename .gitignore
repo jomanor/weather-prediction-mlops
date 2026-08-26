@@ -1,10 +1,13 @@
 .venv/
 __pycache__/
 .env
+.env.*
+*.env
 notes.md
 *.nc
 pruebas.py
-pyproject.toml
 uv.lock
 torchcast/
 *.pdf
+# Local Netlify folder
+.netlify

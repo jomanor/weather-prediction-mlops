@@ -16,14 +16,15 @@ Key changes vs the previous version
 - 6-hour rolling precipitation sum
 """
 
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
-from pyspark.sql.types import DoubleType
-import sys
 import os
+import sys
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType
+from pyspark.sql.window import Window
 
 sys.path.append("/opt/config")
-from spark_config import create_spark_session, FEATURES_CONFIG
+from spark_config import FEATURES_CONFIG, create_spark_session
 
 # ---------------------------------------------------------------------------
 # Extraction
@@ -38,7 +39,7 @@ def extract_weather_data(spark):
     follow two slightly different shapes (live vs historical), but both
     expose the relevant fields under payload.current.
     """
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
         spark.read.format("mongodb")
@@ -111,12 +112,8 @@ def add_atmospheric_features(df):
     #   u = -|speed| * sin(dir_rad)
     #   v = -|speed| * cos(dir_rad)
     dir_rad = F.col("wind_direction") * (math.pi / 180.0)
-    df = df.withColumn(
-        "wind_u", (-F.col("wind_speed") * F.sin(dir_rad)).cast(DoubleType())
-    )
-    df = df.withColumn(
-        "wind_v", (-F.col("wind_speed") * F.cos(dir_rad)).cast(DoubleType())
-    )
+    df = df.withColumn("wind_u", (-F.col("wind_speed") * F.sin(dir_rad)).cast(DoubleType()))
+    df = df.withColumn("wind_v", (-F.col("wind_speed") * F.cos(dir_rad)).cast(DoubleType()))
 
     return df
 
@@ -164,9 +161,7 @@ def create_lag_features(df, lag_periods):
         if col_name not in df.columns:
             continue
         for lag in lag_periods:
-            df = df.withColumn(
-                f"{col_name}_lag_{lag}h", F.lag(col_name, lag).over(window_spec)
-            )
+            df = df.withColumn(f"{col_name}_lag_{lag}h", F.lag(col_name, lag).over(window_spec))
 
     return df
 
@@ -196,18 +191,10 @@ def create_rolling_features(df, window_sizes):
         for col_name in rolling_columns:
             if col_name not in df.columns:
                 continue
-            df = df.withColumn(
-                f"{col_name}_mean_{hours}h", F.mean(col_name).over(window_spec)
-            )
-            df = df.withColumn(
-                f"{col_name}_std_{hours}h", F.stddev(col_name).over(window_spec)
-            )
-            df = df.withColumn(
-                f"{col_name}_min_{hours}h", F.min(col_name).over(window_spec)
-            )
-            df = df.withColumn(
-                f"{col_name}_max_{hours}h", F.max(col_name).over(window_spec)
-            )
+            df = df.withColumn(f"{col_name}_mean_{hours}h", F.mean(col_name).over(window_spec))
+            df = df.withColumn(f"{col_name}_std_{hours}h", F.stddev(col_name).over(window_spec))
+            df = df.withColumn(f"{col_name}_min_{hours}h", F.min(col_name).over(window_spec))
+            df = df.withColumn(f"{col_name}_max_{hours}h", F.max(col_name).over(window_spec))
 
     return df
 
@@ -253,9 +240,7 @@ def create_rate_of_change_features(df):
 def create_target_variable(df, horizon=1):
     window_spec = Window.partitionBy("city").orderBy("timestamp")
 
-    df = df.withColumn(
-        f"target_temp_{horizon}h", F.lead("temperature", horizon).over(window_spec)
-    )
+    df = df.withColumn(f"target_temp_{horizon}h", F.lead("temperature", horizon).over(window_spec))
     df = df.withColumn(
         f"target_will_rain_{horizon}h",
         F.when(F.lead("rain", horizon).over(window_spec) > 0, 1).otherwise(0),
@@ -278,7 +263,7 @@ def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
     Deduplication is left to downstream consumers / the training job which
     should select the latest record per city+hour when needed.
     """
-    mongo_url = os.getenv("MONGO_URL")
+    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     print(f"BEFORE dropna: {df.count()} rows")
     df_clean = df.dropna(
@@ -290,7 +275,8 @@ def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
             f"target_temp_{horizon}h",
         ]
     )
-    print(f"AFTER dropna (essential cols): {df_clean.count()} rows")
+    df_clean = df_clean.dropDuplicates(["city", "timestamp"])
+    print(f"AFTER dropna & dropDuplicates: {df_clean.count()} rows")
 
     df_clean.write.format("mongodb").option("connection.uri", mongo_url).option(
         "database", "weather_db"

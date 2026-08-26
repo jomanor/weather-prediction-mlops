@@ -1,19 +1,20 @@
-from fastapi import FastAPI, HTTPException, Query
-from motor.motor_asyncio import AsyncIOMotorClient
-from datetime import datetime, timedelta
-from typing import List
-import os
-from dotenv import load_dotenv
-from contextlib import asynccontextmanager
 import logging
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import List
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
 
 # Pydantic models
 from models import (
     CurrentWeatherResponse,
-    WeatherStatsResponse,
-    WeatherPredictionResponse,
     LatestPredictionsResponse,
+    WeatherPredictionResponse,
+    WeatherStatsResponse,
 )
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +32,7 @@ async def lifespan(app: FastAPI):
 
     global motor_client, db
 
-    mongo_uri = os.getenv("MONGO_URL")
+    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     motor_client = AsyncIOMotorClient(mongo_uri)
 
     try:
@@ -44,9 +45,7 @@ async def lifespan(app: FastAPI):
     db = motor_client["weather_db"]
 
     await db.weather_data.create_index([("city", 1), ("timestamp", -1)])
-    await db.weather_predictions.create_index(
-        [("city", 1), ("prediction_timestamp", -1)]
-    )
+    await db.weather_predictions.create_index([("city", 1), ("prediction_timestamp", -1)])
     logger.info("Indexes created")
 
     yield
@@ -73,9 +72,7 @@ async def root():
 async def get_current_weather(city: str):
 
     try:
-        result = await db.weather_data.find_one(
-            {"city": city}, sort=[("timestamp", -1)]
-        )
+        result = await db.weather_data.find_one({"city": city}, sort=[("timestamp", -1)])
 
         if not result:
             raise HTTPException(status_code=404, detail=f"City '{city}' not found")
@@ -88,12 +85,8 @@ async def get_current_weather(city: str):
             feels_like=result.get(
                 "feels_like", result.get("data", {}).get("main", {}).get("feels_like")
             ),
-            humidity=result.get(
-                "humidity", result.get("data", {}).get("main", {}).get("humidity")
-            ),
-            pressure=result.get(
-                "pressure", result.get("data", {}).get("main", {}).get("pressure")
-            ),
+            humidity=result.get("humidity", result.get("data", {}).get("main", {}).get("humidity")),
+            pressure=result.get("pressure", result.get("data", {}).get("main", {}).get("pressure")),
             wind_speed=result.get(
                 "wind_speed", result.get("data", {}).get("wind", {}).get("speed")
             ),
@@ -171,13 +164,11 @@ async def get_historical_weather(
         le=168,
         description="Hours of historical data (max 168 = 1 week)",
     ),
-    limit: int = Query(
-        default=100, ge=1, le=1000, description="Maximum number of records"
-    ),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of records"),
 ):
 
     try:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours)
 
         query = {"city": city, "timestamp": {"$gte": start_time, "$lte": end_time}}
@@ -230,7 +221,7 @@ async def get_weather_statistics(
 ):
 
     try:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours)
 
         pipeline = [
@@ -243,11 +234,11 @@ async def get_weather_statistics(
             {
                 "$group": {
                     "_id": "$city",
-                    "avg_temp": {"$avg": "$data.main.temp"},
-                    "min_temp": {"$min": "$data.main.temp"},
-                    "max_temp": {"$max": "$data.main.temp"},
-                    "avg_humidity": {"$avg": "$data.main.humidity"},
-                    "avg_pressure": {"$avg": "$data.main.pressure"},
+                    "avg_temp": {"$avg": {"$ifNull": ["$temperature", "$data.main.temp"]}},
+                    "min_temp": {"$min": {"$ifNull": ["$temperature", "$data.main.temp"]}},
+                    "max_temp": {"$max": {"$ifNull": ["$temperature", "$data.main.temp"]}},
+                    "avg_humidity": {"$avg": {"$ifNull": ["$humidity", "$data.main.humidity"]}},
+                    "avg_pressure": {"$avg": {"$ifNull": ["$pressure", "$data.main.pressure"]}},
                     "count": {"$sum": 1},
                     "start_time": {"$min": "$timestamp"},
                     "end_time": {"$max": "$timestamp"},
@@ -259,9 +250,7 @@ async def get_weather_statistics(
         result = await cursor.to_list(1)
 
         if not result:
-            raise HTTPException(
-                status_code=404, detail=f"No data found for city '{city}'"
-            )
+            raise HTTPException(status_code=404, detail=f"No data found for city '{city}'")
 
         stats = result[0]
         return WeatherStatsResponse(
@@ -299,7 +288,7 @@ async def compare_cities(
                 status_code=400, detail="Please provide at least 2 cities to compare"
             )
 
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=hours)
 
         comparisons = []
@@ -315,10 +304,12 @@ async def compare_cities(
                 {
                     "$group": {
                         "_id": "$city",
-                        "avg_temp": {"$avg": "$data.main.temp"},
-                        "avg_humidity": {"$avg": "$data.main.humidity"},
-                        "avg_pressure": {"$avg": "$data.main.pressure"},
-                        "avg_wind_speed": {"$avg": "$data.wind.speed"},
+                        "avg_temp": {"$avg": {"$ifNull": ["$temperature", "$data.main.temp"]}},
+                        "avg_humidity": {"$avg": {"$ifNull": ["$humidity", "$data.main.humidity"]}},
+                        "avg_pressure": {"$avg": {"$ifNull": ["$pressure", "$data.main.pressure"]}},
+                        "avg_wind_speed": {
+                            "$avg": {"$ifNull": ["$wind_speed", "$data.wind.speed"]}
+                        },
                         "count": {"$sum": 1},
                     }
                 },
@@ -341,9 +332,7 @@ async def compare_cities(
                 )
 
         if not comparisons:
-            raise HTTPException(
-                status_code=404, detail="No data found for specified cities"
-            )
+            raise HTTPException(status_code=404, detail="No data found for specified cities")
 
         comparisons.sort(key=lambda x: x["avg_temperature"], reverse=True)
 
@@ -395,22 +384,16 @@ async def get_latest_predictions():
         cursor = db.weather_predictions.aggregate(pipeline)
         predictions = [_doc_to_prediction(doc) async for doc in cursor]
 
-        return LatestPredictionsResponse(
-            count=len(predictions), predictions=predictions
-        )
+        return LatestPredictionsResponse(count=len(predictions), predictions=predictions)
     except Exception as e:
         logger.error(f"Error fetching latest predictions: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to fetch latest predictions"
-        )
+        raise HTTPException(status_code=500, detail="Failed to fetch latest predictions")
 
 
 @app.get("/predictions/{city}", response_model=List[WeatherPredictionResponse])
 async def get_predictions_for_city(
     city: str,
-    limit: int = Query(
-        default=24, ge=1, le=500, description="Maximum number of records to return"
-    ),
+    limit: int = Query(default=24, ge=1, le=500, description="Maximum number of records to return"),
 ):
     """Return the most recent model predictions for *city*, newest first."""
     try:

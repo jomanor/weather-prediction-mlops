@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Internal / legacy raw-format helpers (kept for backward compatibility)
@@ -61,8 +62,8 @@ class CurrentWeatherResponse(BaseModel):
     description: str = Field(description="Weather description")
     timestamp: datetime = Field(description="Measurement timestamp")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "city": "Madrid",
                 "temperature": 22.75,
@@ -74,6 +75,7 @@ class CurrentWeatherResponse(BaseModel):
                 "timestamp": "2025-01-23T16:21:09Z",
             }
         }
+    )
 
 
 class WeatherStatsResponse(BaseModel):
@@ -125,21 +127,15 @@ class WeatherPredictionResponse(BaseModel):
         description="Observed temperature at source_timestamp (for error calculation)",
     )
     horizon_hours: int = Field(description="Forecast horizon in hours")
-    temp_model_name: Optional[str] = Field(
-        None, description="Name of the temperature model used"
-    )
+    temp_model_name: Optional[str] = Field(None, description="Name of the temperature model used")
     temp_model_version: Optional[str] = Field(
         None, description="Version tag of the temperature model"
     )
-    rain_model_name: Optional[str] = Field(
-        None, description="Name of the rain model used"
-    )
-    rain_model_version: Optional[str] = Field(
-        None, description="Version tag of the rain model"
-    )
+    rain_model_name: Optional[str] = Field(None, description="Name of the rain model used")
+    rain_model_version: Optional[str] = Field(None, description="Version tag of the rain model")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "city": "Madrid",
                 "source_timestamp": "2025-06-26T12:00:00Z",
@@ -154,6 +150,7 @@ class WeatherPredictionResponse(BaseModel):
                 "rain_model_version": "20250626_120000",
             }
         }
+    )
 
 
 class LatestPredictionsResponse(BaseModel):

@@ -188,9 +188,7 @@ def build_documents(city: str, payload: dict) -> list[dict]:
                 },
                 # Keep a reference to the pressure-level payload for the
                 # upper-air features without duplicating the full timeseries.
-                "hourly_meta": {
-                    k: v for k, v in payload.items() if k not in ("hourly", "city")
-                },
+                "hourly_meta": {k: v for k, v in payload.items() if k not in ("hourly", "city")},
             },
         }
         docs.append(doc)
@@ -246,10 +244,16 @@ def parse_args():
         default=180,
         help="Days per API request chunk (default: 180)",
     )
+    default_mongo = os.getenv("MONGO_URI") or os.getenv(
+        "MONGO_URL", "mongodb://admin:weatherpass123@localhost:27017/weather_db?authSource=admin"
+    )
+    if "@mongodb:27017" in default_mongo and not os.path.exists("/.dockerenv"):
+        default_mongo = default_mongo.replace("@mongodb:27017", "@localhost:27017")
+
     parser.add_argument(
         "--mongo-url",
-        default=os.getenv("MONGO_URL"),
-        help="MongoDB connection string (or set MONGO_URL env var)",
+        default=default_mongo,
+        help="MongoDB connection string (or set MONGO_URI env var)",
     )
     return parser.parse_args()
 
@@ -258,7 +262,7 @@ def main():
     args = parse_args()
 
     if not args.mongo_url:
-        print("[ERROR] MONGO_URL is not set. Pass --mongo-url or export the env var.")
+        print("[ERROR] MONGO_URI is not set. Pass --mongo-url or export the env var.")
         sys.exit(1)
 
     start_date = date.fromisoformat(args.start)
