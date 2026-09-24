@@ -12,7 +12,7 @@ services:
     name: meteoml-api
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./
+    dockerContext: ./backend
     plan: free
     healthCheckPath: /api/health
     autoDeploy: true
