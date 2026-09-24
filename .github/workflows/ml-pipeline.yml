@@ -1,0 +1,140 @@
+name: ML pipeline
+
+# The Spark loop that keeps Atlas fed. Locally it runs from
+# spark/spark-scheduler/scheduler.py inside docker compose, but the deployed
+# Render instance cannot host it — the worker alone asks for 2 GB against the
+# free plan's 512 MB. GitHub's runners give us Python 3.11 and Java 17 for
+# free, so the same three jobs run here on the scheduler's cadence.
+#
+# Requires a repository secret named MONGO_URI holding the Atlas connection
+# string (Settings -> Secrets and variables -> Actions).
+#
+# Note: `schedule` only fires from the repository's default branch. Until this
+# file lands on main, runs have to be started by hand with workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "5 * * * *" # hourly   - score the latest features
+    - cron: "20 */6 * * *" # 6-hourly - rebuild the feature table
+    - cron: "35 2 * * *" # nightly  - retrain and publish new models
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Stage to run
+        type: choice
+        default: all
+        options:
+          - all
+          - features
+          - train
+          - inference
+
+concurrency:
+  group: ml-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Decide stages
+    runs-on: ubuntu-latest
+    outputs:
+      features: ${{ steps.pick.outputs.features }}
+      train: ${{ steps.pick.outputs.train }}
+      inference: ${{ steps.pick.outputs.inference }}
+    steps:
+      - id: pick
+        name: Map trigger to stages
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          JOB: ${{ inputs.job }}
+        run: |
+          set -euo pipefail
+          features=0; train=0; inference=0
+          case "${SCHEDULE:-}" in
+            "5 * * * *")    inference=1 ;;
+            "20 */6 * * *") features=1 ;;
+            "35 2 * * *")   train=1 ;;
+            *)
+              # Manual run (schedule is empty) or an unrecognised trigger.
+              case "${JOB:-all}" in
+                features)  features=1 ;;
+                train)     train=1 ;;
+                inference) inference=1 ;;
+                *)         features=1; train=1; inference=1 ;;
+              esac
+              ;;
+          esac
+          {
+            echo "features=$features"
+            echo "train=$train"
+            echo "inference=$inference"
+          } >> "$GITHUB_OUTPUT"
+
+  pipeline:
+    name: Run Spark jobs
+    needs: resolve
+    if: needs.resolve.outputs.features == '1' || needs.resolve.outputs.train == '1' || needs.resolve.outputs.inference == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+      # There is no MLflow server on a runner, and ml_training falls back to
+      # http://localhost:5000, where start_run() would hang and fail the job.
+      # Log to a throwaway local store instead; the models themselves go to GridFS.
+      MLFLOW_TRACKING_URI: file://${{ github.workspace }}/mlruns
+      # The jobs import spark_config, which lives at /opt/config inside the
+      # image. Outside it, put spark/config on the path.
+      PYTHONPATH: ${{ github.workspace }}/spark/config
+      # Both jobs default their scratch dir to /opt/spark-tmp, which the runner
+      # user cannot create.
+      SPARK_TMP_DIR: ${{ runner.temp }}/spark-tmp
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for the MONGO_URI secret
+        run: |
+          if [ -z "${MONGO_URI}" ]; then
+            echo "::error title=Missing secret::Set MONGO_URI (the Atlas connection string) under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            spark/requirements.txt
+            spark/spark-scheduler/requirements.txt
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r spark/requirements.txt -r spark/spark-scheduler/requirements.txt
+          # pyspark is not in requirements.txt because the docker image already
+          # ships Spark; mlflow is pinned to the version docker compose runs.
+          pip install pyspark==3.5.5 mlflow==2.19.0
+
+      - name: Feature engineering
+        if: needs.resolve.outputs.features == '1'
+        run: python spark/spark-jobs/batch_processing.py
+
+      - name: Train models
+        if: needs.resolve.outputs.train == '1'
+        run: python spark/spark-jobs/ml_training.py
+
+      - name: Prune old model artifacts
+        if: needs.resolve.outputs.train == '1'
+        run: python scripts/prune_models.py
+
+      - name: Score latest features
+        if: needs.resolve.outputs.inference == '1'
+        run: python spark/spark-jobs/inference.py

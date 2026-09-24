@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-TMP_DIR = "/opt/spark-tmp/inference"
+TMP_DIR = os.path.join(os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp"), "inference")
 
 
 def _latest_model_entry(db, model_name_prefix: str) -> dict | None:
