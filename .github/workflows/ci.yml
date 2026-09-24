@@ -136,12 +136,13 @@ jobs:
         run: |
           pip install \
             pytest \
+            pytest-asyncio \
             pyspark==3.5.5 \
             kafka-python \
             pymongo \
             requests \
             python-dotenv \
-            "testcontainers[kafka,mongodb]"
+            mongomock
       - name: Run integration tests
         run: pytest tests/integration/ -q
         env:
