@@ -11,3 +11,5 @@ torchcast/
 *.pdf
 # Local Netlify folder
 .netlify
+.pytest_cache
+.ruff_cache
