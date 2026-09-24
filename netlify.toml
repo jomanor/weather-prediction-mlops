@@ -25,7 +25,7 @@
 # different subdomain, update it here (one line) and push.
 [[redirects]]
   from = "/api/*"
-  to = "https://meteoml-api.onrender.com/api/:splat"
+  to = "https://weather-prediction-mlops.onrender.com/api/:splat"
   status = 200
   force = true
 
