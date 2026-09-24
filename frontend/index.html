@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="Red meteorológica y plataforma de modelos predictivos: observaciones, Spark GBT y benchmarking contra AEMET."
+    />
+    <title>MeteoML · Red meteorológica y modelos predictivos</title>
+    <script>
+      // Resolve the stored theme before first paint to avoid a flash.
+      ;(() => {
+        try {
+          const stored = localStorage.getItem('meteoml.theme')
+          const dark =
+            stored === 'dark' ||
+            ((!stored || stored === 'system') &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+        } catch {
+          /* private mode: keep the default dark class */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

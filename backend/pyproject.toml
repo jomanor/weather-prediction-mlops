@@ -1,16 +1,8 @@
-[project]
-name = "weather-prediction-mlops"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = [
-    "netcdf4>=1.7.3",
-    "xarray>=2025.10.1",
-]
-
+# Tooling only: dependencies are pinned in requirements.txt.
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = [".venv", "__pycache__"]
+extend-exclude = ["__pycache__"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -20,7 +12,8 @@ line-length = 100
 target-version = ["py311"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "backend/tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 asyncio_mode = "auto"
-
+filterwarnings = ["error::DeprecationWarning"]
