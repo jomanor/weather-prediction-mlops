@@ -1,0 +1,38 @@
+# Render blueprint for the FastAPI backend.
+#
+# Import: Render dashboard -> New + -> Blueprint -> pick this repository.
+# Render reads this file and offers the service below; env vars marked
+# sync:false are prompted for on import and stored as secrets.
+#
+# Free instance type sleeps after ~15 min idle (~30-60 s cold start) and
+# shares one 750 h/month pool across all free services on the account.
+
+services:
+  - type: web
+    name: meteoml-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Paste the SRV URI of your Atlas cluster here on import.
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: weather_db
+      # AEMET OpenData bearer key; get a fresh one at aemet.es if needed.
+      - key: AEMET_API_KEY
+        sync: false
+      # The SPA reaches the API through the Netlify edge proxy, so the
+      # browser only ever talks to its own origin; the Netlify domain is
+      # listed anyway so direct browser calls to Render also pass CORS.
+      - key: CORS_ORIGINS
+        value: https://weather-mlops-1787759329.netlify.app,http://localhost:5173,http://localhost:8080
+      - key: AEMET_TIMEOUT_SECONDS
+        value: "8"
+      - key: AEMET_RETRIES
+        value: "3"
+      - key: AEMET_CACHE_TTL_SECONDS
+        value: "900"

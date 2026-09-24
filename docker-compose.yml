@@ -54,8 +54,11 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      mongodb:
+        condition: service_started
     environment:
       KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     restart: unless-stopped
     networks:
       - weather-network
@@ -76,14 +79,16 @@ services:
     networks:
       - weather-network
 
-  # Fastapi API
+  # FastAPI backend
   weather-api:
-    build: ./api
+    build: ./backend
     container_name: weather-api
     ports:
       - 8000:8000
     environment:
       MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
+      CORS_ORIGINS: http://localhost:8080,http://localhost:5173
+      AEMET_API_KEY: ${AEMET_API_KEY}
     depends_on:
       - mongodb
     restart: unless-stopped
@@ -183,18 +188,13 @@ services:
       - weather-network
     restart: unless-stopped
 
-  # Streamlit Dashboard
-  weather-dashboard:
-    build: ./dashboard
-    container_name: weather-dashboard
+  # React frontend (built static assets served by nginx, proxies /api)
+  weather-frontend:
+    build: ./frontend
+    container_name: weather-frontend
     ports:
-      - "8501:8501"
-    environment:
-      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      AEMET_API_KEY: ${AEMET_API_KEY}
+      - "8080:80"
     depends_on:
-      - mongodb
       - weather-api
     networks:
       - weather-network

@@ -3,8 +3,29 @@ import os
 import time
 
 import requests
+from pymongo import MongoClient
 
 from kafka import KafkaProducer
+
+#: Fallback stations, used verbatim when the Mongo registry is unreachable or empty.
+FALLBACK_CITIES = {
+    "El Ejido": (36.7756, -2.8144),
+    "Almería": (36.8381, -2.4597),
+    "Granada": (37.1773, -3.5986),
+    "Paterna": (39.5028, -0.4408),
+    "Madrid": (40.4168, -3.7038),
+    "Barcelona": (41.3851, 2.1734),
+    "Valencia": (39.4699, -0.3763),
+    "Sevilla": (37.3891, -5.9845),
+    "Zaragoza": (41.6488, -0.8891),
+    "Malaga": (36.7213, -4.4214),
+    "Murcia": (37.9922, -1.1307),
+    "Palma": (39.5696, 2.6502),
+    "Bilbao": (43.2630, -2.9350),
+    "Alicante": (38.3452, -0.4810),
+}
+
+MONGO_DB = "weather_db"
 
 
 class WeatherProducer:
@@ -14,25 +35,49 @@ class WeatherProducer:
             value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         )
 
-        self.cities = {
-            "El Ejido": (36.7756, -2.8144),
-            "Almería": (36.8381, -2.4597),
-            "Granada": (37.1773, -3.5986),
-            "Paterna": (39.5028, -0.4408),
-            "Madrid": (40.4168, -3.7038),
-            "Barcelona": (41.3851, 2.1734),
-            "Valencia": (39.4699, -0.3763),
-            "Sevilla": (37.3891, -5.9845),
-            "Zaragoza": (41.6488, -0.8891),
-            "Malaga": (36.7213, -4.4214),
-            "Murcia": (37.9922, -1.1307),
-            "Palma": (39.5696, 2.6502),
-            "Bilbao": (43.2630, -2.9350),
-            "Alicante": (38.3452, -0.4810),
-        }
+        self.cities = self.load_cities()
 
         # Pressure levels for upper-air atmospheric variables
         self.pressure_levels = [200, 500, 700, 850, 925, 1000]
+
+    def load_cities(self):
+        """Station registry from Mongo; the built-in defaults as a fallback.
+
+        The API owns the ``cities`` collection and seeds it with the same 14
+        stations. Any failure here must not stop ingestion, so it degrades to
+        ``FALLBACK_CITIES`` and reports which source was used.
+        """
+        fallback = dict(FALLBACK_CITIES)
+        uri = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
+        if not uri:
+            print(
+                "Cities source: built-in defaults (MONGO_URI/MONGO_URL not set)",
+                flush=True,
+            )
+            return fallback
+
+        try:
+            with MongoClient(uri, serverSelectionTimeoutMS=5000) as client:
+                docs = list(
+                    client[MONGO_DB].cities.find({}, {"name": 1, "latitude": 1, "longitude": 1})
+                )
+        except Exception as e:
+            print(f"Cities source: built-in defaults (Mongo unavailable: {e})", flush=True)
+            return fallback
+
+        cities = {
+            doc["name"]: (float(doc["latitude"]), float(doc["longitude"]))
+            for doc in docs
+            if doc.get("name")
+            and doc.get("latitude") is not None
+            and doc.get("longitude") is not None
+        }
+        if not cities:
+            print("Cities source: built-in defaults (cities collection empty)", flush=True)
+            return fallback
+
+        print(f"Cities source: Mongo registry ({len(cities)} stations)", flush=True)
+        return cities
 
     def fetch_weather(self, city, coords):
         """Fetch real-time weather data from Open-Meteo API (current + hourly + pressure levels)"""
@@ -125,7 +170,7 @@ class WeatherProducer:
                 if data:
                     self.producer.send("weather-data", value=data)
                     current = data.get("current", {})
-                    print(f"{'='*60}", flush=True)
+                    print(f"{'=' * 60}", flush=True)
                     print(f"Sent data for {city}", flush=True)
                     print(
                         f"  Temperature : {current.get('temperature_2m')} °C",
@@ -143,7 +188,7 @@ class WeatherProducer:
                         f"  Hourly rows : {len(data.get('hourly', {}).get('time', []))}",
                         flush=True,
                     )
-                    print(f"{'='*60}\n", flush=True)
+                    print(f"{'=' * 60}\n", flush=True)
                 else:
                     print(f"✗ Failed to fetch data for {city}", flush=True)
 
