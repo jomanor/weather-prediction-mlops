@@ -90,7 +90,9 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/spark/config
       # Both jobs default their scratch dir to /opt/spark-tmp, which the runner
       # user cannot create.
-      SPARK_TMP_DIR: ${{ runner.temp }}/spark-tmp
+      # `runner` is not a valid context in a job-level env block; the
+      # workspace is writable and thrown away with the runner.
+      SPARK_TMP_DIR: ${{ github.workspace }}/.spark-tmp
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
