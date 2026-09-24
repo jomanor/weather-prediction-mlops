@@ -21,9 +21,11 @@
     Permissions-Policy = "geolocation=(), camera=(), microphone=()"
 
 # Edge proxy: the SPA talks to the same origin, the edge forwards to FastAPI.
+# This URL matches the service name in render.yaml; if Render assigns a
+# different subdomain, update it here (one line) and push.
 [[redirects]]
   from = "/api/*"
-  to = "https://weather-api.onrender.com/api/:splat"
+  to = "https://meteoml-api.onrender.com/api/:splat"
   status = 200
   force = true
 
