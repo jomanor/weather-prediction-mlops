@@ -26,9 +26,10 @@ services:
       - key: AEMET_API_KEY
         sync: false
       # The SPA reaches the API through the Netlify edge proxy, so the
-      # browser only ever talks to its own origin; CORS stays lenient.
+      # browser only ever talks to its own origin; the Netlify domain is
+      # listed anyway so direct browser calls to Render also pass CORS.
       - key: CORS_ORIGINS
-        value: http://localhost:5173,http://localhost:8080
+        value: https://weather-mlops-1787759329.netlify.app,http://localhost:5173,http://localhost:8080
       - key: AEMET_TIMEOUT_SECONDS
         value: "8"
       - key: AEMET_RETRIES
