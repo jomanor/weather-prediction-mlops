@@ -130,3 +130,17 @@ export function normalise(value: number, min: number, max: number): number {
   if (max === min) return 0.5
   return clamp((value - min) / (max - min), 0, 1)
 }
+
+/** "40,47° N" / "3,56° S" — ISO 6709 hemisphere letters (mono-safe, unambiguous). */
+export function formatLatitude(value: number | null | undefined, digits = 2): string {
+  if (!isNum(value)) return EMPTY
+  const hemisphere = value >= 0 ? 'N' : 'S'
+  return `${fixed(Math.abs(value), digits)}° ${hemisphere}`
+}
+
+/** "3,56° E" / "0,48° W" — ISO 6709 hemisphere letters. */
+export function formatLongitude(value: number | null | undefined, digits = 2): string {
+  if (!isNum(value)) return EMPTY
+  const hemisphere = value >= 0 ? 'E' : 'W'
+  return `${fixed(Math.abs(value), digits)}° ${hemisphere}`
+}

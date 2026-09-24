@@ -1,5 +1,5 @@
 import { RefreshCw } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { useCities, useCurrentWeather, useHistory, usePredictions } from '@/api/queries'
@@ -26,7 +26,8 @@ const RANGES = [
 export function StationPage() {
   const [params, setParams] = useSearchParams()
   const { palette } = usePreferences()
-  const { data: cities } = useCities()
+  const { data: cityList } = useCities()
+  const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
   const [hours, setHours] = useState(48)
 
   const city = params.get('city') ?? cities?.[0] ?? ''
@@ -43,7 +44,6 @@ export function StationPage() {
   return (
     <div className="space-y-5 pb-8">
       <PageHeader
-        eyebrow="Estación"
         title={city || 'Selecciona una estación'}
         description="Condiciones observadas, evolución reciente y última predicción del modelo para la estación seleccionada."
         actions={
@@ -55,7 +55,7 @@ export function StationPage() {
               id="station-select"
               value={city}
               onChange={(event) => selectCity(event.target.value)}
-              className="h-9 rounded-md border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
+              className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
             >
               {(cities ?? []).map((option) => (
                 <option key={option} value={option}>

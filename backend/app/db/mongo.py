@@ -25,6 +25,11 @@ INDEXES: dict[str, list[list[tuple[str, int]]]] = {
     "model_registry": [[("model_name", 1), ("timestamp", -1)]],
 }
 
+# collection -> list of index specs that must also be unique
+UNIQUE_INDEXES: dict[str, list[list[tuple[str, int]]]] = {
+    "cities": [[("name_key", 1)]],
+}
+
 
 def create_client(settings: Settings) -> AsyncIOMotorClient:
     """Create the Motor client. ``tz_aware`` guarantees UTC-aware datetimes."""
@@ -43,7 +48,13 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     for collection, specs in INDEXES.items():
         for spec in specs:
             await db[collection].create_index(spec)
-    logger.info("MongoDB indexes ensured for %s", ", ".join(sorted(INDEXES)))
+    for collection, specs in UNIQUE_INDEXES.items():
+        for spec in specs:
+            await db[collection].create_index(spec, unique=True)
+    logger.info(
+        "MongoDB indexes ensured for %s",
+        ", ".join(sorted(set(INDEXES) | set(UNIQUE_INDEXES))),
+    )
 
 
 def get_client(request: Request) -> AsyncIOMotorClient:

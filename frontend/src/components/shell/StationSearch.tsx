@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { useCities } from '@/api/queries'
+import type { City } from '@/api/schemas'
 import { cn } from '@/lib/cn'
 
 /** Command-palette style station lookup over the cities the backend knows. */
@@ -19,7 +20,7 @@ export function StationSearch() {
     const term = query.trim().toLowerCase()
     const list = cities ?? []
     if (!term) return list.slice(0, 8)
-    return list.filter((city) => city.toLowerCase().includes(term)).slice(0, 8)
+    return list.filter((city) => city.name.toLowerCase().includes(term)).slice(0, 8)
   }, [cities, query])
 
   useEffect(() => setHighlight(0), [query])
@@ -43,10 +44,10 @@ export function StationSearch() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  const choose = (city: string) => {
+  const choose = (city: City) => {
     setQuery('')
     setOpen(false)
-    navigate(`/stations?city=${encodeURIComponent(city)}`)
+    navigate(`/stations?city=${encodeURIComponent(city.name)}`)
   }
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -86,7 +87,7 @@ export function StationSearch() {
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
         className={cn(
-          'h-8 w-full rounded-md border border-line bg-panel-2 pl-8 pr-7 text-xs text-fg',
+          'h-8 w-full rounded-[3px] border border-line bg-panel pl-8 pr-7 text-xs text-fg focus:border-accent focus:bg-panel-2 focus:outline-none',
           'placeholder:text-fg-3 focus:border-accent focus:outline-none',
         )}
       />
@@ -108,10 +109,10 @@ export function StationSearch() {
         <ul
           id="station-search-results"
           role="listbox"
-          className="panel-shadow absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-md border border-line bg-panel py-1"
+          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-[3px] border border-line bg-panel py-1"
         >
           {results.map((city, index) => (
-            <li key={city} role="option" aria-selected={index === highlight}>
+            <li key={city.name} role="option" aria-selected={index === highlight}>
               <button
                 type="button"
                 onPointerEnter={() => setHighlight(index)}
@@ -121,7 +122,7 @@ export function StationSearch() {
                   index === highlight ? 'bg-panel-2 text-fg' : 'text-fg-2',
                 )}
               >
-                {city}
+                {city.name}
               </button>
             </li>
           ))}

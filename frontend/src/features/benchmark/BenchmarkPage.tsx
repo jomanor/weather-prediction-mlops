@@ -24,7 +24,8 @@ const RANGES = [
 export function BenchmarkPage() {
   const [params, setParams] = useSearchParams()
   const { palette } = usePreferences()
-  const { data: cities } = useCities()
+  const { data: cityList } = useCities()
+  const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
   const [hours, setHours] = useState(24)
 
   const city = params.get('city') ?? cities?.[0] ?? ''
@@ -53,7 +54,6 @@ export function BenchmarkPage() {
   return (
     <div className="space-y-5 pb-8">
       <PageHeader
-        eyebrow="Evaluación"
         title="Benchmark de modelos"
         description="Contraste entre la observación, la predicción del modelo Spark GBT y la predicción oficial de AEMET OpenData sobre la misma ventana temporal."
         actions={
@@ -65,7 +65,7 @@ export function BenchmarkPage() {
               id="benchmark-city"
               value={city}
               onChange={(event) => selectCity(event.target.value)}
-              className="h-9 rounded-md border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
+              className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
             >
               {(cities ?? []).map((option) => (
                 <option key={option} value={option}>

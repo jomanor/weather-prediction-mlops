@@ -5,10 +5,10 @@ import { cn } from '@/lib/cn'
 type ReadoutSize = 'sm' | 'md' | 'lg' | 'hero'
 
 const VALUE_SIZES: Record<ReadoutSize, string> = {
-  sm: 'text-base',
-  md: 'text-xl',
-  lg: 'text-3xl',
-  hero: 'text-5xl',
+  sm: 'text-sm',
+  md: 'text-base',
+  lg: 'text-2xl',
+  hero: 'text-4xl',
 }
 
 interface ReadoutProps {
@@ -21,7 +21,7 @@ interface ReadoutProps {
   className?: string
 }
 
-/** A single instrument readout: small-caps label, tabular value, optional unit. */
+/** A single readout: quiet label, tabular value, optional unit. */
 export function Readout({
   label,
   value,
@@ -34,7 +34,7 @@ export function Readout({
   return (
     <div className={cn('min-w-0', className)}>
       <div className="label">{label}</div>
-      <div className="mt-1.5 flex items-baseline gap-1.5">
+      <div className="mt-1 flex items-baseline gap-1.5">
         <span className={cn('nums font-medium leading-none text-fg', VALUE_SIZES[size])}>
           {value}
         </span>

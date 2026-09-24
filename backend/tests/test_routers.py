@@ -18,7 +18,10 @@ async def test_health(client):
 async def test_cities(client):
     response = await client.get("/api/cities")
     assert response.status_code == 200
-    assert response.json() == ["Madrid"]
+    assert response.json() == [
+        {"name": "Alicante", "latitude": 38.3452, "longitude": -0.481},
+        {"name": "Madrid", "latitude": 40.4168, "longitude": -3.7038},
+    ]
 
 
 async def test_current_weather_all(client):
@@ -226,6 +229,7 @@ async def test_openapi_documents_every_contract_path(client):
     assert {
         "/api/health",
         "/api/cities",
+        "/api/geo/search",
         "/api/weather/current",
         "/api/weather/current/{city}",
         "/api/weather/history/{city}",

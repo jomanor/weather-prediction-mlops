@@ -7,15 +7,20 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.main import create_app
+from app.repositories.city_repo import get_city_repo
 from app.repositories.model_repo import get_model_repo
 from app.repositories.prediction_repo import get_prediction_repo
 from app.repositories.weather_repo import get_weather_repo
+from app.schemas.city import City, GeoResult
 from app.schemas.models import ModelInfo, ModelMetrics
 from app.schemas.predictions import Prediction
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
+from app.services.geo import get_geo_service
 from tests.fakes import (
     FakeAemetService,
+    FakeCityRepository,
+    FakeGeocodingService,
     FakeModelRepository,
     FakePredictionRepository,
     FakeWeatherRepository,
@@ -130,18 +135,47 @@ def aemet(aemet_temps, now) -> FakeAemetService:
 
 
 @pytest.fixture
+def city_repo() -> FakeCityRepository:
+    return FakeCityRepository(
+        [
+            City(name="Madrid", latitude=40.4168, longitude=-3.7038),
+            City(name="Alicante", latitude=38.3452, longitude=-0.4810),
+        ]
+    )
+
+
+@pytest.fixture
+def geo() -> FakeGeocodingService:
+    return FakeGeocodingService(
+        results=[
+            GeoResult(
+                name="Valencia",
+                latitude=39.4699,
+                longitude=-0.3763,
+                country="España",
+                admin1="Valencia",
+            )
+        ]
+    )
+
+
+@pytest.fixture
 def app(
     settings,
     weather_repo,
     prediction_repo,
     model_repo,
     aemet,
+    city_repo,
+    geo,
 ):
     application = create_app(settings)
     application.dependency_overrides[get_weather_repo] = lambda: weather_repo
     application.dependency_overrides[get_prediction_repo] = lambda: prediction_repo
     application.dependency_overrides[get_model_repo] = lambda: model_repo
     application.dependency_overrides[get_aemet_service] = lambda: aemet
+    application.dependency_overrides[get_city_repo] = lambda: city_repo
+    application.dependency_overrides[get_geo_service] = lambda: geo
     return application
 
 

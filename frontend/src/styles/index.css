@@ -14,11 +14,11 @@
 :root {
   color-scheme: light;
 
-  --bg: #f5f7f9;
+  --bg: #f6f7f8;
   --panel: #ffffff;
-  --panel-2: #eceff3;
-  --line: #dfe4ea;
-  --line-strong: #c6ced8;
+  --panel-2: #f0f2f4;
+  --line: #d9dde2;
+  --line-strong: #b9c1cb;
   --fg: #0f141a;
   --fg-2: #55606f;
   --fg-3: #848f9f;
@@ -35,17 +35,17 @@
   --bad: #c0392b;
 
   --grid: rgb(15 20 26 / 0.08);
-  --shadow: 0 1px 2px rgb(15 20 26 / 0.06), 0 8px 24px -16px rgb(15 20 26 / 0.28);
+  --shadow: 0 1px 2px rgb(15 20 26 / 0.05);
 }
 
 .dark {
   color-scheme: dark;
 
-  --bg: #0c0e11;
-  --panel: #13161a;
-  --panel-2: #191d23;
-  --line: #232932;
-  --line-strong: #333b46;
+  --bg: #0d0f12;
+  --panel: #131519;
+  --panel-2: #181b20;
+  --line: #262b33;
+  --line-strong: #3a424e;
   --fg: #e9ecf0;
   --fg-2: #97a1ad;
   --fg-3: #66707c;
@@ -62,7 +62,7 @@
   --bad: #f2604f;
 
   --grid: rgb(233 236 240 / 0.07);
-  --shadow: 0 1px 0 rgb(255 255 255 / 0.02), 0 18px 40px -28px rgb(0 0 0 / 0.9);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
 }
 
 @theme inline {
@@ -87,7 +87,7 @@
   --color-warn: var(--warn);
   --color-bad: var(--bad);
 
-  --radius-panel: 0.625rem;
+  --radius-panel: 0.25rem;
 }
 
 @layer base {
@@ -147,17 +147,11 @@
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
   }
 
-  .panel-shadow {
-    box-shadow: var(--shadow);
-  }
-
-  /* Small-caps label used above every instrument readout. */
+  /* Field label: plain, small, quiet. */
   .label {
-    font-family: var(--font-mono);
-    font-size: 0.625rem;
-    line-height: 1;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
+    font-size: 0.6875rem;
+    line-height: 1.1;
+    letter-spacing: 0.01em;
     color: var(--fg-3);
   }
 
@@ -247,11 +241,10 @@
   display: flex;
   align-items: baseline;
   gap: 5px;
-  padding: 3px 7px;
+  padding: 2px 6px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: color-mix(in oklab, var(--panel) 88%, transparent);
-  backdrop-filter: blur(6px);
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--panel) 90%, transparent);
   box-shadow: var(--shadow);
   transition:
     border-color 0.15s ease,

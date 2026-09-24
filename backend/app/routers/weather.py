@@ -1,4 +1,4 @@
-"""Weather endpoints: ``/api/cities`` and ``/api/weather/*``."""
+"""Weather endpoints: ``/api/weather/*``."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -14,14 +14,8 @@ from app.schemas.weather import (
 from app.services.stats import compute_stats
 
 router = APIRouter(prefix="/weather", tags=["weather"])
-cities_router = APIRouter(tags=["weather"])
 
 HOURS_QUERY = Query(default=24, ge=1, le=168, description="Hours of data (max 168 = 1 week)")
-
-
-@cities_router.get("/cities", response_model=list[str])
-async def list_cities(repo: WeatherRepository = Depends(get_weather_repo)) -> list[str]:
-    return await repo.list_cities()
 
 
 @router.get("/current", response_model=CurrentWeatherList)

@@ -178,3 +178,26 @@ export const healthSchema = z.object({
   time: z.string(),
 })
 export type Health = z.infer<typeof healthSchema>
+
+/** Station registry entry, as served by the `cities` collection. */
+export const citySchema = z.object({
+  name: z.string(),
+  latitude: z.number(),
+  longitude: z.number(),
+})
+export type City = z.infer<typeof citySchema>
+
+/** Result of the Open-Meteo geocoding proxy. */
+export const geoResultSchema = z.object({
+  name: z.string(),
+  latitude: z.number(),
+  longitude: z.number(),
+  country: nullableString,
+  admin1: nullableString,
+})
+export type GeoResult = z.infer<typeof geoResultSchema>
+
+export const geoSearchResponseSchema = z.object({
+  results: z.array(geoResultSchema),
+})
+export type GeoSearchResponse = z.infer<typeof geoSearchResponseSchema>

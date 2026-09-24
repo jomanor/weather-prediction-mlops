@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     aemet_backoff_seconds: float = 0.5
     aemet_cache_ttl_seconds: int = 3600
 
+    geo_timeout_seconds: float = 8.0
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Comma separated ``CORS_ORIGINS`` as a list, blanks dropped."""

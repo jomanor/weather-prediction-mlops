@@ -15,7 +15,6 @@ export function ModelsPage() {
   return (
     <div className="space-y-5 pb-8">
       <PageHeader
-        eyebrow="MLOps"
         title="Registro de modelos"
         description="Artefactos entrenados por el job Spark GBT, con sus métricas de validación y la versión que sirve la inferencia."
         actions={
