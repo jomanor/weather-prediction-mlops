@@ -7,29 +7,49 @@ to MongoDB Atlas Free Tier (M0 - 512 MB, no credit card required).
 Usage:
   1. Create a free cluster at https://www.mongodb.com/cloud/atlas
   2. Add database user + IP whitelist (0.0.0.0/0 for cloud access).
-  3. Set ATLAS_MONGO_URL in .env:
-     ATLAS_MONGO_URL=mongodb+srv://<user>:<password>@cluster0.xxx.mongodb.net/weather_db?retryWrites=true&w=majority
-  4. Run: python scripts/sync_to_atlas.py
+  3. Set MONGO_URI in .env.production to the Atlas SRV string (the local
+     .env keeps the dev URI — its values are never overridden by dotenv):
+     MONGO_URI=mongodb+srv://<user>:<password>@cluster0.xxx.mongodb.net/weather_db?retryWrites=true&w=majority
+  4. Run: python scripts/sync_to_atlas.py (or `make sync-atlas`)
 """
 
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne
 
+PRODUCTION_ENV = Path(".env.production")
+
 load_dotenv()
-if not (os.getenv("ATLAS_MONGO_URI") or os.getenv("ATLAS_MONGO_URL")) and os.path.exists(
-    ".env.production"
-):
-    load_dotenv(".env.production")
 
 LOCAL_MONGO_URL = os.getenv("MONGO_URI") or os.getenv(
     "MONGO_URL", "mongodb://admin:weatherpass123@localhost:27017/weather_db?authSource=admin"
 )
 if "@mongodb:27017" in LOCAL_MONGO_URL and not os.path.exists("/.dockerenv"):
     LOCAL_MONGO_URL = LOCAL_MONGO_URL.replace("@mongodb:27017", "@localhost:27017")
-ATLAS_MONGO_URL = os.getenv("ATLAS_MONGO_URI") or os.getenv("ATLAS_MONGO_URL")
+
+
+def atlas_target() -> str | None:
+    """Atlas URI: explicit ATLAS_MONGO_* override, else .env.production's MONGO_URI.
+
+    dotenv does not override variables already set by .env, so the production
+    file's MONGO_URI (the same name the deployed app uses) is read directly
+    from the file instead of through os.getenv.
+    """
+    override = os.getenv("ATLAS_MONGO_URI") or os.getenv("ATLAS_MONGO_URL")
+    if override:
+        return override
+    if not PRODUCTION_ENV.exists():
+        return None
+    for line in PRODUCTION_ENV.read_text().splitlines():
+        if line.startswith(("MONGO_URI=", "MONGO_URL=")):
+            return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+ATLAS_MONGO_URL = atlas_target()
 
 COLLECTIONS = ["raw_weather", "weather_features", "weather_predictions"]
 
@@ -69,8 +89,8 @@ def main():
         print("ATTENTION: MongoDB Atlas connection string required!")
         print("1. Go to https://www.mongodb.com/cloud/atlas (Free M0 Cluster, No Credit Card).")
         print("2. Create Database User & allow access IP (0.0.0.0/0).")
-        print("3. Add connection string to .env:")
-        print("   ATLAS_MONGO_URL=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/weather_db")
+        print("3. Add the Atlas SRV string to .env.production:")
+        print("   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/weather_db")
         print("4. Re-run: python scripts/sync_to_atlas.py (or `make sync-atlas`)")
         print("----------------------------------------------------------------------")
         sys.exit(1)

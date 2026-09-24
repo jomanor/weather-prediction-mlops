@@ -7,6 +7,7 @@ from pyspark.ml.feature import StandardScaler, VectorAssembler
 from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType, FloatType, IntegerType, LongType, ShortType
 
 sys.path.append("/opt/config")
 import json
@@ -22,7 +23,6 @@ from spark_config import FEATURES_CONFIG, ML_CONFIG, create_spark_session
 
 
 def load_features(spark):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
@@ -33,15 +33,23 @@ def load_features(spark):
         .load()
     )
 
-    # TODO this should be done in other part
     df = df.drop("_id")
-    df_clean = df.dropna()
 
-    return df_clean
+    # A blanket dropna() here deleted every row. weather_features is a union of
+    # two generations of documents, and a column that only one of them wrote is
+    # null in all the others, so no row is complete across every column. Keep
+    # what training cannot invent -- the observation and its labels -- and let
+    # the assembler skip rows with gaps in individual features instead.
+    label_cols = [c for c in df.columns if c.startswith("target_")]
+    df_clean = df.dropna(subset=["city", "timestamp", "temperature"] + label_cols)
+
+    # An overlapping scheduled run can write the same city+hour twice; that is
+    # one observation, so keep a single sample per hour rather than one per time
+    # the job happened to run.
+    return df_clean.dropDuplicates(["city", "timestamp"])
 
 
 def prepare_features_for_ml(df, target_col, horizon=1):
-
     target_temp_col = f"target_temp_{horizon}h"
     target_rain_col = f"target_will_rain_{horizon}h"
 
@@ -55,9 +63,31 @@ def prepare_features_for_ml(df, target_col, horizon=1):
         target_rain_col,
     ]
 
-    feature_cols = [col for col in df.columns if col not in exclude_cols]
+    # A field the connector could not infer (absent, or null in every sampled
+    # document) arrives as `void`, and VectorAssembler rejects that type
+    # outright. Text, arrays and booleans are equally unusable as features, so
+    # keep only the numeric columns the assembler can actually accept.
+    numeric_types = (DoubleType, FloatType, IntegerType, LongType, ShortType)
+    feature_cols = [
+        col
+        for col in df.columns
+        if col not in exclude_cols and isinstance(df.schema[col].dataType, numeric_types)
+    ]
 
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw")
+    # A column that is empty in most rows costs every row it touches, because
+    # the assembler discards a row as soon as one of its inputs is null.
+    # cloud_coverage, for instance, is written only by the older generation of
+    # feature documents and is null in 93% of them, so keeping it would throw
+    # away almost the entire history to gain a feature that carries nothing.
+    total = df.count()
+    present = df.select([F.count(F.col(c)).alias(c) for c in feature_cols]).first().asDict()
+    feature_cols = [c for c in feature_cols if present[c] >= total * 0.5]
+    if not feature_cols:
+        raise ValueError("No usable feature columns: every numeric column is mostly null.")
+
+    assembler = VectorAssembler(
+        inputCols=feature_cols, outputCol="features_raw", handleInvalid="skip"
+    )
 
     scaler = StandardScaler(inputCol="features_raw", outputCol="features")
 
@@ -65,7 +95,6 @@ def prepare_features_for_ml(df, target_col, horizon=1):
 
 
 def train_temperature_prediction_model(df, horizon=1):
-
     target_col = f"target_temp_{horizon}h"
 
     assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
@@ -145,7 +174,6 @@ def train_temperature_prediction_model(df, horizon=1):
     best_model_name = None
 
     for model_name, model in models.items():
-
         pipeline = Pipeline(stages=[assembler, scaler, model])
 
         cv = CrossValidator(
@@ -235,7 +263,6 @@ def train_temperature_prediction_model(df, horizon=1):
 
 
 def train_rain_prediction_model(df, horizon=1):
-
     target_col = f"target_will_rain_{horizon}h"
 
     assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
@@ -298,7 +325,6 @@ def train_rain_prediction_model(df, horizon=1):
     best_model_name = None
 
     for model_name, model in models.items():
-
         pipeline = Pipeline(stages=[assembler, scaler, model])
 
         cv = CrossValidator(
@@ -405,9 +431,8 @@ def _log_to_mlflow(
 
 
 def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
-    temp_dir = "/opt/spark-tmp"
+    temp_dir = os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp")
     os.makedirs(temp_dir, exist_ok=True)
 
     model_dir_path = f"{temp_dir}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -452,7 +477,6 @@ def save_model(model, model_name, db_name="weather_db", metadata_collection="mod
 
 
 def create_prediction_batch(spark, model, collection="weather_predictions"):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
@@ -487,7 +511,6 @@ def create_prediction_batch(spark, model, collection="weather_predictions"):
 
 
 def main():
-
     spark = create_spark_session("WeatherMLTraining")
 
     try:
