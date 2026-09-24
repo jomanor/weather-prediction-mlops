@@ -260,8 +260,10 @@ def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
     processed rows are not overwritten.
 
     The job is designed to be run periodically (every 6 hours by the scheduler).
-    Deduplication is left to downstream consumers / the training job which
-    should select the latest record per city+hour when needed.
+    Each run recomputes the whole history from raw_weather and replaces the
+    collection. Appending instead left one complete extra copy of the history
+    behind per run -- 2689 + 18172 + 18172 documents after two of them -- which
+    inflated storage and taught the model from the same hour several times over.
     """
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
@@ -280,7 +282,7 @@ def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
 
     df_clean.write.format("mongodb").option("connection.uri", mongo_url).option(
         "database", "weather_db"
-    ).option("collection", collection_name).mode("append").save()
+    ).option("collection", collection_name).mode("overwrite").save()
 
     return df_clean
 
