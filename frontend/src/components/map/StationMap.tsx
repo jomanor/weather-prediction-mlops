@@ -17,7 +17,8 @@ const IBERIA_CENTER: [number, number] = [-3.9, 39.9]
 
 /* Geomatic layers. Free and keyless: AWS Open Data terrain tiles (Terrarium
  * encoding) for relief, RainViewer's public radar mosaic for precipitation. */
-const DEM_SOURCE = 'meteoml-dem'
+const DEM_SOURCE = 'meteoml-dem-hillshade'
+const TERRAIN_DEM_SOURCE = 'meteoml-dem-terrain'
 const HILLSHADE_LAYER = 'meteoml-hillshade'
 const RADAR_SOURCE = 'meteoml-radar'
 const RADAR_LAYER = 'meteoml-radar'
@@ -74,19 +75,37 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /* setStyle wipes every custom source/layer, and calling it while the initial
+     style is still loading crashes MapLibre's style-diff. Track what was last
+     applied instead of "first run" — StrictMode re-runs effects on the same
+     instance, so a first-run flag would be consumed before the remount. */
+  const appliedStyleRef = useRef<string>(isDark ? STYLES.dark : STYLES.light)
   useEffect(() => {
-    mapRef.current?.setStyle(isDark ? STYLES.dark : STYLES.light)
+    const next = isDark ? STYLES.dark : STYLES.light
+    if (appliedStyleRef.current === next) return
+    appliedStyleRef.current = next
+    mapRef.current?.setStyle(next)
   }, [isDark])
-
-  /* Sources and extra layers are wiped by setStyle; (re)apply idempotently. */
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
 
     const apply = () => {
+      /* StrictMode double-mounts; a stale instance's listener must not touch the live map. */
+      if (!mapRef.current || mapRef.current !== map) return
       try {
         if (!map.getSource(DEM_SOURCE)) {
           map.addSource(DEM_SOURCE, {
+            type: 'raster-dem',
+            tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+            encoding: 'terrarium',
+            tileSize: 256,
+            maxzoom: 15,
+            attribution: 'Relieve: AWS Terrain Tiles',
+          })
+        }
+        if (!map.getSource(TERRAIN_DEM_SOURCE)) {
+          map.addSource(TERRAIN_DEM_SOURCE, {
             type: 'raster-dem',
             tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
             encoding: 'terrarium',
@@ -106,14 +125,17 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
             },
           })
         }
+        /* Hillshade and the 3D mesh cannot run at once: two raster-dem consumers
+           black out the Carto vector basemap past the DEM maxzoom (verified by
+           bisect). 3D wins while it is on. */
         map.setLayoutProperty(
           HILLSHADE_LAYER,
           'visibility',
-          mapLayers.hillshade ? 'visible' : 'none',
+          mapLayers.hillshade && !mapLayers.terrain3d ? 'visible' : 'none',
         )
 
         if (mapLayers.terrain3d) {
-          map.setTerrain({ source: DEM_SOURCE, exaggeration: 1.2 })
+          map.setTerrain({ source: TERRAIN_DEM_SOURCE, exaggeration: 1.2 })
           if (map.getPitch() < 1) map.easeTo({ pitch: 55, duration: 600 })
         } else {
           map.setTerrain(null)
@@ -130,8 +152,9 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
       }
     }
 
+    /* style.load (not styledata) is what the minimal repro proved reliable here. */
     if (map.isStyleLoaded()) apply()
-    else map.once('styledata', apply)
+    else map.once('style.load', apply)
   }, [mapLayers, isDark])
 
   useEffect(() => {
@@ -215,9 +238,17 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
                 type="checkbox"
                 className="h-3.5 w-3.5 accent-[var(--accent)]"
                 checked={mapLayers[option.key]}
-                onChange={(event) =>
-                  setMapLayers({ ...mapLayers, [option.key]: event.target.checked })
-                }
+                onChange={(event) => {
+                  /* Relief and 3D terrain are the same DEM presented two ways:
+                     keep exactly one active (radio-like). Radar is independent. */
+                  if (option.key === 'terrain3d' && event.target.checked) {
+                    setMapLayers({ ...mapLayers, terrain3d: true, hillshade: false })
+                  } else if (option.key === 'hillshade' && event.target.checked) {
+                    setMapLayers({ ...mapLayers, hillshade: true, terrain3d: false })
+                  } else {
+                    setMapLayers({ ...mapLayers, [option.key]: event.target.checked })
+                  }
+                }}
               />
               {option.label}
             </label>
