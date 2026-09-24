@@ -20,9 +20,13 @@ const IBERIA_CENTER: [number, number] = [-3.9, 39.9]
 const DEM_SOURCE = 'meteoml-dem-hillshade'
 const TERRAIN_DEM_SOURCE = 'meteoml-dem-terrain'
 const HILLSHADE_LAYER = 'meteoml-hillshade'
+const BUILDINGS_LAYER = 'meteoml-buildings-3d'
 const RADAR_SOURCE = 'meteoml-radar'
 const RADAR_LAYER = 'meteoml-radar'
 const RAINVIEWER_INDEX = 'https://api.rainviewer.com/public/weather-maps.json'
+/* The Carto style draws buildings as two flat fills that would z-fight with
+ * the extrusions, so they are hidden while 3D is on and restored after. */
+const FLAT_BUILDING_LAYERS = ['building', 'building-top']
 
 interface StationMapProps {
   stations: CurrentWeather[]
@@ -142,6 +146,30 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
           if (map.getPitch() > 1) map.easeTo({ pitch: 0, duration: 600 })
         }
 
+        /* Building extrusions ride the vector tiles the basemap already
+         * ships (render_height / render_min_height), so no extra source. */
+        if (!map.getLayer(BUILDINGS_LAYER) && map.getSource('carto')) {
+          map.addLayer({
+            id: BUILDINGS_LAYER,
+            type: 'fill-extrusion',
+            source: 'carto',
+            'source-layer': 'building',
+            minzoom: 14,
+            paint: {
+              'fill-extrusion-color': isDark ? '#1b222b' : '#cfd6dd',
+              'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
+              'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
+              'fill-extrusion-opacity': 0.92,
+              'fill-extrusion-vertical-gradient': true,
+            },
+          })
+        }
+        map.setLayoutProperty(BUILDINGS_LAYER, 'visibility', mapLayers.buildings3d ? 'visible' : 'none')
+        for (const flat of FLAT_BUILDING_LAYERS) {
+          if (!map.getLayer(flat)) continue
+          map.setLayoutProperty(flat, 'visibility', mapLayers.buildings3d ? 'none' : 'visible')
+        }
+
         if (mapLayers.radar) {
           void ensureRadarLayer(map, radarTileRef).then((ok) => setRadarReady(ok))
         } else if (map.getLayer(RADAR_LAYER)) {
@@ -216,6 +244,7 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
     { key: 'hillshade' as const, label: 'Relieve' },
     { key: 'radar' as const, label: 'Radar de lluvia' },
     { key: 'terrain3d' as const, label: 'Terreno 3D' },
+    { key: 'buildings3d' as const, label: 'Edificios 3D' },
   ]
 
   return (
@@ -240,7 +269,8 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
                 checked={mapLayers[option.key]}
                 onChange={(event) => {
                   /* Relief and 3D terrain are the same DEM presented two ways:
-                     keep exactly one active (radio-like). Radar is independent. */
+                     keep exactly one active (radio-like). Radar and buildings
+                     are independent. */
                   if (option.key === 'terrain3d' && event.target.checked) {
                     setMapLayers({ ...mapLayers, terrain3d: true, hillshade: false })
                   } else if (option.key === 'hillshade' && event.target.checked) {

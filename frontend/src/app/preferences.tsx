@@ -19,9 +19,10 @@ export interface MapLayers {
   hillshade: boolean
   radar: boolean
   terrain3d: boolean
+  buildings3d: boolean
 }
 
-const DEFAULT_MAP: MapLayers = { hillshade: false, radar: false, terrain3d: false }
+const DEFAULT_MAP: MapLayers = { hillshade: false, radar: false, terrain3d: false, buildings3d: true }
 
 function readMap(): MapLayers {
   try {
@@ -34,6 +35,8 @@ function readMap(): MapLayers {
       hillshade: record.hillshade === true,
       radar: record.radar === true,
       terrain3d: record.terrain3d === true,
+      /* Older stored preferences predate the buildings layer; on by default. */
+      buildings3d: record.buildings3d !== false,
     }
   } catch {
     return DEFAULT_MAP
