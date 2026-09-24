@@ -13,7 +13,7 @@ export function Panel({ children, className, flush = false }: PanelProps) {
   return (
     <section
       className={cn(
-        'panel-shadow hairline rounded-[var(--radius-panel)] border border-line bg-panel',
+        'rounded-[var(--radius-panel)] border border-line bg-panel',
         !flush && 'p-4',
         className,
       )}
@@ -39,8 +39,8 @@ export function PanelHeader({ title, subtitle, actions, className }: PanelHeader
       )}
     >
       <div className="min-w-0">
-        <h2 className="text-sm font-semibold tracking-tight text-fg">{title}</h2>
-        {subtitle ? <p className="mt-0.5 text-xs text-fg-3">{subtitle}</p> : null}
+        <h2 className="text-[13px] font-semibold leading-tight text-fg">{title}</h2>
+        {subtitle ? <p className="mt-1 text-xs leading-tight text-fg-3">{subtitle}</p> : null}
       </div>
       {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
     </header>

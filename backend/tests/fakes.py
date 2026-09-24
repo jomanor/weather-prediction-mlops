@@ -5,10 +5,12 @@ Used through FastAPI dependency overrides, so the whole suite runs offline.
 
 from datetime import datetime
 
+from app.schemas.city import City, GeoResult
 from app.schemas.models import ModelInfo
 from app.schemas.predictions import Prediction
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import AemetForecast
+from app.services.geo import GeocodingError
 
 
 class FakeWeatherRepository:
@@ -104,6 +106,61 @@ class FakeAemetService:
                 error=self.error or "AEMET_API_KEY is not configured",
             )
         return AemetForecast(available=True, issued_at=self.issued_at, temps=dict(self.temps))
+
+    async def aclose(self) -> None:
+        return None
+
+
+class FakeCityRepository:
+    """In-memory station registry with the same surface as ``CityRepository``."""
+
+    def __init__(self, cities: list[City] | None = None) -> None:
+        self.cities = list(cities or [])
+
+    async def list(self) -> list[City]:
+        return sorted(self.cities, key=lambda city: city.name)
+
+    async def get(self, name: str) -> City | None:
+        key = name.strip().casefold()
+        for city in self.cities:
+            if city.name.strip().casefold() == key:
+                return city
+        return None
+
+    async def upsert(self, city: City) -> City:
+        existing = await self.get(city.name)
+        if existing is not None:
+            self.cities.remove(existing)
+        self.cities.append(city)
+        return city
+
+    async def delete(self, name: str) -> bool:
+        existing = await self.get(name)
+        if existing is None:
+            return False
+        self.cities.remove(existing)
+        return True
+
+
+class FakeGeocodingService:
+    """Same surface as ``GeocodingService`` but never touches the network."""
+
+    def __init__(
+        self,
+        results: list[GeoResult] | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.results = list(results or [])
+        self.error = error
+        self.queries: list[str] = []
+
+    async def search(self, query: str) -> list[GeoResult]:
+        self.queries.append(query)
+        if self.error is not None:
+            raise GeocodingError(self.error)
+        if not query.strip():
+            return []
+        return list(self.results)
 
     async def aclose(self) -> None:
         return None

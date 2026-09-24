@@ -191,3 +191,21 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
 - **Residual convention**: `residual_model` and `residual_aemet` are
   `prediction − observed`. Positive means the model ran warm, negative means it
   ran cold. `bias` follows the same sign.
+
+## Station registry (v2.1)
+
+The Mongo collection `cities` is the station registry and the source of truth
+for ingestion: producers read it, the API exposes and manages it.
+
+- `GET /api/cities` → array of `{ "name": string, "latitude": number, "longitude": number }`
+  (the old bare string array is superseded; seeded with the 14 default
+  stations on startup when the collection is empty).
+- `POST /api/cities` body `{ "name", "latitude", "longitude" }` → 201 with the
+  stored city. 409 when the name already exists (case-insensitive), 400 for
+  invalid coordinates.
+- `DELETE /api/cities/{name}` → 204. Removes the station from the registry
+  only; historical documents in `raw_weather`/`weather_data` are kept.
+- `GET /api/geo/search?q={query}` → `{ "results": [ { "name", "latitude",
+  "longitude", "country", "admin1" } ] }` proxied from the Open-Meteo
+  geocoding API (no key, `language=es`, max 8). `admin1`/`country` may be
+  null. Upstream failure → 502 `{ "detail" }`; empty query → `{ "results": [] }`.

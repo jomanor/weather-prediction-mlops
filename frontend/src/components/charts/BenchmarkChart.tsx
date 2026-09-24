@@ -53,7 +53,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
-        <CartesianGrid stroke={palette.grid} vertical={false} />
+        <CartesianGrid stroke={palette.grid} strokeDasharray="2 4" vertical={false} />
         <XAxis dataKey="t" minTickGap={40} {...axisProps} />
         <YAxis
           domain={domain}
@@ -74,7 +74,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
           dataKey="observed"
           name="Observado"
           stroke={palette.observed}
-          strokeWidth={2}
+          strokeWidth={1.5}
           dot={false}
           connectNulls={false}
           isAnimationActive={false}
@@ -84,7 +84,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
           dataKey="model"
           name="Spark GBT"
           stroke={palette.model}
-          strokeWidth={1.75}
+          strokeWidth={1.25}
           strokeDasharray="6 3"
           dot={false}
           connectNulls={false}

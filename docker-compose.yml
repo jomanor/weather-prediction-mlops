@@ -54,8 +54,11 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      mongodb:
+        condition: service_started
     environment:
       KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
     restart: unless-stopped
     networks:
       - weather-network

@@ -12,8 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import Settings, get_settings
 from app.core.logging import RequestContextMiddleware, configure_logging
 from app.db.mongo import create_client, ensure_indexes, ping
-from app.routers import benchmark, health, models, predictions, weather
+from app.repositories.city_repo import seed_default_cities
+from app.routers import benchmark, cities, health, models, predictions, weather
 from app.services.aemet import AemetService
+from app.services.geo import GeocodingService
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.mongo_client = client
         app.state.db = db
         app.state.aemet = AemetService(settings)
+        app.state.geo = GeocodingService(settings)
+        await seed_default_cities(db)
         logger.info(
             "Started %s v%s (db=%s, aemet_configured=%s)",
             settings.service_name,
@@ -48,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await app.state.aemet.aclose()
+            await app.state.geo.aclose()
             client.close()
             logger.info("MongoDB client closed")
 
@@ -69,7 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     api = APIRouter(prefix="/api")
     api.include_router(health.router)
-    api.include_router(weather.cities_router)
+    api.include_router(cities.router)
     api.include_router(weather.router)
     api.include_router(predictions.router)
     api.include_router(benchmark.router)

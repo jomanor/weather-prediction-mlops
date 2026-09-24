@@ -23,7 +23,7 @@ export function ChartTooltip({ active, label, payload, format, title }: TooltipC
   if (!active || !payload?.length) return null
 
   return (
-    <div className="panel-shadow min-w-[9rem] rounded-md border border-line bg-panel/95 px-2.5 py-2 backdrop-blur">
+    <div className="min-w-[9rem] rounded-[3px] border border-line bg-panel px-2.5 py-2">
       <div className="label mb-1.5">{title ? title(label) : label}</div>
       <ul className="space-y-1">
         {payload.map((entry, index) => (

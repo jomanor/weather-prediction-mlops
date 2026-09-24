@@ -29,6 +29,53 @@ export interface RequestOptions {
   allowNotFound?: boolean
 }
 
+export interface WriteOptions extends RequestOptions {
+  body?: unknown
+}
+
+/** POST/DELETE/PUT against the API, parsing the (optional) response body. */
+export async function apiSend<T>(
+  method: 'POST' | 'DELETE' | 'PUT',
+  path: string,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown> | null,
+  { signal, body, allowNotFound = false }: WriteOptions = {},
+): Promise<T | null> {
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      signal,
+      headers: {
+        Accept: 'application/json',
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+    throw new ApiError('No se pudo contactar con la API.', 0, cause)
+  }
+
+  if (response.status === 404 && allowNotFound) return null
+  if (!response.ok) {
+    const detail = await readDetail(response)
+    throw new ApiError(detail ?? `La API respondió ${response.status}`, response.status, detail)
+  }
+  if (!schema) return null
+
+  const payload: unknown = await response.json()
+  const parsed = schema.safeParse(payload)
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]
+    throw new ApiError(
+      `Respuesta inesperada de la API en ${path} (${issue?.path.join('.')}: ${issue?.message})`,
+      0,
+      parsed.error.issues,
+    )
+  }
+  return parsed.data
+}
+
 export async function apiGet<T>(
   path: string,
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,

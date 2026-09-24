@@ -58,7 +58,7 @@ export function HistoryChart({ points, height = 260, palette }: HistoryChartProp
   return (
     <ResponsiveContainer width="100%" height={height}>
       <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
-        <CartesianGrid stroke={palette.grid} vertical={false} />
+        <CartesianGrid stroke={palette.grid} strokeDasharray="2 4" vertical={false} />
         <XAxis dataKey="t" minTickGap={48} {...axisProps} />
         <YAxis
           yAxisId="temperature"
@@ -102,7 +102,7 @@ export function HistoryChart({ points, height = 260, palette }: HistoryChartProp
           dataKey="temperature"
           name="Temperatura"
           stroke={palette.aemet}
-          strokeWidth={2}
+          strokeWidth={1.5}
           dot={false}
           connectNulls={false}
           isAnimationActive={false}

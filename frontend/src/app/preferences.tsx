@@ -13,6 +13,32 @@ import type { UnitSystem } from '@/lib/format'
 
 const THEME_KEY = 'meteoml.theme'
 const UNITS_KEY = 'meteoml.units'
+const MAP_KEY = 'meteoml.map'
+
+export interface MapLayers {
+  hillshade: boolean
+  radar: boolean
+  terrain3d: boolean
+}
+
+const DEFAULT_MAP: MapLayers = { hillshade: false, radar: false, terrain3d: false }
+
+function readMap(): MapLayers {
+  try {
+    const raw = localStorage.getItem(MAP_KEY)
+    if (!raw) return DEFAULT_MAP
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return DEFAULT_MAP
+    const record = parsed as Record<string, unknown>
+    return {
+      hillshade: record.hillshade === true,
+      radar: record.radar === true,
+      terrain3d: record.terrain3d === true,
+    }
+  } catch {
+    return DEFAULT_MAP
+  }
+}
 
 interface PreferencesValue {
   theme: ThemeChoice
@@ -20,6 +46,8 @@ interface PreferencesValue {
   setTheme: (theme: ThemeChoice) => void
   units: UnitSystem
   setUnits: (units: UnitSystem) => void
+  mapLayers: MapLayers
+  setMapLayers: (layers: MapLayers) => void
   locale: string
   palette: ChartPalette
 }
@@ -47,6 +75,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     readStored(UNITS_KEY, ['metric', 'imperial'] as const, 'metric'),
   )
   const [systemDark, setSystemDark] = useState(prefersDark)
+  const [mapLayers, setMapLayersState] = useState<MapLayers>(readMap)
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -79,12 +108,21 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const setMapLayers = useCallback((next: MapLayers) => {
+    setMapLayersState(next)
+    try {
+      localStorage.setItem(MAP_KEY, JSON.stringify(next))
+    } catch {
+      /* storage unavailable */
+    }
+  }, [])
+
   // Recomputed after paint so the palette reads the freshly applied tokens.
   const palette = useMemo(() => readChartPalette(isDark), [isDark])
 
   const value = useMemo<PreferencesValue>(
-    () => ({ theme, isDark, setTheme, units, setUnits, locale: 'es-ES', palette }),
-    [theme, isDark, setTheme, units, setUnits, palette],
+    () => ({ theme, isDark, setTheme, units, setUnits, mapLayers, setMapLayers, locale: 'es-ES', palette }),
+    [theme, isDark, setTheme, units, setUnits, mapLayers, setMapLayers, palette],
   )
 
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>
