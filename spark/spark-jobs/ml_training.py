@@ -7,6 +7,7 @@ from pyspark.ml.feature import StandardScaler, VectorAssembler
 from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType, FloatType, IntegerType, LongType, ShortType
 
 sys.path.append("/opt/config")
 import json
@@ -53,7 +54,16 @@ def prepare_features_for_ml(df, target_col, horizon=1):
         target_rain_col,
     ]
 
-    feature_cols = [col for col in df.columns if col not in exclude_cols]
+    # A field the connector could not infer (absent, or null in every sampled
+    # document) arrives as `void`, and VectorAssembler rejects that type
+    # outright. Text, arrays and booleans are equally unusable as features, so
+    # keep only the numeric columns the assembler can actually accept.
+    numeric_types = (DoubleType, FloatType, IntegerType, LongType, ShortType)
+    feature_cols = [
+        col
+        for col in df.columns
+        if col not in exclude_cols and isinstance(df.schema[col].dataType, numeric_types)
+    ]
 
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw")
 
