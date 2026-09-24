@@ -22,7 +22,6 @@ from spark_config import FEATURES_CONFIG, ML_CONFIG, create_spark_session
 
 
 def load_features(spark):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
@@ -41,7 +40,6 @@ def load_features(spark):
 
 
 def prepare_features_for_ml(df, target_col, horizon=1):
-
     target_temp_col = f"target_temp_{horizon}h"
     target_rain_col = f"target_will_rain_{horizon}h"
 
@@ -65,7 +63,6 @@ def prepare_features_for_ml(df, target_col, horizon=1):
 
 
 def train_temperature_prediction_model(df, horizon=1):
-
     target_col = f"target_temp_{horizon}h"
 
     assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
@@ -145,7 +142,6 @@ def train_temperature_prediction_model(df, horizon=1):
     best_model_name = None
 
     for model_name, model in models.items():
-
         pipeline = Pipeline(stages=[assembler, scaler, model])
 
         cv = CrossValidator(
@@ -235,7 +231,6 @@ def train_temperature_prediction_model(df, horizon=1):
 
 
 def train_rain_prediction_model(df, horizon=1):
-
     target_col = f"target_will_rain_{horizon}h"
 
     assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
@@ -298,7 +293,6 @@ def train_rain_prediction_model(df, horizon=1):
     best_model_name = None
 
     for model_name, model in models.items():
-
         pipeline = Pipeline(stages=[assembler, scaler, model])
 
         cv = CrossValidator(
@@ -405,9 +399,8 @@ def _log_to_mlflow(
 
 
 def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
-    temp_dir = "/opt/spark-tmp"
+    temp_dir = os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp")
     os.makedirs(temp_dir, exist_ok=True)
 
     model_dir_path = f"{temp_dir}/{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -452,7 +445,6 @@ def save_model(model, model_name, db_name="weather_db", metadata_collection="mod
 
 
 def create_prediction_batch(spark, model, collection="weather_predictions"):
-
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     df = (
@@ -487,7 +479,6 @@ def create_prediction_batch(spark, model, collection="weather_predictions"):
 
 
 def main():
-
     spark = create_spark_session("WeatherMLTraining")
 
     try:
