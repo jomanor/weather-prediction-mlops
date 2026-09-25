@@ -112,6 +112,8 @@ export const registryModelSchema = z.object({
   target: z.string(),
   horizon_hours: z.number(),
   created_at: nullableString,
+  // The registry stores artefacts without metrics/stage, so the API sends an
+  // explicit `null` for both; `nullish()` accepts it as well as a missing key.
   metrics: z
     .object({
       rmse: nullableNumber,
@@ -121,11 +123,11 @@ export const registryModelSchema = z.object({
       auc_pr: nullableNumber,
     })
     .partial()
-    .optional()
+    .nullish()
     .transform((value) => value ?? {}),
   stage: z
     .string()
-    .optional()
+    .nullish()
     .transform((value) => value ?? 'none'),
 })
 export type RegistryModel = z.infer<typeof registryModelSchema>

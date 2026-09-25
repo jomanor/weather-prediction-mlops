@@ -119,4 +119,23 @@ describe('modelsResponseSchema', () => {
     expect(parsed.models[0].metrics).toEqual({})
     expect(parsed.models[0].stage).toBe('none')
   })
+
+  it('tolerates explicit null metrics and stage from the registry', () => {
+    const parsed = modelsResponseSchema.parse({
+      count: 1,
+      models: [
+        {
+          name: 'rain_prediction_1h_GradientBoostedTrees',
+          version: '20260925_183924',
+          target: 'rain',
+          horizon_hours: 1,
+          created_at: '2026-09-25T18:39:24.858000Z',
+          metrics: null,
+          stage: null,
+        },
+      ],
+    })
+    expect(parsed.models[0].metrics).toEqual({})
+    expect(parsed.models[0].stage).toBe('none')
+  })
 })
