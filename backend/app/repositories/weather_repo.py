@@ -110,8 +110,12 @@ class WeatherRepository:
         return _from_raw_weather(doc) if doc is not None else None
 
     async def latest_per_city(self) -> list[CurrentWeather]:
+        # Sort by (city, timestamp) so the ``{city: 1, timestamp: -1}`` index
+        # feeds the group directly. Sorting on ``timestamp`` alone is a blocking
+        # sort across the whole collection, which exceeds the 32 MB in-memory
+        # limit on Atlas once the backfill fills it in.
         pipeline = [
-            {"$sort": {"timestamp": -1}},
+            {"$sort": {"city": 1, "timestamp": -1}},
             {"$group": {"_id": "$city", "latest": {"$first": "$$ROOT"}}},
             {"$replaceRoot": {"newRoot": "$latest"}},
             {"$sort": {"city": 1}},
