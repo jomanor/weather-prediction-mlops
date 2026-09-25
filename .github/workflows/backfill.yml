@@ -1,0 +1,54 @@
+name: Backfill history
+
+# The deployed stack runs no Kafka producer, and the archive (ERA5) the
+# backfill reads lags real time by a few days. When the UI's rolling windows
+# (24 h – 7 d) run dry, this repopulates raw_weather on demand. The hourly
+# Ingest workflow keeps it topped up from then on.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Days of hourly history to backfill from the archive API
+        default: "90"
+      recent:
+        description: Most-recent days to fill from the forecast API
+        default: "5"
+
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the secret is configured
+        run: |
+          if [ -z "$MONGO_URI" ]; then
+            echo "::error title=Missing secret::Add a repository secret named MONGO_URI."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pymongo
+
+      - name: Backfill hourly observations
+        run: |
+          python scripts/backfill_historical_data.py \
+            --days "${{ inputs.days }}" \
+            --recent "${{ inputs.recent }}"
