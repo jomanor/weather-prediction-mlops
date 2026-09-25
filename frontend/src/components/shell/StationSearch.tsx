@@ -1,6 +1,6 @@
 import { Search, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import { useCities } from '@/api/queries'
 import type { City } from '@/api/schemas'
@@ -9,6 +9,7 @@ import { cn } from '@/lib/cn'
 /** Command-palette style station lookup over the cities the backend knows. */
 export function StationSearch() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { data: cities, isLoading } = useCities()
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -35,10 +36,23 @@ export function StationSearch() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === '/' && document.activeElement?.tagName !== 'INPUT') {
-        event.preventDefault()
-        inputRef.current?.focus()
+      /* Bare `/` only: modifiers belong to the browser, and typing in any field
+       * (including select/contenteditable) must not lose focus to the search. */
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        return
       }
+      const target = event.target as HTMLElement | null
+      if (
+        !target ||
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
+      ) {
+        return
+      }
+      event.preventDefault()
+      inputRef.current?.focus()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -47,7 +61,10 @@ export function StationSearch() {
   const choose = (city: City) => {
     setQuery('')
     setOpen(false)
-    navigate(`/stations?city=${encodeURIComponent(city.name)}`)
+    /* Only `city` changes: the current surface's params (hours, var, range…) survive. */
+    const params = new URLSearchParams(location.search)
+    params.set('city', city.name)
+    navigate({ pathname: '/stations', search: params.toString() })
   }
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {

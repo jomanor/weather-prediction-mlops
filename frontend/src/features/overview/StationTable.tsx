@@ -1,9 +1,10 @@
-import { ArrowUpRight } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { ArrowUpRight, Check } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
 
 import type { CurrentWeather, Prediction } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
 import { EmptyState } from '@/components/ui/Feedback'
+import { useStationSelection } from '@/hooks/useStationSelection'
 import { cn } from '@/lib/cn'
 import {
   compassPoint,
@@ -25,12 +26,24 @@ export interface StationRow {
 interface StationTableProps {
   rows: StationRow[]
   predictions: Map<string, Prediction>
-  selectedCity?: string | null
 }
 
-export function StationTable({ rows, predictions, selectedCity }: StationTableProps) {
-  const navigate = useNavigate()
+/**
+ * Selectable station table. Selection is the app-wide URL-backed `selectedCity`,
+ * so clicking a row drives the map and the charts; the row is keyboard reachable
+ * and selection is signalled by an icon plus `aria-selected`, never colour alone.
+ */
+export function StationTable({ rows, predictions }: StationTableProps) {
+  const { selectedCity, selectCity } = useStationSelection()
   const { units } = usePreferences()
+  const location = useLocation()
+
+  /* Keep the surface's params (e.g. the overview tab); only `city` changes. */
+  const stationLink = (name: string) => {
+    const params = new URLSearchParams(location.search)
+    params.set('city', name)
+    return { pathname: '/stations', search: params.toString() }
+  }
 
   const withObservations = rows.filter((row) => row.station)
 
@@ -69,17 +82,29 @@ export function StationTable({ rows, predictions, selectedCity }: StationTablePr
               isNum(predicted) && isNum(station?.temperature)
                 ? (predicted as number) - (station?.temperature as number)
                 : null
+            const selected = row.name === selectedCity
 
             return (
               <tr
                 key={row.name}
-                onClick={() => navigate(`/stations?city=${encodeURIComponent(row.name)}`)}
+                tabIndex={0}
+                aria-selected={selected}
+                data-selected={selected}
+                onClick={() => selectCity(row.name)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  selectCity(row.name)
+                }}
                 className={cn(
-                  'group cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-panel-2',
-                  row.name === selectedCity && 'bg-panel-2',
+                  'group relative cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-panel-2',
+                  selected && 'bg-panel-2',
                 )}
               >
                 <td className="whitespace-nowrap px-4 py-2">
+                  {selected ? (
+                    <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-accent" />
+                  ) : null}
                   <div className="flex items-center gap-2.5">
                     {Icon ? (
                       <Icon className={cn('h-4 w-4 shrink-0', toneClass[weather!.tone])} />
@@ -90,12 +115,22 @@ export function StationTable({ rows, predictions, selectedCity }: StationTablePr
                       />
                     )}
                     <span>
-                      <span className="block font-medium text-fg">{row.name}</span>
+                      <span className="flex items-center gap-1.5 font-medium text-fg">
+                        {selected ? <Check aria-hidden className="h-3 w-3 text-accent" /> : null}
+                        {row.name}
+                      </span>
                       <span className="block text-[10px] text-fg-3">
                         {weather?.label ?? 'esperando ingesta'}
                       </span>
                     </span>
-                    <ArrowUpRight className="h-3 w-3 shrink-0 text-fg-3 opacity-0 transition-opacity group-hover:opacity-100" />
+                    <Link
+                      to={stationLink(row.name)}
+                      onClick={(event) => event.stopPropagation()}
+                      aria-label={`Abrir la estación ${row.name}`}
+                      className="ml-0.5 rounded p-0.5 text-fg-3 opacity-0 transition-opacity hover:text-fg group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
+                    >
+                      <ArrowUpRight className="h-3.5 w-3.5" />
+                    </Link>
                   </div>
                 </td>
                 <td className="nums whitespace-nowrap px-4 py-2 text-right text-fg">

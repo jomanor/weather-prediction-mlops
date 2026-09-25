@@ -1,10 +1,9 @@
 import { RefreshCw } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useEffect, useMemo } from 'react'
 
-import { useCities, useCurrentWeather, useHistory, usePredictions } from '@/api/queries'
+import { useCities } from '@/api/queries'
 import { usePreferences } from '@/app/preferences'
-import { HistoryChart } from '@/components/charts/HistoryChart'
+import { HistoryChart, type HistoryVariable } from '@/components/charts/HistoryChart'
 import { SeriesLegend } from '@/components/charts/SeriesLegend'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
@@ -14,32 +13,67 @@ import { Segmented } from '@/components/ui/Segmented'
 import { CurrentConditions } from '@/features/station/CurrentConditions'
 import { DerivedPanel } from '@/features/station/DerivedPanel'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
+import { useCurrentWeather, useHistory, usePredictions } from '@/features/station/queries'
+import { useChartSync } from '@/hooks/useChartSync'
+import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
+import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
 
-const RANGES = [
+const HOURS = [24, 48, 72, 168] as const
+type StationHours = (typeof HOURS)[number]
+
+const RANGES: ReadonlyArray<{ value: StationHours; label: string }> = [
   { value: 24, label: '24 h' },
   { value: 48, label: '48 h' },
   { value: 72, label: '72 h' },
   { value: 168, label: '7 d' },
 ]
 
+const VARIABLES: ReadonlyArray<{ value: HistoryVariable; label: string }> = [
+  { value: 'temperature', label: 'Temp' },
+  { value: 'precipitation', label: 'Lluvia' },
+  { value: 'wind', label: 'Viento' },
+]
+
+/* URL state: the station is shared app-wide; range and variable are local views. */
+const STATION_SCHEMA: { hours: UrlCodec<StationHours>; var: UrlCodec<HistoryVariable> } = {
+  hours: urlOption(HOURS, 48),
+  var: urlOption(['temperature', 'precipitation', 'wind'] as const, 'temperature'),
+}
+
 export function StationPage() {
-  const [params, setParams] = useSearchParams()
-  const { palette } = usePreferences()
+  const [state, setState] = useUrlState(STATION_SCHEMA)
+  const { selectedCity, selectCity } = useStationSelection()
+  const { palette, units } = usePreferences()
+  const { setWindow } = useChartSync()
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
-  const [hours, setHours] = useState(48)
 
-  const city = params.get('city') ?? cities?.[0] ?? ''
+  const city = resolveCity(selectedCity, cities, cityList !== undefined)
+  const hours = state.hours
+  const variable = state.var
+
   const current = useCurrentWeather(city)
   const history = useHistory(city, hours)
   const predictions = usePredictions(city, 24)
 
-  const selectCity = (next: string) => {
-    const updated = new URLSearchParams(params)
-    updated.set('city', next)
-    setParams(updated, { replace: true })
-  }
+  /* Share the observed window with the benchmark charts on the same time axis. */
+  const anchor = history.data?.points.at(-1)?.observed_at
+  useEffect(() => {
+    if (!anchor) return
+    const anchorMs = new Date(anchor).getTime()
+    if (Number.isFinite(anchorMs)) setWindow(hours, anchorMs)
+  }, [anchor, hours, setWindow])
+
+  const legendItems =
+    variable === 'temperature'
+      ? [
+          { label: 'Temperatura', color: palette.aemet },
+          { label: 'Precipitación', color: palette.accent },
+        ]
+      : variable === 'precipitation'
+        ? [{ label: 'Precipitación', color: palette.accent }]
+        : [{ label: `Viento (${units === 'imperial' ? 'mph' : 'km/h'})`, color: palette.observed }]
 
   return (
     <div className="space-y-5 pb-8">
@@ -63,6 +97,12 @@ export function StationPage() {
                 </option>
               ))}
             </select>
+            <Segmented
+              value={hours}
+              onChange={(value) => setState({ hours: value })}
+              options={RANGES}
+              label="Rango"
+            />
             <Button onClick={() => current.refetch()} disabled={current.isFetching}>
               <RefreshCw className={cn('h-3.5 w-3.5', current.isFetching && 'animate-spin')} />
               Actualizar
@@ -104,14 +144,13 @@ export function StationPage() {
                 subtitle={`Últimas ${hours} horas`}
                 actions={
                   <>
-                    <SeriesLegend
-                      className="hidden sm:flex"
-                      items={[
-                        { label: 'Temperatura', color: palette.aemet },
-                        { label: 'Precipitación', color: palette.accent },
-                      ]}
+                    <SeriesLegend className="hidden sm:flex" items={legendItems} />
+                    <Segmented
+                      value={variable}
+                      onChange={(value) => setState({ var: value }, { replace: false })}
+                      options={VARIABLES}
+                      label="Variable"
                     />
-                    <Segmented value={hours} onChange={setHours} options={RANGES} label="Rango" />
                   </>
                 }
               />
@@ -126,7 +165,7 @@ export function StationPage() {
                     description="Amplía el rango temporal o comprueba que el backfill ha cargado datos históricos."
                   />
                 ) : (
-                  <HistoryChart points={history.data.points} palette={palette} />
+                  <HistoryChart points={history.data.points} palette={palette} variable={variable} />
                 )}
               </div>
             </Panel>

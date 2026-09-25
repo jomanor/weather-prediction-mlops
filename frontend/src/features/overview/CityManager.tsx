@@ -1,7 +1,8 @@
 import { MapPinPlus, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
-import { useAddCity, useCities, useGeoSearch, useRemoveCity } from '@/api/queries'
+import { useCities } from '@/api/queries'
+import { useAddCity, useGeoSearch, useRemoveCity } from '@/features/overview/queries'
 import { cn } from '@/lib/cn'
 import { formatLatitude, formatLongitude } from '@/lib/format'
 
