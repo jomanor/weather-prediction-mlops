@@ -1,6 +1,8 @@
 # Meteo platform roadmap
 
 Goal: a **free**, highly customizable, comprehensive weather + ML platform.
+Environment, hard rules and deploy-verification steps live in `docs/handoff.md` —
+read that first.
 Stack stays as-is (FastAPI/Mongo Atlas M0 on Render free, Vite/React on Netlify,
 PySpark batch jobs on GitHub Actions). Public repo => standard Actions minutes are
 unlimited, so cron density is free; the binding constraints are Atlas M0 512 MB,
