@@ -13,6 +13,7 @@ import {
 
 import type { Prediction, WeatherPoint } from '@/api/schemas'
 import { buildHistoryChartData } from '@/components/charts/history-rows'
+import { ChartBrush } from '@/components/charts/ChartBrush'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
 import { useChartSync } from '@/hooks/useChartSync'
@@ -216,6 +217,8 @@ export function HistoryChart({
             isAnimationActive={false}
           />
         ) : null}
+
+        <ChartBrush rows={data} palette={palette} />
       </ComposedChart>
     </ResponsiveContainer>
   )

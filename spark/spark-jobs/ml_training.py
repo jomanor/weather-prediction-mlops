@@ -40,10 +40,12 @@ def load_features(spark):
     # A blanket dropna() here deleted every row. weather_features is a union of
     # two generations of documents, and a column that only one of them wrote is
     # null in all the others, so no row is complete across every column. Keep
-    # what training cannot invent -- the observation and its labels -- and let
-    # the assembler skip rows with gaps in individual features instead.
-    label_cols = [c for c in df.columns if c.startswith("target_")]
-    df_clean = df.dropna(subset=["city", "timestamp", "temperature"] + label_cols)
+    # what training cannot invent -- the observation -- and let the per-horizon
+    # loop drop its own label columns, then let the assembler skip rows with gaps
+    # in individual features. Targets are deliberately NOT dropped here: with
+    # several horizons, requiring every ``target_*`` column non-null would throw
+    # away the newest ~24h of observations per city.
+    df_clean = df.dropna(subset=["city", "timestamp", "temperature"])
 
     # An overlapping scheduled run can write the same city+hour twice; that is
     # one observation, so keep a single sample per hour rather than one per time
@@ -64,6 +66,13 @@ def prepare_features_for_ml(df, target_col, horizon=1):
         target_temp_col,
         target_rain_col,
     ]
+    # Every horizon's target columns are written by ``create_target_variable``
+    # now, not just this one. A future-horizon label (e.g. ``target_temp_3h``)
+    # is numeric, ~always present, and would otherwise survive the 50%-presence
+    # filter and leak the actual future temperature into the features — and the
+    # newest feature row has all of them null, so the assembler would drop it.
+    # Exclude all ``target_*`` regardless of horizon.
+    exclude_cols += [c for c in df.columns if c.startswith("target_")]
 
     # A field the connector could not infer (absent, or null in every sampled
     # document) arrives as `void`, and VectorAssembler rejects that type
@@ -268,6 +277,204 @@ def _interval_offsets(residuals, level=0.8):
     }
 
 
+# ---------------------------------------------------------------------------
+# M4 diagnostics: slices + drift PSI (Contract 3)
+# ---------------------------------------------------------------------------
+
+#: Core numeric features the drift PSI covers. These are the physical inputs
+#: (the ``save_features_to_mongodb`` dropna subset plus ``specific_humidity``
+#: and ``precipitation``); derived lag/rolling/cyclical columns are excluded so
+#: the PSI stays interpretable and cheap to compute on the nightly job.
+DRIFT_FEATURES = (
+    "temperature",
+    "humidity",
+    "pressure",
+    "wind_speed",
+    "specific_humidity",
+    "precipitation",
+)
+
+#: by_hour_of_day emits all 24 local hours; by_rain_bucket all 4 buckets.
+HOUR_LABELS = [str(h) for h in range(24)]
+RAIN_BUCKET_LABELS = ["dry", "light", "moderate", "heavy"]
+
+#: Rain buckets on observed precipitation (mm): dry <0.1, light 0.1–2,
+#: moderate 2–8, heavy >=8.
+RAIN_BUCKET_EDGES = [0.1, 2.0, 8.0]
+
+
+def _to_float(value):
+    """Collapse a Spark/NumPy scalar to a finite float, or None."""
+    if value is None:
+        return None
+    value = float(value)
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return value
+
+
+def _grid_config(section: str, horizon: int) -> dict:
+    """Param grid for *section*, reduced to one value per parameter (the first)
+    for long horizons (``horizon >= ML_CONFIG["long_horizon_from"]``)."""
+    config = ML_CONFIG[section]
+    if horizon >= ML_CONFIG["long_horizon_from"]:
+        return {name: [values[0]] for name, values in config.items()}
+    return config
+
+
+def _psi_bin_index(value, lo, width, n_bins):
+    """Bin index for a PSI histogram, clamped to ``[0, n_bins-1]``.
+
+    Values below ``lo`` (or at/above the last edge) are clamped rather than let
+    Python's negative-index wraparound send them to the last bin.
+    """
+    return max(0, min(int((value - lo) / width), n_bins - 1))
+
+
+def compute_drift_psi(train_df, test_df, features=None):
+    """Population Stability Index of *test_df* vs *train_df*, per numeric feature.
+
+    Ten equal-width bins are derived from the **train** distribution (the
+    reference); the test distribution is the compared one. Empty bins get an
+    ``eps`` guard. A feature is null when it is absent from either frame or has
+    too few non-null rows (<10). This is a train→test drift **proxy**, not a
+    true PSI (true PSI uses an expected/observed split; here we compare two
+    populations with the reference binned first), and is documented as such.
+    """
+    eps = 1e-6
+    min_rows = 10
+    n_bins = 10
+
+    features = list(features if features is not None else DRIFT_FEATURES)
+    result = {}
+    for col in features:
+        if col not in train_df.columns or col not in test_df.columns:
+            result[col] = None
+            continue
+        train_vals = [r[0] for r in train_df.select(col).na.drop().collect()]
+        test_vals = [r[0] for r in test_df.select(col).na.drop().collect()]
+        if len(train_vals) < min_rows or len(test_vals) < min_rows:
+            result[col] = None
+            continue
+
+        lo = min(train_vals)
+        width = (max(train_vals) - lo) / n_bins
+        if width <= 0:
+            result[col] = None  # constant feature: no meaningful bins
+            continue
+
+        train_counts = [0.0] * n_bins
+        for v in train_vals:
+            train_counts[_psi_bin_index(v, lo, width, n_bins)] += 1.0
+        test_counts = [0.0] * n_bins
+        for v in test_vals:
+            test_counts[_psi_bin_index(v, lo, width, n_bins)] += 1.0
+
+        psi = 0.0
+        for i in range(n_bins):
+            train_p = max(train_counts[i] / len(train_vals), eps)
+            test_p = max(test_counts[i] / len(test_vals), eps)
+            psi += (test_p - train_p) * math.log(test_p / train_p)
+        result[col] = float(psi)
+
+    return result
+
+
+def _rain_bucket_column(df):
+    """Add ``_rain_bucket`` from observed ``precipitation`` (null-safe)."""
+    p = F.col("precipitation")
+    return df.withColumn(
+        "_rain_bucket",
+        F.when(p.isNull(), None)
+        .when(p < RAIN_BUCKET_EDGES[0], RAIN_BUCKET_LABELS[0])
+        .when(p < RAIN_BUCKET_EDGES[1], RAIN_BUCKET_LABELS[1])
+        .when(p < RAIN_BUCKET_EDGES[2], RAIN_BUCKET_LABELS[2])
+        .otherwise(RAIN_BUCKET_LABELS[3]),
+    )
+
+
+def _temperature_slice_rows(test_scored, group_col, target_col, labels):
+    """Temperature slice rows: rmse/mae/bias per group (brier always null).
+
+    *labels* fixes the emitted cardinality (every label is returned, with
+    ``n:0`` and nulls when the group has no rows); ``None`` uses the groups
+    actually present in the frame.
+    """
+    agg = test_scored.groupBy(group_col).agg(
+        F.count("*").alias("n"),
+        F.sqrt(F.mean((F.col(target_col) - F.col("prediction")) ** 2)).alias("rmse"),
+        F.mean(F.abs(F.col(target_col) - F.col("prediction"))).alias("mae"),
+        F.mean(F.col("prediction") - F.col(target_col)).alias("bias"),
+    )
+    index = {str(r[group_col]): r for r in agg.collect()}
+    if labels is None:
+        labels = sorted(index.keys())
+    return [
+        {
+            "label": str(label),
+            "n": int(index[str(label)]["n"]) if str(label) in index else 0,
+            "rmse": _to_float(index[str(label)]["rmse"]) if str(label) in index else None,
+            "mae": _to_float(index[str(label)]["mae"]) if str(label) in index else None,
+            "bias": _to_float(index[str(label)]["bias"]) if str(label) in index else None,
+            "brier": None,
+        }
+        for label in labels
+    ]
+
+
+def _rain_slice_rows(test_scored, group_col, target_col, labels):
+    """Rain slice rows: Brier score per group (rmse/mae/bias always null)."""
+    pos_prob = vector_to_array(F.col("probability"))[1]
+    agg = test_scored.groupBy(group_col).agg(
+        F.count("*").alias("n"),
+        F.mean((pos_prob - F.col(target_col)) ** 2).alias("brier"),
+    )
+    index = {str(r[group_col]): r for r in agg.collect()}
+    if labels is None:
+        labels = sorted(index.keys())
+    return [
+        {
+            "label": str(label),
+            "n": int(index[str(label)]["n"]) if str(label) in index else 0,
+            "rmse": None,
+            "mae": None,
+            "bias": None,
+            "brier": _to_float(index[str(label)]["brier"]) if str(label) in index else None,
+        }
+        for label in labels
+    ]
+
+
+def build_diagnostics(train_df, test_scored, target_col, kind):
+    """M4 diagnostics computed on the temporal test split (``test_scored``).
+
+    ``kind`` selects the metric family: ``"temperature"`` fills rmse/mae/bias
+    per slice, ``"rain"`` fills Brier. ``drift_psi`` is the train→test feature
+    distribution proxy and is identical for both kinds.
+    """
+    if kind == "temperature":
+        by_city = _temperature_slice_rows(test_scored, "city", target_col, None)
+        by_hour = _temperature_slice_rows(test_scored, "hour", target_col, HOUR_LABELS)
+        bucketed = _rain_bucket_column(test_scored)
+        by_bucket = _temperature_slice_rows(
+            bucketed, "_rain_bucket", target_col, RAIN_BUCKET_LABELS
+        )
+    elif kind == "rain":
+        by_city = _rain_slice_rows(test_scored, "city", target_col, None)
+        by_hour = _rain_slice_rows(test_scored, "hour", target_col, HOUR_LABELS)
+        bucketed = _rain_bucket_column(test_scored)
+        by_bucket = _rain_slice_rows(bucketed, "_rain_bucket", target_col, RAIN_BUCKET_LABELS)
+    else:
+        raise ValueError(f"unknown diagnostics kind: {kind!r}")
+
+    return {
+        "by_city": by_city,
+        "by_hour_of_day": by_hour,
+        "by_rain_bucket": by_bucket,
+        "drift_psi": compute_drift_psi(train_df, test_scored),
+    }
+
+
 def train_temperature_prediction_model(df, train_df, val_df, test_df, horizon=1):
     target_col = f"target_temp_{horizon}h"
 
@@ -283,39 +490,39 @@ def train_temperature_prediction_model(df, train_df, val_df, test_df, horizon=1)
         "GradientBoostedTrees": ParamGridBuilder()
         .addGrid(
             models["GradientBoostedTrees"].maxDepth,
-            ML_CONFIG["gradient_boosted_trees"]["maxDepth"],
+            _grid_config("gradient_boosted_trees", horizon)["maxDepth"],
         )
         .addGrid(
             models["GradientBoostedTrees"].maxIter,
-            ML_CONFIG["gradient_boosted_trees"]["maxIter"],
+            _grid_config("gradient_boosted_trees", horizon)["maxIter"],
         )
         .addGrid(
             models["GradientBoostedTrees"].stepSize,
-            ML_CONFIG["gradient_boosted_trees"]["stepSize"],
+            _grid_config("gradient_boosted_trees", horizon)["stepSize"],
         )
         .build(),
         "RandomForest": ParamGridBuilder()
         .addGrid(
             models["RandomForest"].numTrees,
-            ML_CONFIG["random_forest_regressor"]["numTrees"],
+            _grid_config("random_forest_regressor", horizon)["numTrees"],
         )
         .addGrid(
             models["RandomForest"].maxDepth,
-            ML_CONFIG["random_forest_regressor"]["maxDepth"],
+            _grid_config("random_forest_regressor", horizon)["maxDepth"],
         )
         .addGrid(
             models["RandomForest"].minInstancesPerNode,
-            ML_CONFIG["random_forest_regressor"]["minInstancesPerNode"],
+            _grid_config("random_forest_regressor", horizon)["minInstancesPerNode"],
         )
         .build(),
         "LinearRegression": ParamGridBuilder()
         .addGrid(
             models["LinearRegression"].elasticNetParam,
-            ML_CONFIG["linear_regression"]["elasticNetParam"],
+            _grid_config("linear_regression", horizon)["elasticNetParam"],
         )
         .addGrid(
             models["LinearRegression"].regParam,
-            ML_CONFIG["linear_regression"]["regParam"],
+            _grid_config("linear_regression", horizon)["regParam"],
         )
         .build(),
     }
@@ -438,6 +645,8 @@ def train_temperature_prediction_model(df, train_df, val_df, test_df, horizon=1)
         "upper_offset": interval["upper_offset"],
     }
 
+    diagnostics = build_diagnostics(train_df, test_scored, target_col, "temperature")
+
     return (
         best_model,
         best_model_name,
@@ -455,6 +664,7 @@ def train_temperature_prediction_model(df, train_df, val_df, test_df, horizon=1)
         params,
         interval_meta,
         feature_cols,
+        diagnostics,
     )
 
 
@@ -472,29 +682,29 @@ def train_rain_prediction_model(df, train_df, val_df, test_df, horizon=1):
         "GradientBoostedTrees": ParamGridBuilder()
         .addGrid(
             models["GradientBoostedTrees"].maxDepth,
-            ML_CONFIG["gradient_boosted_trees_classifier"]["maxDepth"],
+            _grid_config("gradient_boosted_trees_classifier", horizon)["maxDepth"],
         )
         .addGrid(
             models["GradientBoostedTrees"].maxIter,
-            ML_CONFIG["gradient_boosted_trees_classifier"]["maxIter"],
+            _grid_config("gradient_boosted_trees_classifier", horizon)["maxIter"],
         )
         .addGrid(
             models["GradientBoostedTrees"].stepSize,
-            ML_CONFIG["gradient_boosted_trees_classifier"]["stepSize"],
+            _grid_config("gradient_boosted_trees_classifier", horizon)["stepSize"],
         )
         .build(),
         "RandomForest": ParamGridBuilder()
         .addGrid(
             models["RandomForest"].numTrees,
-            ML_CONFIG["random_forest_classifier"]["numTrees"],
+            _grid_config("random_forest_classifier", horizon)["numTrees"],
         )
         .addGrid(
             models["RandomForest"].maxDepth,
-            ML_CONFIG["random_forest_classifier"]["maxDepth"],
+            _grid_config("random_forest_classifier", horizon)["maxDepth"],
         )
         .addGrid(
             models["RandomForest"].minInstancesPerNode,
-            ML_CONFIG["random_forest_classifier"]["minInstancesPerNode"],
+            _grid_config("random_forest_classifier", horizon)["minInstancesPerNode"],
         )
         .build(),
     }
@@ -568,6 +778,8 @@ def train_rain_prediction_model(df, train_df, val_df, test_df, horizon=1):
     prevalence = _prevalence(test_scored, target_col)
     skill_score = _skill_score(brier, persistence_brier)
 
+    diagnostics = build_diagnostics(train_df, test_scored, target_col, "rain")
+
     return (
         best_model,
         best_model_name,
@@ -584,6 +796,7 @@ def train_rain_prediction_model(df, train_df, val_df, test_df, horizon=1):
         params,
         None,
         feature_cols,
+        diagnostics,
     )
 
 
@@ -685,6 +898,7 @@ def save_model(
     split=None,
     interval=None,
     data_snapshot=None,
+    diagnostics=None,
 ):
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     temp_dir = os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp")
@@ -735,6 +949,8 @@ def save_model(
             metadata["interval"] = _json_safe(interval)
         if data_snapshot:
             metadata["data_snapshot"] = _json_safe(data_snapshot)
+        if diagnostics:
+            metadata["diagnostics"] = _json_safe(diagnostics)
         metadata["commit"] = os.getenv("GITHUB_SHA") or "unknown"
 
         db[metadata_collection].insert_one(metadata)
@@ -760,98 +976,112 @@ def main():
     try:
         # Both trainers read the whole feature table (column-presence counts and
         # then the split), so cache it once: without this the run reads Atlas
-        # four times, which is a large part of the CI runtime.
+        # once per horizon, which is a large part of the CI runtime.
         df = load_features(spark).cache()
         df.count()
 
-        horizon = FEATURES_CONFIG["target_horizon"]
+        horizons = FEATURES_CONFIG["target_horizons"]
 
-        print(f"\n=== Training models with {horizon}h prediction horizon ===\n")
+        for horizon in horizons:
+            print(f"\n=== Training models with {horizon}h prediction horizon ===\n")
 
-        # Split once, then share the frames with both trainers. cache() spills to
-        # disk, so it stays safe on the runner's modest driver heap, and avoids
-        # re-reading / re-sorting the frame per candidate fit.
-        train_df, val_df, test_df, split_meta = temporal_split(df)
-        train_df = train_df.cache()
-        val_df = val_df.cache()
-        test_df = test_df.cache()
-        print(
-            f"Train size: {train_df.count()}, "
-            f"Validation size: {val_df.count()}, "
-            f"Test size: {test_df.count()}"
-        )
+            # Drop only this horizon's labels: with several horizons a blanket
+            # drop would discard the newest rows for every long horizon.
+            label_cols = [f"target_temp_{horizon}h", f"target_will_rain_{horizon}h"]
+            horizon_df = df.dropna(subset=label_cols)
 
-        (
-            temp_model,
-            temp_model_name,
-            temp_features,
-            temp_metrics,
-            temp_params,
-            temp_interval,
-            temp_feature_cols,
-        ) = train_temperature_prediction_model(df, train_df, val_df, test_df, horizon)
-        (
-            rain_model,
-            rain_model_name,
-            rain_features,
-            rain_metrics,
-            rain_params,
-            _,
-            _,
-        ) = train_rain_prediction_model(df, train_df, val_df, test_df, horizon)
+            # Split per horizon, then share the frames with both trainers.
+            # cache() spills to disk, so it stays safe on the runner's modest
+            # driver heap, and avoids re-reading / re-sorting per candidate fit.
+            train_df, val_df, test_df, split_meta = temporal_split(horizon_df)
+            train_df = train_df.cache()
+            val_df = val_df.cache()
+            test_df = test_df.cache()
+            print(
+                f"Train size: {train_df.count()}, "
+                f"Validation size: {val_df.count()}, "
+                f"Test size: {test_df.count()}"
+            )
 
-        # One snapshot of the training frame; both models were trained on the
-        # same rows and the same feature list.
-        data_snapshot = _build_data_snapshot(df, temp_feature_cols)
+            (
+                temp_model,
+                temp_model_name,
+                temp_features,
+                temp_metrics,
+                temp_params,
+                temp_interval,
+                temp_feature_cols,
+                temp_diagnostics,
+            ) = train_temperature_prediction_model(horizon_df, train_df, val_df, test_df, horizon)
+            (
+                rain_model,
+                rain_model_name,
+                rain_features,
+                rain_metrics,
+                rain_params,
+                _,
+                _,
+                rain_diagnostics,
+            ) = train_rain_prediction_model(horizon_df, train_df, val_df, test_df, horizon)
 
-        # --- persist to GridFS (used by inference.py) ---
-        save_model(
-            temp_model,
-            f"temp_prediction_{horizon}h_{temp_model_name}",
-            model_type=temp_model_name,
-            target="temperature",
-            horizon=horizon,
-            metrics=temp_metrics,
-            important_features=temp_features,
-            params=temp_params,
-            split=split_meta,
-            interval=temp_interval,
-            data_snapshot=data_snapshot,
-        )
-        save_model(
-            rain_model,
-            f"rain_prediction_{horizon}h_{rain_model_name}",
-            model_type=rain_model_name,
-            target="rain",
-            horizon=horizon,
-            metrics=rain_metrics,
-            important_features=rain_features,
-            params=rain_params,
-            split=split_meta,
-            data_snapshot=data_snapshot,
-        )
+            # One snapshot of this horizon's training frame; both models were
+            # trained on the same rows and the same feature list.
+            data_snapshot = _build_data_snapshot(horizon_df, temp_feature_cols)
 
-        # --- log to MLflow ---
-        _log_to_mlflow(
-            run_name=f"temp_{temp_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            model_type="temperature",
-            model_name=temp_model_name,
-            params=temp_params,
-            metrics=temp_metrics,
-            important_features=temp_features,
-            model=temp_model,
-            horizon=horizon,
-        )
-        _log_to_mlflow(
-            run_name=f"rain_{rain_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            model_type="rain",
-            model_name=rain_model_name,
-            params=rain_params,
-            metrics=rain_metrics,
-            important_features=rain_features,
-            model=rain_model,
-            horizon=horizon,
-        )
+            # --- persist to GridFS (used by inference.py) ---
+            save_model(
+                temp_model,
+                f"temp_prediction_{horizon}h_{temp_model_name}",
+                model_type=temp_model_name,
+                target="temperature",
+                horizon=horizon,
+                metrics=temp_metrics,
+                important_features=temp_features,
+                params=temp_params,
+                split=split_meta,
+                interval=temp_interval,
+                data_snapshot=data_snapshot,
+                diagnostics=temp_diagnostics,
+            )
+            save_model(
+                rain_model,
+                f"rain_prediction_{horizon}h_{rain_model_name}",
+                model_type=rain_model_name,
+                target="rain",
+                horizon=horizon,
+                metrics=rain_metrics,
+                important_features=rain_features,
+                params=rain_params,
+                split=split_meta,
+                data_snapshot=data_snapshot,
+                diagnostics=rain_diagnostics,
+            )
+
+            # --- log to MLflow ---
+            _log_to_mlflow(
+                run_name=f"temp_{temp_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                model_type="temperature",
+                model_name=temp_model_name,
+                params=temp_params,
+                metrics=temp_metrics,
+                important_features=temp_features,
+                model=temp_model,
+                horizon=horizon,
+            )
+            _log_to_mlflow(
+                run_name=f"rain_{rain_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                model_type="rain",
+                model_name=rain_model_name,
+                params=rain_params,
+                metrics=rain_metrics,
+                important_features=rain_features,
+                model=rain_model,
+                horizon=horizon,
+            )
+
+            # Free the per-horizon split frames before the next horizon.
+            for frame in (train_df, val_df, test_df):
+                frame.unpersist()
 
         # Scoring is inference.py's job: it writes the ``source_timestamp`` /
         # ``predicted_temperature`` schema the API reads. ml_training used to

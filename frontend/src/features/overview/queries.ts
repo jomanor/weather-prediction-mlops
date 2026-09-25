@@ -5,7 +5,6 @@ import { queryKeys, useApiQuery } from '@/api/queries'
 import {
   citySchema,
   geoSearchResponseSchema,
-  latestPredictionsSchema,
   stationCollectionSchema,
   stationsResponseSchema,
   type City,
@@ -22,11 +21,6 @@ export const useStations = () =>
 export const useMapStations = () =>
   useApiQuery(queryKeys.mapStations, '/map/stations', stationCollectionSchema, {
     refetchInterval: 5 * 60_000,
-  })
-
-export const useLatestPredictions = () =>
-  useApiQuery(queryKeys.latestPredictions, '/predictions/latest', latestPredictionsSchema, {
-    refetchInterval: 10 * 60_000,
   })
 
 /** Free-form location lookup against the Open-Meteo geocoding proxy. */

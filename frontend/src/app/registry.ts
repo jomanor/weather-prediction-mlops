@@ -1,4 +1,5 @@
 import { orderNavItems, type FeatureManifest, type NavItem } from '@/app/nav'
+import { analyticsFeature } from '@/features/analytics'
 import { benchmarkFeature } from '@/features/benchmark'
 import { modelsFeature } from '@/features/models'
 import { overviewFeature } from '@/features/overview'
@@ -16,6 +17,7 @@ export const FEATURES: FeatureManifest[] = [
   stationFeature,
   benchmarkFeature,
   modelsFeature,
+  analyticsFeature,
 ]
 
 /** Absolute path of a feature route inside the shell. */

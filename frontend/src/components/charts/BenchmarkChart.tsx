@@ -10,6 +10,7 @@ import {
 } from 'recharts'
 
 import type { SeriesPoint } from '@/api/schemas'
+import { ChartBrush } from '@/components/charts/ChartBrush'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
 import { useChartSync } from '@/hooks/useChartSync'
@@ -116,6 +117,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
           connectNulls={false}
           isAnimationActive={false}
         />
+        <ChartBrush rows={data} palette={palette} />
       </LineChart>
     </ResponsiveContainer>
   )

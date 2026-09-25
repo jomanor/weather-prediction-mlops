@@ -9,7 +9,38 @@ them (MLflow-registered models do), otherwise they are null — never invented.
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class SliceMetric(BaseModel):
+    """Error metric for one diagnostic slice (Batch 4, Contract 3).
+
+    Temperature slices fill ``rmse``/``mae``/``bias``; rain slices fill
+    ``brier``. A slice with no rows is emitted with ``n: 0`` and nulls.
+    """
+
+    label: str
+    n: int = 0
+    rmse: float | None = None
+    mae: float | None = None
+    bias: float | None = None
+    brier: float | None = None
+
+
+class ModelDiagnostics(BaseModel):
+    """Temporal-test-split slice diagnostics + train→test drift PSI (Batch 4).
+
+    Additive: ``model_registry`` documents written before Batch 4 have no
+    ``diagnostics`` key, and the mapping keeps them ``None`` rather than
+    inventing empty slices.
+    """
+
+    by_city: list[SliceMetric] = Field(default_factory=list)
+    by_hour_of_day: list[SliceMetric] = Field(default_factory=list)
+    by_rain_bucket: list[SliceMetric] = Field(default_factory=list)
+    #: Per numeric feature: PSI of the test distribution vs the train one.
+    #: ``None`` when the feature has too few rows; documented as a drift proxy.
+    drift_psi: dict[str, float | None] = Field(default_factory=dict)
 
 
 class ModelMetrics(BaseModel):
@@ -38,6 +69,7 @@ class ModelInfo(BaseModel):
     split: dict | None = None
     interval: dict | None = None
     commit: str | None = None
+    diagnostics: ModelDiagnostics | None = None
 
     model_config = ConfigDict(
         protected_namespaces=(),

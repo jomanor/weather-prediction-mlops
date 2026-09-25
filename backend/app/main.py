@@ -15,7 +15,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import RequestContextMiddleware, configure_logging
 from app.db.mongo import create_client, ensure_indexes, ping
 from app.repositories.city_repo import seed_default_cities
-from app.routers import benchmark, cities, health, models, predictions, weather
+from app.routers import analytics, benchmark, cities, health, models, predictions, weather
 from app.routers.map import router as map_router
 from app.services.aemet import AemetService
 from app.services.geo import GeocodingService
@@ -128,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.include_router(predictions.router)
     api.include_router(benchmark.router)
     api.include_router(models.router)
+    api.include_router(analytics.router)
     app.include_router(api)
 
     return app

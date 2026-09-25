@@ -1,20 +1,26 @@
 import { RefreshCw } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 
 import { useCities } from '@/api/queries'
 import { usePreferences } from '@/app/preferences'
 import { HistoryChart, type HistoryVariable } from '@/components/charts/HistoryChart'
 import { SeriesLegend } from '@/components/charts/SeriesLegend'
 import { Button } from '@/components/ui/Button'
-import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
+import { EmptyState, ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { CurrentConditions } from '@/features/station/CurrentConditions'
 import { DerivedPanel } from '@/features/station/DerivedPanel'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
-import { useCurrentWeather, useHistory, usePredictions } from '@/features/station/queries'
-import { useChartSync } from '@/hooks/useChartSync'
+import {
+  PREDICTION_HORIZONS,
+  useCurrentWeather,
+  useHistory,
+  usePredictions,
+  type PredictionHorizon,
+} from '@/features/station/queries'
+import { useChartWindow } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
@@ -36,37 +42,41 @@ const VARIABLES: ReadonlyArray<{ value: HistoryVariable; label: string }> = [
   { value: 'wind', label: 'Viento' },
 ]
 
-/* URL state: the station is shared app-wide; range and variable are local views. */
-const STATION_SCHEMA: { hours: UrlCodec<StationHours>; var: UrlCodec<HistoryVariable> } = {
+/* Contract 2: horizon selector over the M2 config; default +1 h. */
+const HORIZON_OPTIONS: ReadonlyArray<{ value: PredictionHorizon; label: string }> =
+  PREDICTION_HORIZONS.map((value) => ({ value, label: `+${value} h` }))
+
+/* URL state: the station is shared app-wide; range, variable and horizon are local views. */
+const STATION_SCHEMA: {
+  hours: UrlCodec<StationHours>
+  var: UrlCodec<HistoryVariable>
+  horizon: UrlCodec<PredictionHorizon>
+} = {
   hours: urlOption(HOURS, 48),
   var: urlOption(['temperature', 'precipitation', 'wind'] as const, 'temperature'),
+  horizon: urlOption(PREDICTION_HORIZONS, 1),
 }
 
 export function StationPage() {
   const [state, setState] = useUrlState(STATION_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette, units } = usePreferences()
-  const { setWindow } = useChartSync()
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
   const city = resolveCity(selectedCity, cities, cityList !== undefined)
   const hours = state.hours
   const variable = state.var
+  const horizon = state.horizon
 
   const current = useCurrentWeather(city)
   const history = useHistory(city, hours)
-  const predictions = usePredictions(city, 24)
+  const predictions = usePredictions(city, 24, horizon)
   const intervalLevel =
     predictions.data?.find((prediction) => isNum(prediction.interval_level))?.interval_level ?? null
 
   /* Share the observed window with the benchmark charts on the same time axis. */
-  const anchor = history.data?.points.at(-1)?.observed_at
-  useEffect(() => {
-    if (!anchor) return
-    const anchorMs = new Date(anchor).getTime()
-    if (Number.isFinite(anchorMs)) setWindow(hours, anchorMs)
-  }, [anchor, hours, setWindow])
+  const { brushed, resetWindow } = useChartWindow(hours, history.data?.points.at(-1)?.observed_at)
 
   const legendItems =
     variable === 'temperature'
@@ -108,6 +118,12 @@ export function StationPage() {
               onChange={(value) => setState({ hours: value })}
               options={RANGES}
               label="Rango"
+            />
+            <Segmented
+              value={horizon}
+              onChange={(value) => setState({ horizon: value })}
+              options={HORIZON_OPTIONS}
+              label="Horizonte de predicción"
             />
             <Button onClick={() => current.refetch()} disabled={current.isFetching}>
               <RefreshCw className={cn('h-3.5 w-3.5', current.isFetching && 'animate-spin')} />
@@ -151,6 +167,11 @@ export function StationPage() {
                 actions={
                   <>
                     <SeriesLegend className="hidden sm:flex" items={legendItems} />
+                    {brushed ? (
+                      <Button size="sm" onClick={resetWindow}>
+                        Restablecer zoom
+                      </Button>
+                    ) : null}
                     <Segmented
                       value={variable}
                       onChange={(value) => setState({ var: value }, { replace: false })}
@@ -162,7 +183,7 @@ export function StationPage() {
               />
               <div className="p-3">
                 {history.isLoading ? (
-                  <LoadingBlock />
+                  <ChartSkeleton />
                 ) : history.isError ? (
                   <ErrorState title="Sin histórico" description={history.error.message} />
                 ) : !history.data?.points.length ? (

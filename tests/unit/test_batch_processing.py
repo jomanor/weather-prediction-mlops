@@ -35,7 +35,7 @@ fake_config = mock.MagicMock()
 fake_config.FEATURES_CONFIG = {
     "lag_periods": [1, 3],
     "window_sizes": [6],
-    "target_horizon": 1,
+    "target_horizons": [1, 3],
 }
 fake_config.create_spark_session = mock.MagicMock()
 sys.modules.setdefault("spark_config", fake_config)
@@ -238,13 +238,19 @@ class TestLocalHour:
 
 class TestCreateTargetVariable:
     def test_target_column_added(self, sample_df):
-        result = bp.create_target_variable(sample_df, horizon=1)
+        result = bp.create_target_variable(sample_df, horizons=[1])
         assert "target_temp_1h" in result.columns
         assert "target_will_rain_1h" in result.columns
 
+    def test_multiple_horizons_written_in_one_pass(self, sample_df):
+        result = bp.create_target_variable(sample_df, horizons=[1, 3, 6])
+        for h in (1, 3, 6):
+            assert f"target_temp_{h}h" in result.columns
+            assert f"target_will_rain_{h}h" in result.columns
+
     def test_last_row_target_is_null(self, sample_df):
         """The last row has no future value, so target must be null."""
-        result = bp.create_target_variable(sample_df, horizon=1)
+        result = bp.create_target_variable(sample_df, horizons=[1])
         # Sort by timestamp descending so first row of this query is the last one
         from pyspark.sql import functions as F
 
@@ -255,11 +261,30 @@ class TestCreateTargetVariable:
         """target_will_rain must be 0 or 1 (or null for the last row)."""
         from pyspark.sql import functions as F
 
-        result = bp.create_target_variable(sample_df, horizon=1)
+        result = bp.create_target_variable(sample_df, horizons=[1])
         non_binary = result.filter(
             F.col("target_will_rain_1h").isNotNull() & ~F.col("target_will_rain_1h").isin([0, 1])
         ).count()
         assert non_binary == 0
+
+
+# ---------------------------------------------------------------------------
+# save_features_to_mongodb — freshness fix (dropna subset = observation inputs)
+# ---------------------------------------------------------------------------
+
+
+class TestSaveFeaturesDropnaSubset:
+    def test_observation_inputs_exclude_targets(self):
+        # The dropna subset is the observation inputs only; a target column in
+        # the subset would discard the newest observation row (null lead target)
+        # and force every healthy rebuild to land ~6 h stale.
+        assert bp.OBSERVATION_INPUT_COLUMNS == [
+            "temperature",
+            "humidity",
+            "pressure",
+            "wind_speed",
+        ]
+        assert not any(c.startswith("target_") for c in bp.OBSERVATION_INPUT_COLUMNS)
 
 
 # ---------------------------------------------------------------------------

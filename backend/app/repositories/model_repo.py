@@ -8,7 +8,12 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.coerce import as_utc, to_float, to_int
 from app.db.mongo import get_db
-from app.schemas.models import ModelInfo, ModelMetrics
+from app.schemas.models import (
+    ModelDiagnostics,
+    ModelInfo,
+    ModelMetrics,
+    SliceMetric,
+)
 
 # e.g. temp_prediction_1h_GradientBoostedTrees / rain_prediction_3h_RandomForest
 _NAME_RE = re.compile(r"^(?P<kind>temp|rain)_prediction_(?P<horizon>\d+)h", re.IGNORECASE)
@@ -24,6 +29,47 @@ def _target_from_name(name: str) -> str | None:
 def _horizon_from_name(name: str) -> int | None:
     match = _NAME_RE.match(name)
     return int(match.group("horizon")) if match else None
+
+
+def _slice_metrics(raw: Any) -> list[SliceMetric]:
+    """Map a registry list of slice dicts; a malformed entry is dropped."""
+    if not isinstance(raw, list):
+        return []
+    slices: list[SliceMetric] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        if not isinstance(label, str):
+            continue
+        slices.append(
+            SliceMetric(
+                label=label,
+                n=to_int(item.get("n")) or 0,
+                rmse=to_float(item.get("rmse")),
+                mae=to_float(item.get("mae")),
+                bias=to_float(item.get("bias")),
+                brier=to_float(item.get("brier")),
+            )
+        )
+    return slices
+
+
+def _diagnostics_from_doc(raw: Any) -> ModelDiagnostics | None:
+    """Map the additive Batch 4 ``diagnostics`` block; legacy docs -> None."""
+    if not isinstance(raw, dict):
+        return None
+    drift = raw.get("drift_psi")
+    return ModelDiagnostics(
+        by_city=_slice_metrics(raw.get("by_city")),
+        by_hour_of_day=_slice_metrics(raw.get("by_hour_of_day")),
+        by_rain_bucket=_slice_metrics(raw.get("by_rain_bucket")),
+        drift_psi=(
+            {key: to_float(value) for key, value in drift.items()}
+            if isinstance(drift, dict)
+            else {}
+        ),
+    )
 
 
 def model_from_doc(doc: dict[str, Any]) -> ModelInfo | None:
@@ -62,6 +108,7 @@ def model_from_doc(doc: dict[str, Any]) -> ModelInfo | None:
         split=split if isinstance(split, dict) else None,
         interval=interval if isinstance(interval, dict) else None,
         commit=commit if isinstance(commit, str) else None,
+        diagnostics=_diagnostics_from_doc(doc.get("diagnostics")),
     )
 
 
