@@ -161,6 +161,24 @@ def load_latest_features(spark, mongo_url: str):
 # ---------------------------------------------------------------------------
 
 
+def _pipeline_scratch_columns(model) -> list[str]:
+    """Intermediate columns a pipeline adds besides ``prediction``.
+
+    Training names the assembler output ``features_raw`` and the scaler
+    output ``features`` (see ``prepare_features_for_ml``). The second model's
+    pipeline writes the same names, so Spark raises
+    ``IllegalArgumentException: Output column features_raw already exists``
+    unless the first model's scratch columns are dropped in between.
+    """
+    scratch = []
+    for stage in getattr(model, "stages", []):
+        if stage.hasParam("outputCol"):
+            column = stage.getOutputCol()
+            if column != "prediction":
+                scratch.append(column)
+    return scratch
+
+
 def run_inference(
     spark,
     temp_model,
@@ -179,11 +197,17 @@ def run_inference(
         pred_df = temp_model.transform(pred_df).withColumnRenamed(
             "prediction", "predicted_temperature"
         )
+        scratch = _pipeline_scratch_columns(temp_model)
+        if scratch:
+            pred_df = pred_df.drop(*scratch)
     else:
         pred_df = pred_df.withColumn("predicted_temperature", F.lit(None).cast("double"))
 
     if rain_model is not None:
         pred_df = rain_model.transform(pred_df).withColumnRenamed("prediction", "predicted_rain")
+        scratch = _pipeline_scratch_columns(rain_model)
+        if scratch:
+            pred_df = pred_df.drop(*scratch)
     else:
         pred_df = pred_df.withColumn("predicted_rain", F.lit(None).cast("double"))
 
