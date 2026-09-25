@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta, timezone
 
 from app.repositories.weather_repo import (
+    _CURRENT_IDENTITY,
+    _RAW_IDENTITY,
     MS_TO_KMH,
     WeatherRepository,
     _downsample_by_step,
@@ -11,6 +13,7 @@ from app.repositories.weather_repo import (
     _projection,
 )
 from app.schemas.weather import CurrentWeather
+from tests.fakes import FakeMongoCollection, FakeMongoDb
 
 UTC = timezone.utc
 OBSERVED_AT = datetime(2026, 9, 23, 12, tzinfo=UTC)
@@ -54,68 +57,45 @@ def test_missing_wind_stays_none():
 # ---------------------------------------------------------------------------
 
 
-class _Cursor:
-    def __init__(self, docs: list[dict]) -> None:
-        self._docs = docs
-
-    def sort(self, _spec):
-        return self
-
-    def limit(self, _count):
-        return self
-
-    def __aiter__(self):
-        self._iterator = iter(self._docs)
-        return self
-
-    async def __anext__(self):
-        try:
-            return next(self._iterator)
-        except StopIteration:
-            raise StopAsyncIteration from None
-
-
-class _Collection:
-    def __init__(self, docs: list[dict]) -> None:
-        self.docs = docs
-        self.find_calls: list[tuple[dict, dict | None]] = []
-
-    def find(self, query, projection=None):
-        self.find_calls.append((query, projection))
-        return _Cursor(self.docs)
-
-
-class _Db:
-    def __init__(self, weather_data: _Collection, raw_weather: _Collection) -> None:
-        self._collections = {"weather_data": weather_data, "raw_weather": raw_weather}
-
-    def __getitem__(self, name):
-        return self._collections[name]
-
-
-def test_projection_limits_to_requested_fields_plus_identity():
+def test_projection_limits_to_requested_fields_plus_collection_identity():
     projection = _projection(
         ["temperature"],
-        {
-            "temperature": ("temperature", "data.main.temp"),
-        },
+        {"temperature": ("temperature", "data.main.temp")},
+        _CURRENT_IDENTITY,
     )
-    assert projection == {"city": 1, "timestamp": 1, "temperature": 1, "data.main.temp": 1}
-    assert _projection(None, {}) is None
+    assert projection == {
+        "city": 1,
+        "timestamp": 1,
+        "latitude": 1,
+        "longitude": 1,
+        "temperature": 1,
+        "data.main.temp": 1,
+    }
+    # raw_weather nests the coordinates under payload.*, so the identity differs.
+    raw_projection = _projection(["temperature"], {}, _RAW_IDENTITY)
+    assert raw_projection == {
+        "city": 1,
+        "timestamp": 1,
+        "payload.latitude": 1,
+        "payload.longitude": 1,
+    }
+    assert _projection(None, {}, _CURRENT_IDENTITY) is None
 
 
-async def test_find_many_in_range_projects_and_sorts_city_first():
-    current = _Collection(
+async def test_find_many_in_range_projects_and_sorts_descending_timestamp():
+    current = FakeMongoCollection(
         [
             {
                 "city": "Madrid",
                 "timestamp": OBSERVED_AT,
+                "latitude": 40.4168,
+                "longitude": -3.7038,
                 "data": {"main": {"temp": 21.0}},
             }
         ]
     )
-    raw = _Collection([])
-    repo = WeatherRepository(_Db(current, raw))
+    raw = FakeMongoCollection([])
+    repo = WeatherRepository(FakeMongoDb(current, raw))
 
     points = await repo.find_many_in_range(
         ["Madrid"],
@@ -125,6 +105,7 @@ async def test_find_many_in_range_projects_and_sorts_city_first():
     )
 
     assert [point.temperature for point in points] == [21.0]
+    assert points[0].latitude == 40.4168 and points[0].longitude == -3.7038
     query, projection = current.find_calls[0]
     assert query == {
         "city": {"$in": ["Madrid"]},
@@ -133,24 +114,38 @@ async def test_find_many_in_range_projects_and_sorts_city_first():
             "$lte": OBSERVED_AT + timedelta(hours=1),
         },
     }
-    assert projection == {"city": 1, "timestamp": 1, "temperature": 1, "data.main.temp": 1}
+    assert projection == {
+        "city": 1,
+        "timestamp": 1,
+        "latitude": 1,
+        "longitude": 1,
+        "temperature": 1,
+        "data.main.temp": 1,
+    }
+    # Must match ``{city: 1, timestamp: -1}``: this is what keeps the query
+    # index-fed instead of forcing a blocking in-memory SORT.
+    assert current.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
     assert raw.find_calls == []  # no fallback when weather_data has the city
 
 
 async def test_find_many_in_range_falls_back_to_raw_per_missing_city():
-    current = _Collection(
+    current = FakeMongoCollection(
         [{"city": "Madrid", "timestamp": OBSERVED_AT, "data": {"main": {"temp": 21.0}}}]
     )
-    raw = _Collection(
+    raw = FakeMongoCollection(
         [
             {
                 "city": "Alicante",
                 "timestamp": OBSERVED_AT,
-                "payload": {"current": {"temperature_2m": 25.0}},
+                "payload": {
+                    "latitude": 38.3452,
+                    "longitude": -0.481,
+                    "current": {"temperature_2m": 25.0},
+                },
             }
         ]
     )
-    repo = WeatherRepository(_Db(current, raw))
+    repo = WeatherRepository(FakeMongoDb(current, raw))
 
     points = await repo.find_many_in_range(
         ["Madrid", "Alicante"],
@@ -164,6 +159,69 @@ async def test_find_many_in_range_falls_back_to_raw_per_missing_city():
     ]
     raw_query, _ = raw.find_calls[0]
     assert raw_query["city"] == {"$in": ["Alicante"]}
+    assert raw.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
+
+
+async def test_find_many_in_range_applies_in_and_range_filters():
+    in_window = {
+        "city": "Madrid",
+        "timestamp": OBSERVED_AT,
+        "data": {"main": {"temp": 21.0}},
+    }
+    before_window = {
+        "city": "Madrid",
+        "timestamp": OBSERVED_AT - timedelta(hours=5),
+        "data": {"main": {"temp": 10.0}},
+    }
+    other_city = {
+        "city": "Alicante",
+        "timestamp": OBSERVED_AT,
+        "data": {"main": {"temp": 30.0}},
+    }
+    current = FakeMongoCollection([before_window, other_city, in_window])
+    repo = WeatherRepository(FakeMongoDb(current, FakeMongoCollection()))
+
+    points = await repo.find_many_in_range(
+        ["Madrid", "Alicante"],
+        OBSERVED_AT - timedelta(hours=1),
+        OBSERVED_AT + timedelta(hours=1),
+    )
+
+    # ``$in`` selects both cities, the timestamp window drops only the old row.
+    assert [(point.city, point.temperature) for point in points] == [
+        ("Alicante", 30.0),
+        ("Madrid", 21.0),
+    ]
+
+
+async def test_raw_fallback_keeps_coordinates_under_projection():
+    raw = FakeMongoCollection(
+        [
+            {
+                "city": "Alicante",
+                "timestamp": OBSERVED_AT,
+                "payload": {
+                    "latitude": 38.3452,
+                    "longitude": -0.481,
+                    "current": {"temperature_2m": 25.0},
+                },
+            }
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(FakeMongoCollection(), raw))
+
+    points = await repo.find_many_in_range(
+        ["Alicante"],
+        OBSERVED_AT - timedelta(hours=1),
+        OBSERVED_AT + timedelta(hours=1),
+        fields=["temperature"],
+    )
+
+    assert points[0].latitude == 38.3452
+    assert points[0].longitude == -0.481
+    _, projection = raw.find_calls[0]
+    assert projection["payload.latitude"] == 1
+    assert projection["payload.longitude"] == 1
 
 
 def _point(city: str, hour: int) -> CurrentWeather:

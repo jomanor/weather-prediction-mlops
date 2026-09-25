@@ -71,9 +71,25 @@ def etag_for(payload: Any) -> str:
     return f'"{digest}"'
 
 
-def _if_none_match(request: Request) -> str | None:
+def _if_none_match(request: Request, etag: str) -> bool:
+    """RFC 7232 §3.2: ``*`` matches any representation; otherwise any listed tag.
+
+    The header may carry a comma-separated list of validators, and the client may
+    send weak tags (``W/"..."``); If-None-Match uses the weak comparison, so the
+    ``W/`` prefix is stripped before comparing.
+    """
     value = request.headers.get("if-none-match")
-    return value.strip() if value else None
+    if not value:
+        return False
+    for candidate in value.split(","):
+        candidate = candidate.strip()
+        if candidate == "*":
+            return True
+        if candidate.startswith("W/"):
+            candidate = candidate[2:].strip()
+        if candidate == etag:
+            return True
+    return False
 
 
 def cache_headers(ttl_seconds: int, etag: str) -> dict[str, str]:
@@ -106,7 +122,7 @@ async def cached(
         value, etag = hit
 
     headers = cache_headers(ttl_seconds, etag)
-    if _if_none_match(request) == etag:
+    if _if_none_match(request, etag):
         return Response(status_code=304, headers=headers)
 
     response.headers.update(headers)
