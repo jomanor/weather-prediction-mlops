@@ -58,6 +58,47 @@ Latest observation per city.
 }
 ```
 
+### `GET /api/weather/quality?days=7`
+
+Data-quality meter over `weather_features` (the model's actual input), one
+entry per city in the window `[now - days, now]`. `days` is an integer 1..30,
+default 7. Cached 300 s with an ETag/`Cache-Control` like the other read
+routes. `completeness = observed_hours / (days * 24)` clamped to 1.0;
+`max_gap_hours` is the largest separation between consecutive observed hours
+(0 when there are fewer than two points); `null_rate` is the fraction of
+observed rows with a null `temperature` (null when there are no rows);
+`age_hours = now - last_observed_at`.
+
+`status` grades completeness (≥ 0.95 / ≥ 0.80) and age (≤ 2 h / ≤ 6 h)
+independently; the worst of the two wins and a missing last observation is
+`bad`. Exactly those inclusivity edges apply (`completeness == 0.95` and
+`age_hours == 2.0` are `ok`; `0.80`/`6.0` are `warn`).
+
+The response always carries one entry per canonical station (the 14 in
+`app/core/cities.py`), so a city whose feature rows stopped arriving is
+reported `bad` with `observed_hours: 0` instead of disappearing. Duplicate
+`(city, timestamp)` rows are counted once.
+
+```json
+{
+  "generated_at": "2026-09-25T12:00:00Z",
+  "days": 7,
+  "cities": [
+    {
+      "city": "Madrid",
+      "expected_hours": 168,
+      "observed_hours": 165,
+      "completeness": 0.982,
+      "max_gap_hours": 3.0,
+      "null_rate": 0.012,
+      "last_observed_at": "2026-09-25T11:00:00Z",
+      "age_hours": 1.0,
+      "status": "ok"
+    }
+  ]
+}
+```
+
 ## Predictions (real Spark GBT output)
 
 ### `GET /api/predictions/latest`
@@ -121,7 +162,11 @@ Per-city summary, no series.
 
 ### `GET /api/models`
 
-MLflow/GridFS registry listing.
+MLflow/GridFS registry listing. `metrics` carries the honest-metrics block
+(persistence/climatology baselines, skill score, Brier, prevalence, interval
+coverage): every key is nullable and `null` when the registry document does
+not carry it — never invented. `split`, `interval` and `commit` are passed
+through from the registry document (also nullable).
 
 ```json
 {
@@ -129,7 +174,15 @@ MLflow/GridFS registry listing.
   "models": [
     { "name": "temp_prediction_1h_GradientBoostedTrees", "version": "20260923_020000",
       "target": "temperature", "horizon_hours": 1, "created_at": "2026-09-23T02:00:00Z",
-      "metrics": { "rmse": 1.44, "mae": 1.12, "r2": 0.91 }, "stage": "production" }
+      "metrics": { "rmse": 1.44, "mae": 1.12, "r2": 0.91,
+                   "persistence_rmse": 3.05, "climatology_rmse": 3.41, "skill_score": 0.53,
+                   "brier": null, "persistence_brier": null, "prevalence": null,
+                   "coverage": 0.79 },
+      "stage": "production",
+      "split": { "kind": "temporal", "train_end": "2026-09-16T00:00:00Z",
+                 "val_end": "2026-09-19T00:00:00Z", "test_start": "2026-09-19T00:00:00Z" },
+      "interval": { "level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1 },
+      "commit": "abc1234" }
   ]
 }
 ```
@@ -163,6 +216,9 @@ type Prediction = {
   predicted_temperature: number | null;
   predicted_rain: number | null;
   observed_temperature: number | null;
+  temp_lower: number | null;         // predicted_temperature + lower_offset
+  temp_upper: number | null;         // predicted_temperature + upper_offset
+  interval_level: number | null;     // nominal level, 0.8 when present
   temp_model_name: string | null;
   temp_model_version: string | null;
   rain_model_name: string | null;

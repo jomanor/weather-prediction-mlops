@@ -9,6 +9,7 @@ from app.repositories.weather_repo import _downsample_by_step
 from app.schemas.city import City, GeoResult
 from app.schemas.models import ModelInfo
 from app.schemas.predictions import Prediction
+from app.schemas.quality import CityQuality
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import AemetForecast
 from app.services.geo import GeocodingError
@@ -117,6 +118,14 @@ class FakeMongoCollection:
         self.cursors.append(cursor)
         return cursor
 
+    async def distinct(self, key):
+        seen: list = []
+        for doc in self.documents:
+            value = doc.get(key)
+            if value is not None and value not in seen:
+                seen.append(value)
+        return seen
+
 
 class FakeMongoDb:
     """Minimal Motor database double for repository-level tests."""
@@ -125,23 +134,35 @@ class FakeMongoDb:
         self,
         weather_data: FakeMongoCollection | None = None,
         raw_weather: FakeMongoCollection | None = None,
+        weather_features: FakeMongoCollection | None = None,
+        model_registry: FakeMongoCollection | None = None,
     ) -> None:
         self._collections = {
             "weather_data": weather_data or FakeMongoCollection(),
             "raw_weather": raw_weather or FakeMongoCollection(),
+            "weather_features": weather_features or FakeMongoCollection(),
         }
+        if model_registry is not None:
+            self._collections["model_registry"] = model_registry
 
     def __getitem__(self, name):
         return self._collections[name]
 
 
 class FakeWeatherRepository:
-    def __init__(self, points: list[CurrentWeather] | None = None) -> None:
+    def __init__(
+        self,
+        points: list[CurrentWeather] | None = None,
+        quality: list[CityQuality] | None = None,
+    ) -> None:
         self.points = list(points or [])
+        self.quality = list(quality or [])
         #: Method names in call order, so tests can prove a cache hit skipped Mongo.
         self.calls: list[str] = []
         #: Last ``step_hours`` a bulk read was asked for, to prove query wiring.
         self.last_step_hours = 1
+        #: Last ``(days, now)`` the quality meter was asked for.
+        self.last_quality_window: tuple[int, datetime] | None = None
 
     async def list_cities(self) -> list[str]:
         self.calls.append("list_cities")
@@ -199,6 +220,11 @@ class FakeWeatherRepository:
         ]
         matches.sort(key=lambda point: (point.city, point.observed_at))
         return _downsample_by_step(matches, step_hours)
+
+    async def quality_report(self, days: int, now: datetime) -> list[CityQuality]:
+        self.calls.append("quality_report")
+        self.last_quality_window = (days, now)
+        return list(self.quality)
 
 
 class FakePredictionRepository:

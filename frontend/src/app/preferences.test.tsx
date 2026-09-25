@@ -60,3 +60,57 @@ describe('PreferencesProvider chart palette', () => {
     expect(screen.getByTestId('obs')).toHaveTextContent('#0f141a')
   })
 })
+
+function BasemapProbe() {
+  const { basemap, setBasemap } = usePreferences()
+  return (
+    <>
+      <span data-testid="basemap">{basemap}</span>
+      <button onClick={() => setBasemap('topo')}>Relieve</button>
+    </>
+  )
+}
+
+describe('PreferencesProvider basemap', () => {
+  beforeEach(() => {
+    /* The chart-palette suite restores all mocks in its `afterEach`, which
+       clears the global matchMedia mock set up in test/setup.ts. */
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+  })
+
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  it('defaults to the light basemap when the OS is not dark', () => {
+    render(
+      <PreferencesProvider>
+        <BasemapProbe />
+      </PreferencesProvider>,
+    )
+    expect(screen.getByTestId('basemap')).toHaveTextContent('positron')
+  })
+
+  it('restores a stored choice and persists a new one', async () => {
+    localStorage.setItem('meteoml.basemap', 'dark')
+    render(
+      <PreferencesProvider>
+        <BasemapProbe />
+      </PreferencesProvider>,
+    )
+    expect(screen.getByTestId('basemap')).toHaveTextContent('dark')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Relieve' }))
+    expect(screen.getByTestId('basemap')).toHaveTextContent('topo')
+    expect(localStorage.getItem('meteoml.basemap')).toBe('topo')
+  })
+})

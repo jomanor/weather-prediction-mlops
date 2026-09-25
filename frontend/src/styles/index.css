@@ -34,6 +34,29 @@
   --warn: #a3690a;
   --bad: #c0392b;
 
+  /* Data ramps — quantitative magnitude only, never chrome or series identity.
+     Sequential, perceptually even and colour-blind safe (plasma / Blues /
+     steel), 7-5-4 steps. Same families in both themes, tuned per theme so the
+     low end stays legible on the matching basemap. */
+  --temp-1: #0d0887;
+  --temp-2: #5402a3;
+  --temp-3: #8b0aa5;
+  --temp-4: #b73779;
+  --temp-5: #de645a;
+  --temp-6: #f98f36;
+  --temp-7: #f0f921;
+
+  --rain-1: #c9e9f2;
+  --rain-2: #8fcbe6;
+  --rain-3: #4ea3d4;
+  --rain-4: #2373b0;
+  --rain-5: #123f73;
+
+  --wind-1: #aeb8c8;
+  --wind-2: #8593a8;
+  --wind-3: #5b6b85;
+  --wind-4: #33445f;
+
   --grid: rgb(15 20 26 / 0.08);
   --shadow: 0 1px 2px rgb(15 20 26 / 0.05);
 }
@@ -61,6 +84,27 @@
   --warn: #e0a11a;
   --bad: #f2604f;
 
+  /* Ramps lifted for a dark basemap: monotonic within the theme (the darkest
+     step is lightened so it never disappears into the map). */
+  --temp-1: #3b2a9e;
+  --temp-2: #7a2bbd;
+  --temp-3: #b23fa8;
+  --temp-4: #d75f8a;
+  --temp-5: #ef7f63;
+  --temp-6: #f9a544;
+  --temp-7: #f7d23a;
+
+  --rain-1: #1b3557;
+  --rain-2: #24558a;
+  --rain-3: #2f7fb8;
+  --rain-4: #57a8d8;
+  --rain-5: #8fd0f0;
+
+  --wind-1: #46536b;
+  --wind-2: #64748e;
+  --wind-3: #8b9bb4;
+  --wind-4: #b9c6d8;
+
   --grid: rgb(233 236 240 / 0.07);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
 }
@@ -86,6 +130,23 @@
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-bad: var(--bad);
+
+  --color-temp-1: var(--temp-1);
+  --color-temp-2: var(--temp-2);
+  --color-temp-3: var(--temp-3);
+  --color-temp-4: var(--temp-4);
+  --color-temp-5: var(--temp-5);
+  --color-temp-6: var(--temp-6);
+  --color-temp-7: var(--temp-7);
+  --color-rain-1: var(--rain-1);
+  --color-rain-2: var(--rain-2);
+  --color-rain-3: var(--rain-3);
+  --color-rain-4: var(--rain-4);
+  --color-rain-5: var(--rain-5);
+  --color-wind-1: var(--wind-1);
+  --color-wind-2: var(--wind-2);
+  --color-wind-3: var(--wind-3);
+  --color-wind-4: var(--wind-4);
 
   --radius-panel: 0.25rem;
 }

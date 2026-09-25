@@ -11,14 +11,17 @@ Two writers produce observations:
 backfills are queryable too. One mapping helper per collection, no duplication.
 """
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.core.cities import DEFAULT_CITIES
 from app.core.coerce import as_utc, first_not_none, to_float, to_int
 from app.db.mongo import get_db
+from app.schemas.quality import CityQuality, QualityStatus
 from app.schemas.weather import CurrentWeather
 
 #: Both writers request ``wind_speed_unit=ms`` (see ``scripts/ingest_weather.py``
@@ -168,6 +171,40 @@ def _downsample_by_step(points: list[CurrentWeather], step_hours: int) -> list[C
     return kept
 
 
+#: Data-quality thresholds from ``docs/batch3-contract.md`` (Contract 1).
+#: Completeness and age are graded independently, then the worse of the two wins.
+QUALITY_OK_COMPLETENESS = 0.95
+QUALITY_WARN_COMPLETENESS = 0.80
+QUALITY_OK_AGE_HOURS = 2.0
+QUALITY_WARN_AGE_HOURS = 6.0
+
+_STATUS_RANK: dict[str, int] = {"ok": 0, "warn": 1, "bad": 2}
+
+
+def _grade(value: float | None, ok: float, warn: float, *, lower_is_better: bool) -> QualityStatus:
+    """Map a metric to ``ok``/``warn``/``bad``; ``None`` is always ``bad``."""
+    if value is None:
+        return "bad"
+    if lower_is_better:
+        if value <= ok:
+            return "ok"
+        return "warn" if value <= warn else "bad"
+    if value >= ok:
+        return "ok"
+    return "warn" if value >= warn else "bad"
+
+
+def _quality_status(completeness: float, age_hours: float | None) -> QualityStatus:
+    """Worst of the completeness grade and the freshness grade."""
+    completeness_status = _grade(
+        completeness, QUALITY_OK_COMPLETENESS, QUALITY_WARN_COMPLETENESS, lower_is_better=False
+    )
+    age_status = _grade(
+        age_hours, QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS, lower_is_better=True
+    )
+    return max((completeness_status, age_status), key=_STATUS_RANK.__getitem__)
+
+
 class WeatherRepository:
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._db = db
@@ -179,6 +216,10 @@ class WeatherRepository:
     @property
     def _raw(self):
         return self._db["raw_weather"]
+
+    @property
+    def _features(self):
+        return self._db["weather_features"]
 
     async def list_cities(self) -> list[str]:
         cities = set(await self._current.distinct("city"))
@@ -283,6 +324,71 @@ class WeatherRepository:
 
         points.sort(key=lambda point: (point.city, point.observed_at))
         return _downsample_by_step(points, step_hours)
+
+    async def quality_report(self, days: int, now: datetime) -> list[CityQuality]:
+        """Per-city data-quality meter over ``weather_features`` in ``[now-days, now]``.
+
+        One query per canonical city with an equality prefix on ``city`` so the
+        ``{city: 1, timestamp: -1}`` index serves both the range and the
+        ``timestamp`` sort (reverse index scan, no blocking ``SORT``). The sort
+        is city-prefixed per the M0 rule. Gaps, null rate and status are
+        computed in Python over a bounded window (≤ ``30 * 24`` hourly rows per
+        city).
+
+        The city set is the fixed 14-station registry in ``app.core.cities``,
+        not ``distinct("city")``: a city whose feature rows vanished entirely
+        (ingestion/feature outage) must still be reported ``bad`` instead of
+        silently disappearing from the meter. Queries run concurrently with
+        ``asyncio.gather``; the list is bounded, so is the fan-out.
+        """
+        start = now - timedelta(days=days)
+        names = sorted(name for name, _, _ in DEFAULT_CITIES)
+        return await asyncio.gather(*(self._city_quality(city, start, now, days) for city in names))
+
+    async def _city_quality(
+        self, city: str, start: datetime, now: datetime, days: int
+    ) -> CityQuality:
+        cursor = self._features.find(
+            {"city": city, "timestamp": {"$gte": start, "$lte": now}},
+            {"city": 1, "timestamp": 1, "temperature": 1},
+        ).sort([("city", 1), ("timestamp", 1)])
+        # Deduplicate by hour before counting: a duplicate (city, timestamp)
+        # document must not inflate ``observed_hours``/completeness or collapse
+        # ``max_gap_hours`` to 0. Upstream dedupes, but a regression here would
+        # otherwise be reported as healthier data than actually exists.
+        by_hour: dict[datetime, Any] = {}
+        async for doc in cursor:
+            timestamp = as_utc(doc.get("timestamp"))
+            if timestamp is not None:
+                by_hour[timestamp] = doc.get("temperature")
+        rows = sorted(by_hour.items())
+
+        expected_hours = days * 24
+        observed_hours = len(rows)
+        completeness = min(1.0, observed_hours / expected_hours) if expected_hours else 0.0
+        gaps = [
+            (rows[index + 1][0] - rows[index][0]).total_seconds() / 3600.0
+            for index in range(len(rows) - 1)
+        ]
+        nulls = sum(1 for _, temperature in rows if to_float(temperature) is None)
+        null_rate = (nulls / observed_hours) if observed_hours else None
+        last_observed_at = rows[-1][0] if rows else None
+        age_hours = (
+            (now - last_observed_at).total_seconds() / 3600.0
+            if last_observed_at is not None
+            else None
+        )
+        return CityQuality(
+            city=city,
+            expected_hours=expected_hours,
+            observed_hours=observed_hours,
+            completeness=completeness,
+            max_gap_hours=max(gaps, default=0.0),
+            null_rate=null_rate,
+            last_observed_at=last_observed_at,
+            age_hours=age_hours,
+            status=_quality_status(completeness, age_hours),
+        )
 
 
 def get_weather_repo(db: AsyncIOMotorDatabase = Depends(get_db)) -> WeatherRepository:

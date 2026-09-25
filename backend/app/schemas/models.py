@@ -16,6 +16,15 @@ class ModelMetrics(BaseModel):
     rmse: float | None = None
     mae: float | None = None
     r2: float | None = None
+    # Honest-metrics block (Batch 3, Contract 3). ``None`` when the registry
+    # document predates the temporal split / baseline work — never invented.
+    persistence_rmse: float | None = None
+    climatology_rmse: float | None = None
+    skill_score: float | None = None
+    brier: float | None = None
+    persistence_brier: float | None = None
+    prevalence: float | None = None
+    coverage: float | None = None
 
 
 class ModelInfo(BaseModel):
@@ -26,6 +35,9 @@ class ModelInfo(BaseModel):
     created_at: datetime | None = None
     metrics: ModelMetrics | None = None
     stage: str | None = None
+    split: dict | None = None
+    interval: dict | None = None
+    commit: str | None = None
 
     model_config = ConfigDict(
         protected_namespaces=(),
@@ -38,6 +50,14 @@ class ModelInfo(BaseModel):
                 "created_at": "2026-09-23T02:00:00Z",
                 "metrics": {"rmse": 1.44, "mae": 1.12, "r2": 0.91},
                 "stage": "production",
+                "split": {
+                    "kind": "temporal",
+                    "train_end": "2026-09-16T00:00:00Z",
+                    "val_end": "2026-09-19T00:00:00Z",
+                    "test_start": "2026-09-19T00:00:00Z",
+                },
+                "interval": {"level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1},
+                "commit": 'GITHUB_SHA or "unknown"',
             }
         },
     )

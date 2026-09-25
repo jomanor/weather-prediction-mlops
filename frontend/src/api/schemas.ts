@@ -50,6 +50,10 @@ export const predictionSchema = z.object({
   predicted_temperature: nullableNumber,
   predicted_rain: nullableNumber,
   observed_temperature: nullableNumber,
+  /* Contract 2: prediction intervals are additive; legacy docs carry null. */
+  temp_lower: nullableNumber,
+  temp_upper: nullableNumber,
+  interval_level: nullableNumber,
   temp_model_name: nullableString,
   temp_model_version: nullableString,
   rain_model_name: nullableString,
@@ -114,6 +118,8 @@ export const registryModelSchema = z.object({
   created_at: nullableString,
   // The registry stores artefacts without metrics/stage, so the API sends an
   // explicit `null` for both; `nullish()` accepts it as well as a missing key.
+  // Contract 3: the honest-metric keys are additive and nullable — a registry
+  // row written before the temporal split simply omits them.
   metrics: z
     .object({
       rmse: nullableNumber,
@@ -121,10 +127,37 @@ export const registryModelSchema = z.object({
       r2: nullableNumber,
       auc_roc: nullableNumber,
       auc_pr: nullableNumber,
+      persistence_rmse: nullableNumber,
+      climatology_rmse: nullableNumber,
+      skill_score: nullableNumber,
+      brier: nullableNumber,
+      persistence_brier: nullableNumber,
+      prevalence: nullableNumber,
+      coverage: nullableNumber,
     })
     .partial()
     .nullish()
     .transform((value) => value ?? {}),
+  split: z
+    .object({
+      kind: z.string(),
+      train_end: nullableString,
+      val_end: nullableString,
+      test_start: nullableString,
+    })
+    .partial()
+    .nullish()
+    .transform((value) => value ?? null),
+  interval: z
+    .object({
+      level: nullableNumber,
+      lower_offset: nullableNumber,
+      upper_offset: nullableNumber,
+    })
+    .partial()
+    .nullish()
+    .transform((value) => value ?? null),
+  commit: nullableString,
   stage: z
     .string()
     .nullish()
@@ -143,6 +176,57 @@ export const stationsResponseSchema = z.object({
   stations: z.array(currentWeatherSchema),
 })
 export type StationsResponse = z.infer<typeof stationsResponseSchema>
+
+/**
+ * `GET /api/map/stations` — GeoJSON FeatureCollection of the latest observation
+ * per city. Coordinates are `[longitude, latitude]`.
+ */
+export const stationFeatureSchema = z.object({
+  type: z.literal('Feature'),
+  geometry: z.object({
+    type: z.literal('Point'),
+    coordinates: z.tuple([z.number(), z.number()]),
+  }),
+  properties: z.object({
+    city: z.string(),
+    temperature: nullableNumber,
+    apparent_temperature: nullableNumber,
+    relative_humidity: nullableNumber,
+    wind_speed: nullableNumber,
+    wind_direction: nullableNumber,
+    precipitation: nullableNumber,
+    weather_code: nullableNumber,
+    observed_at: isoDate,
+  }),
+})
+export type StationFeature = z.infer<typeof stationFeatureSchema>
+
+export const stationCollectionSchema = z.object({
+  type: z.literal('FeatureCollection'),
+  features: z.array(stationFeatureSchema),
+})
+export type StationCollection = z.infer<typeof stationCollectionSchema>
+
+/** `GET /api/weather/quality?days=7` — per-city data-quality meter (Contract 1). */
+export const weatherQualitySchema = z.object({
+  generated_at: isoDate,
+  days: z.number(),
+  cities: z.array(
+    z.object({
+      city: z.string(),
+      expected_hours: z.number(),
+      observed_hours: z.number(),
+      completeness: z.number(),
+      max_gap_hours: nullableNumber,
+      null_rate: nullableNumber,
+      last_observed_at: nullableString,
+      age_hours: nullableNumber,
+      status: z.enum(['ok', 'warn', 'bad']),
+    }),
+  ),
+})
+export type WeatherQuality = z.infer<typeof weatherQualitySchema>
+export type CityQuality = WeatherQuality['cities'][number]
 
 export const historyResponseSchema = z.object({
   city: z.string(),

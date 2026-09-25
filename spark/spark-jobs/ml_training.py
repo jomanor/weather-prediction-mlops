@@ -4,6 +4,7 @@ from pyspark.ml import Pipeline
 from pyspark.ml.classification import GBTClassifier, RandomForestClassifier
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, RegressionEvaluator
 from pyspark.ml.feature import StandardScaler, VectorAssembler
+from pyspark.ml.functions import vector_to_array
 from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.sql import functions as F
@@ -11,6 +12,7 @@ from pyspark.sql.types import DoubleType, FloatType, IntegerType, LongType, Shor
 
 sys.path.append("/opt/config")
 import json
+import math
 import os
 import shutil
 from datetime import datetime
@@ -94,30 +96,182 @@ def prepare_features_for_ml(df, target_col, horizon=1):
     return assembler, scaler, feature_cols
 
 
-def train_temperature_prediction_model(df, horizon=1):
-    target_col = f"target_temp_{horizon}h"
+# ---------------------------------------------------------------------------
+# Temporal split + honest-metric helpers
+# ---------------------------------------------------------------------------
 
-    assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
 
+def _iso(value):
+    """Convert a Spark timestamp / Python datetime to an ISO-8601 string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def temporal_split(df):
+    """Split *df* chronologically by ``timestamp`` at the cumulative train/val
+    ratios from ``ML_CONFIG["data_split"]``.
+
+    The cut is made on the **timestamp value**, not the row index: the ordered
+    set of distinct timestamps is collected once (tiny for ~180 days of hourly
+    data) and two boundary timestamps ``b1``/``b2`` are chosen at the cumulative
+    ratio positions. Rows are then partitioned with ``ts < b1`` / ``b1 <= ts <
+    b2`` / ``ts >= b2``, so a given timestamp never appears in more than one
+    frame and no single-partition sort is involved. The recorded boundaries are
+    the actual frame extrema, so ``train_end < val_end < test_start`` holds.
+
+    Falls back to ``randomSplit`` when the frame carries fewer than 3 distinct
+    timestamps (there is no meaningful time ordering to cut on).
+    """
     train_ratio = ML_CONFIG["data_split"]["train"]
     val_ratio = ML_CONFIG["data_split"]["validation"]
     test_ratio = ML_CONFIG["data_split"]["test"]
     seed = ML_CONFIG["data_split"]["seed"]
+    kind = ML_CONFIG["data_split"].get("kind", "random")
 
-    train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
-    # Cross-validation re-executes the plan once per candidate fit. Without this
-    # cache every fit re-reads weather_features from Atlas, which is what pushed
-    # the job past the CI timeout. cache() spills to disk, so it stays safe on
-    # the runner's modest driver heap.
-    train_df = train_df.cache()
-    val_df = val_df.cache()
-    test_df = test_df.cache()
+    def _random_fallback():
+        train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
+        return (
+            train_df,
+            val_df,
+            test_df,
+            {
+                "kind": "random",
+                "train_end": None,
+                "val_end": None,
+                "test_start": None,
+            },
+        )
 
-    print(
-        f"Train size: {train_df.count()}, "
-        f"Validation size: {val_df.count()}, "
-        f"Test size: {test_df.count()}"
+    if kind != "temporal":
+        return _random_fallback()
+
+    ts_sorted = [r[0] for r in df.select("timestamp").distinct().orderBy("timestamp").collect()]
+    if len(ts_sorted) < 3:
+        return _random_fallback()
+
+    n = len(ts_sorted)
+    b1 = ts_sorted[int(n * train_ratio)]
+    b2 = ts_sorted[int(n * (train_ratio + val_ratio))]
+
+    train_df = df.filter(F.col("timestamp") < b1)
+    val_df = df.filter((F.col("timestamp") >= b1) & (F.col("timestamp") < b2))
+    test_df = df.filter(F.col("timestamp") >= b2)
+
+    train_end = train_df.agg(F.max("timestamp")).first()[0]
+    val_end = val_df.agg(F.max("timestamp")).first()[0]
+    test_start = b2
+
+    return (
+        train_df,
+        val_df,
+        test_df,
+        {
+            "kind": "temporal",
+            "train_end": _iso(train_end),
+            "val_end": _iso(val_end),
+            "test_start": _iso(test_start),
+        },
     )
+
+
+def _build_data_snapshot(df, feature_cols):
+    """Rows / time range / city count / feature list of the training frame."""
+    stats = df.agg(
+        F.min("timestamp").alias("from_ts"),
+        F.max("timestamp").alias("to_ts"),
+        F.countDistinct("city").alias("cities"),
+    ).first()
+    return {
+        "rows": int(df.count()),
+        "from": _iso(stats["from_ts"]),
+        "to": _iso(stats["to_ts"]),
+        "cities": int(stats["cities"]),
+        "features": list(feature_cols),
+    }
+
+
+def _persistence_rmse(df, target_col, observed_col="temperature"):
+    """RMSE of the persistence baseline (prediction = current observed value)."""
+    rmse = df.select(F.sqrt(F.mean((F.col(target_col) - F.col(observed_col)) ** 2))).first()[0]
+    return float(rmse)
+
+
+def _climatology_rmse(df, test_df, target_col, city_col="city", observed_col="temperature"):
+    """RMSE of the per-city train-window mean applied to the test frame.
+
+    A test city absent from the train frame gets no city mean; its residual is
+    null and ``F.mean`` drops it, so the climatology RMSE is computed only over
+    test cities present in the training window.
+    """
+    city_means = df.groupBy(city_col).agg(F.mean(observed_col).alias("_city_mean"))
+    joined = test_df.join(city_means, on=city_col, how="left")
+    rmse = joined.select(F.sqrt(F.mean((F.col(target_col) - F.col("_city_mean")) ** 2))).first()[0]
+    return float(rmse)
+
+
+def _brier_score(df, prob, target_col):
+    """Brier score: mean squared error of a probability column vs the binary
+    target. ``prob`` is a Column expression (a probability in [0, 1])."""
+    return float(df.agg(F.mean((prob - F.col(target_col)) ** 2)).first()[0])
+
+
+def _persistence_brier(df, rain_col, target_col):
+    """Brier score of the persistence baseline: predict "will rain" = "it is
+    raining now" (current ``rain`` > 0), matching the target definition in
+    ``batch_processing.create_target_variable``."""
+    persist = F.when(F.col(rain_col) > 0, 1.0).otherwise(0.0)
+    return float(df.agg(F.mean((persist - F.col(target_col)) ** 2)).first()[0])
+
+
+def _prevalence(df, target_col):
+    """Positive rate of the binary target."""
+    return float(df.agg(F.mean(F.col(target_col))).first()[0])
+
+
+def _skill_score(model_score, baseline_score):
+    """1 - model/baseline; None when the baseline is 0, missing, or NaN."""
+    if baseline_score is None or baseline_score == 0.0:
+        return None
+    if isinstance(baseline_score, float) and math.isnan(baseline_score):
+        return None
+    return 1.0 - model_score / baseline_score
+
+
+def _interval_offsets(residuals, level=0.8):
+    """p_lower/p_upper offsets of a ``residual`` column plus their coverage.
+
+    Offsets are the (1-level)/2 and 1-(1-level)/2 quantiles of
+    ``(target - prediction)``; coverage is the fraction of residuals inside
+    ``[lower_offset, upper_offset]``. Coverage is **in-sample by design**: the
+    offsets are the empirical quantiles of the same residuals they are applied
+    to, so coverage is ~``level`` by construction. It is reported as a
+    calibration diagnostic, not an out-of-sample guarantee.
+    """
+    lower_q = (1.0 - level) / 2.0
+    upper_q = 1.0 - lower_q
+    lo, hi = residuals.approxQuantile("residual", [lower_q, upper_q], 0.0)
+    total = residuals.count()
+    if total == 0:
+        coverage = 0.0
+    else:
+        coverage = (
+            residuals.filter((F.col("residual") >= lo) & (F.col("residual") <= hi)).count() / total
+        )
+    return {
+        "level": float(level),
+        "lower_offset": float(lo),
+        "upper_offset": float(hi),
+        "coverage": float(coverage),
+    }
+
+
+def train_temperature_prediction_model(df, train_df, val_df, test_df, horizon=1):
+    target_col = f"target_temp_{horizon}h"
+
+    assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
 
     models = {
         "GradientBoostedTrees": GBTRegressor(featuresCol="features", labelCol=target_col),
@@ -212,16 +366,22 @@ def train_temperature_prediction_model(df, horizon=1):
     print(f"Validation RMSE: {best_rmse:.4f}")
 
     test_predictions = best_model.transform(test_df)
-    test_rmse = evaluator.evaluate(test_predictions)
-    test_mae = mae_evaluator.evaluate(test_predictions)
-    test_r2 = r2_evaluator.evaluate(test_predictions)
+    # The assembler skips rows with null features (handleInvalid="skip"), so
+    # ``test_predictions`` is already a subset of ``test_df``. Score once on a
+    # single assembled frame and use it for the model metric AND every baseline
+    # so ``skill_score`` never mixes row sets.
+    test_scored = test_predictions.filter(F.col("prediction").isNotNull())
+
+    test_rmse = evaluator.evaluate(test_scored)
+    test_mae = mae_evaluator.evaluate(test_scored)
+    test_r2 = r2_evaluator.evaluate(test_scored)
 
     print("\n=== FINAL TEST SET PERFORMANCE FOR TEMPERATURE MODEL ===")
     print(f"\nTest RMSE: {test_rmse:.4f}")
     print(f"Test MAE : {test_mae:.4f}")
     print(f"Test R²  : {test_r2:.4f}")
 
-    test_predictions.select(
+    test_scored.select(
         "city",
         "temperature",
         target_col,
@@ -263,10 +423,20 @@ def train_temperature_prediction_model(df, horizon=1):
     # The tuned values actually fitted for the winning algorithm (filtered to the
     # grid keys), plus the held-out size for the registry's ``n_test``.
     params = _extract_grid_params(best_model, param_grids[best_model_name])
-    n_test = test_df.count()
+    n_test = test_scored.count()
 
-    for frame in (train_df, val_df, test_df):
-        frame.unpersist()
+    # --- honest metrics on the temporal test split (all on ``test_scored``) ---
+    persistence_rmse = _persistence_rmse(test_scored, target_col)
+    climatology_rmse = _climatology_rmse(train_df, test_scored, target_col)
+    skill_score = _skill_score(test_rmse, persistence_rmse)
+
+    residuals = test_scored.select((F.col(target_col) - F.col("prediction")).alias("residual"))
+    interval = _interval_offsets(residuals, level=0.8)
+    interval_meta = {
+        "level": interval["level"],
+        "lower_offset": interval["lower_offset"],
+        "upper_offset": interval["upper_offset"],
+    }
 
     return (
         best_model,
@@ -276,36 +446,22 @@ def train_temperature_prediction_model(df, horizon=1):
             "rmse": test_rmse,
             "mae": test_mae,
             "r2": test_r2,
+            "persistence_rmse": persistence_rmse,
+            "climatology_rmse": climatology_rmse,
+            "skill_score": skill_score,
+            "coverage": interval["coverage"],
             "n_test": n_test,
         },
         params,
+        interval_meta,
+        feature_cols,
     )
 
 
-def train_rain_prediction_model(df, horizon=1):
+def train_rain_prediction_model(df, train_df, val_df, test_df, horizon=1):
     target_col = f"target_will_rain_{horizon}h"
 
     assembler, scaler, feature_cols = prepare_features_for_ml(df, target_col, horizon)
-
-    train_ratio = ML_CONFIG["data_split"]["train"]
-    val_ratio = ML_CONFIG["data_split"]["validation"]
-    test_ratio = ML_CONFIG["data_split"]["test"]
-    seed = ML_CONFIG["data_split"]["seed"]
-
-    train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
-    # Cross-validation re-executes the plan once per candidate fit. Without this
-    # cache every fit re-reads weather_features from Atlas, which is what pushed
-    # the job past the CI timeout. cache() spills to disk, so it stays safe on
-    # the runner's modest driver heap.
-    train_df = train_df.cache()
-    val_df = val_df.cache()
-    test_df = test_df.cache()
-
-    print(
-        f"Train size: {train_df.count()}, "
-        f"Validation size: {val_df.count()}, "
-        f"Test size: {test_df.count()}"
-    )
 
     models = {
         "GradientBoostedTrees": GBTClassifier(featuresCol="features", labelCol=target_col),
@@ -379,16 +535,19 @@ def train_rain_prediction_model(df, horizon=1):
 
     evaluator.setMetricName("areaUnderROC")
     test_predictions = best_model.transform(test_df)
-    test_auc = evaluator.evaluate(test_predictions)
+    # Same shared-frame rule as the temperature trainer: score the assembled
+    # frame once and run every metric (model + baselines) on that same frame.
+    test_scored = test_predictions.filter(F.col("prediction").isNotNull())
+    test_auc = evaluator.evaluate(test_scored)
     evaluator.setMetricName("areaUnderPR")
-    test_pr_auc = evaluator.evaluate(test_predictions)
+    test_pr_auc = evaluator.evaluate(test_scored)
 
     print("\n=== FINAL TEST SET PERFORMANCE FOR RAIN MODEL ===")
     print(f"\nTest AUC-ROC: {test_auc:.4f}")
     print(f"\nTest AUC-PR: {test_pr_auc:.4f}")
 
     print("\nConfusion matrix:")
-    test_predictions.groupBy(target_col, "prediction").count().show()
+    test_scored.groupBy(target_col, "prediction").count().show()
 
     model_stage = best_model.stages[-1]
     feature_importance = model_stage.featureImportances
@@ -400,10 +559,14 @@ def train_rain_prediction_model(df, horizon=1):
     )[:15]
 
     params = _extract_grid_params(best_model, param_grids[best_model_name])
-    n_test = test_df.count()
+    n_test = test_scored.count()
 
-    for frame in (train_df, val_df, test_df):
-        frame.unpersist()
+    # --- honest metrics on the temporal test split (all on ``test_scored``) ---
+    pos_prob = vector_to_array(F.col("probability"))[1]
+    brier = _brier_score(test_scored, pos_prob, target_col)
+    persistence_brier = _persistence_brier(test_scored, "rain", target_col)
+    prevalence = _prevalence(test_scored, target_col)
+    skill_score = _skill_score(brier, persistence_brier)
 
     return (
         best_model,
@@ -412,9 +575,15 @@ def train_rain_prediction_model(df, horizon=1):
         {
             "auc_roc": test_auc,
             "auc_pr": test_pr_auc,
+            "brier": brier,
+            "persistence_brier": persistence_brier,
+            "prevalence": prevalence,
+            "skill_score": skill_score,
             "n_test": n_test,
         },
         params,
+        None,
+        feature_cols,
     )
 
 
@@ -428,12 +597,16 @@ def _json_safe(value):
 
     ``extractParamMap`` and ``featureImportances`` can surface NumPy or Java
     boxed scalars, which PyMongo cannot encode into BSON; collapse them to plain
-    int/float/str so the registry document stays insertable.
+    int/float/str/list so the registry document stays insertable.
     """
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
+    # NumPy arrays (and any object exposing ``tolist`` that is not str/bytes)
+    # become plain lists; NumPy scalars fall through to ``item`` below.
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        return _json_safe(value.tolist())
     if hasattr(value, "item"):
         try:
             return value.item()
@@ -478,7 +651,8 @@ def _log_to_mlflow(
 
         # --- metrics ---
         for k, v in metrics.items():
-            mlflow.log_metric(k, v)
+            if v is not None:
+                mlflow.log_metric(k, v)
 
         # --- feature importance as JSON artifact ---
         fi_dict = {f: imp for f, imp in important_features}
@@ -508,6 +682,9 @@ def save_model(
     params=None,
     db_name="weather_db",
     metadata_collection="model_registry",
+    split=None,
+    interval=None,
+    data_snapshot=None,
 ):
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     temp_dir = os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp")
@@ -552,6 +729,13 @@ def save_model(
             ]
         if params:
             metadata["params"] = {k: _json_safe(v) for k, v in params.items()}
+        if split:
+            metadata["split"] = _json_safe(split)
+        if interval:
+            metadata["interval"] = _json_safe(interval)
+        if data_snapshot:
+            metadata["data_snapshot"] = _json_safe(data_snapshot)
+        metadata["commit"] = os.getenv("GITHUB_SHA") or "unknown"
 
         db[metadata_collection].insert_one(metadata)
 
@@ -584,12 +768,41 @@ def main():
 
         print(f"\n=== Training models with {horizon}h prediction horizon ===\n")
 
-        temp_model, temp_model_name, temp_features, temp_metrics, temp_params = (
-            train_temperature_prediction_model(df, horizon)
+        # Split once, then share the frames with both trainers. cache() spills to
+        # disk, so it stays safe on the runner's modest driver heap, and avoids
+        # re-reading / re-sorting the frame per candidate fit.
+        train_df, val_df, test_df, split_meta = temporal_split(df)
+        train_df = train_df.cache()
+        val_df = val_df.cache()
+        test_df = test_df.cache()
+        print(
+            f"Train size: {train_df.count()}, "
+            f"Validation size: {val_df.count()}, "
+            f"Test size: {test_df.count()}"
         )
-        rain_model, rain_model_name, rain_features, rain_metrics, rain_params = (
-            train_rain_prediction_model(df, horizon)
-        )
+
+        (
+            temp_model,
+            temp_model_name,
+            temp_features,
+            temp_metrics,
+            temp_params,
+            temp_interval,
+            temp_feature_cols,
+        ) = train_temperature_prediction_model(df, train_df, val_df, test_df, horizon)
+        (
+            rain_model,
+            rain_model_name,
+            rain_features,
+            rain_metrics,
+            rain_params,
+            _,
+            _,
+        ) = train_rain_prediction_model(df, train_df, val_df, test_df, horizon)
+
+        # One snapshot of the training frame; both models were trained on the
+        # same rows and the same feature list.
+        data_snapshot = _build_data_snapshot(df, temp_feature_cols)
 
         # --- persist to GridFS (used by inference.py) ---
         save_model(
@@ -601,6 +814,9 @@ def main():
             metrics=temp_metrics,
             important_features=temp_features,
             params=temp_params,
+            split=split_meta,
+            interval=temp_interval,
+            data_snapshot=data_snapshot,
         )
         save_model(
             rain_model,
@@ -611,6 +827,8 @@ def main():
             metrics=rain_metrics,
             important_features=rain_features,
             params=rain_params,
+            split=split_meta,
+            data_snapshot=data_snapshot,
         )
 
         # --- log to MLflow ---

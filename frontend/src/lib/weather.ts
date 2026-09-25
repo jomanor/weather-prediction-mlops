@@ -56,6 +56,46 @@ export function describeWeather(code: number | null | undefined): WeatherDescrip
   return DESCRIPTORS[code] ?? UNKNOWN
 }
 
+/**
+ * Stable image key for a weather-code glyph. The map rasterises one SDF image
+ * per key, so the same glyph is reused across intensity variants.
+ */
+export type WeatherIconName =
+  | 'sun'
+  | 'cloud-sun'
+  | 'cloud'
+  | 'fog'
+  | 'drizzle'
+  | 'rain'
+  | 'snow'
+  | 'storm'
+
+export const WEATHER_ICONS: Record<WeatherIconName, LucideIcon> = {
+  sun: Sun,
+  'cloud-sun': CloudSun,
+  cloud: Cloud,
+  fog: CloudFog,
+  drizzle: CloudDrizzle,
+  rain: CloudRain,
+  snow: CloudSnow,
+  storm: CloudLightning,
+}
+
+const ICON_NAMES = new Map<LucideIcon, WeatherIconName>([
+  [Sun, 'sun'],
+  [CloudSun, 'cloud-sun'],
+  [Cloud, 'cloud'],
+  [CloudFog, 'fog'],
+  [CloudDrizzle, 'drizzle'],
+  [CloudRain, 'rain'],
+  [CloudSnow, 'snow'],
+  [CloudLightning, 'storm'],
+])
+
+export function weatherIconName(code: number | null | undefined): WeatherIconName {
+  return ICON_NAMES.get(describeWeather(code).icon) ?? 'cloud'
+}
+
 export const toneClass: Record<WeatherTone, string> = {
   clear: 'text-aemet',
   cloud: 'text-fg-2',

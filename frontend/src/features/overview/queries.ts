@@ -6,6 +6,7 @@ import {
   citySchema,
   geoSearchResponseSchema,
   latestPredictionsSchema,
+  stationCollectionSchema,
   stationsResponseSchema,
   type City,
 } from '@/api/schemas'
@@ -14,6 +15,12 @@ import {
 
 export const useStations = () =>
   useApiQuery(queryKeys.stations, '/weather/current', stationsResponseSchema, {
+    refetchInterval: 5 * 60_000,
+  })
+
+/** Bulk GeoJSON for the clustered map layer (Batch 2 endpoint). */
+export const useMapStations = () =>
+  useApiQuery(queryKeys.mapStations, '/map/stations', stationCollectionSchema, {
     refetchInterval: 5 * 60_000,
   })
 

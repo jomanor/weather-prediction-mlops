@@ -13,6 +13,9 @@ class Prediction(BaseModel):
     predicted_temperature: float | None = None
     predicted_rain: float | None = None
     observed_temperature: float | None = None
+    temp_lower: float | None = None
+    temp_upper: float | None = None
+    interval_level: float | None = None
     temp_model_name: str | None = None
     temp_model_version: str | None = None
     rain_model_name: str | None = None
@@ -28,6 +31,9 @@ class Prediction(BaseModel):
                 "predicted_temperature": 23.6,
                 "predicted_rain": 0.0,
                 "observed_temperature": 24.1,
+                "temp_lower": 21.7,
+                "temp_upper": 25.7,
+                "interval_level": 0.8,
                 "temp_model_name": "temp_prediction_1h_GradientBoostedTrees",
                 "temp_model_version": "20260923_020000",
                 "rain_model_name": "rain_prediction_1h_GradientBoostedTrees",

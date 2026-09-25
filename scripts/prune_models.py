@@ -71,6 +71,9 @@ def main() -> int:
 
     removed = prune(mongo_uri)
     print(f"pruned {removed} model artifact(s), keeping the newest {KEEP} per family")
+    # GitHub Actions workflow command: surfaces the count as a run notice while
+    # remaining ordinary stdout everywhere else (local runs, docker compose).
+    print(f"::notice::prune ran: {removed} deleted")
     return 0
 
 

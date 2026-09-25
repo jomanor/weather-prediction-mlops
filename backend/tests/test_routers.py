@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
+from app.schemas.quality import CityQuality
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
 from tests.fakes import (
@@ -154,12 +155,19 @@ async def test_predictions_latest(client):
         "predicted_temperature",
         "predicted_rain",
         "observed_temperature",
+        "temp_lower",
+        "temp_upper",
+        "interval_level",
         "temp_model_name",
         "temp_model_version",
         "rain_model_name",
         "rain_model_version",
     }
     assert prediction["city"] == "Madrid"
+    # The interval is passed through verbatim; the interval-less legacy doc would
+    # serialize these as null instead (covered in the repository mapping tests).
+    assert (prediction["temp_lower"], prediction["temp_upper"]) == (19.6, 23.4)
+    assert prediction["interval_level"] == 0.8
 
 
 async def test_predictions_for_city_chronological(client):
@@ -228,18 +236,40 @@ async def test_models(client):
     assert response.status_code == 200
     body = response.json()
     assert body["count"] == 2
-    assert body["models"][0] == {
-        "name": "temp_prediction_1h_GradientBoostedTrees",
-        "version": "20260923_020000",
-        "target": "temperature",
-        "horizon_hours": 1,
-        "created_at": body["models"][0]["created_at"],
-        "metrics": {"rmse": 1.44, "mae": 1.12, "r2": 0.91},
-        "stage": "production",
+    first = body["models"][0]
+    assert first["name"] == "temp_prediction_1h_GradientBoostedTrees"
+    assert first["version"] == "20260923_020000"
+    assert first["target"] == "temperature"
+    assert first["horizon_hours"] == 1
+    assert first["stage"] == "production"
+    # Honest-metrics block (Batch 3): present keys carry the registry values,
+    # absent ones stay null instead of a fabricated 0.
+    assert first["metrics"] == {
+        "rmse": 1.44,
+        "mae": 1.12,
+        "r2": 0.91,
+        "persistence_rmse": 3.05,
+        "climatology_rmse": 3.41,
+        "skill_score": 0.53,
+        "brier": None,
+        "persistence_brier": None,
+        "prevalence": None,
+        "coverage": 0.79,
     }
+    assert first["split"] == {
+        "kind": "temporal",
+        "train_end": "2026-09-16T00:00:00Z",
+        "val_end": "2026-09-19T00:00:00Z",
+        "test_start": "2026-09-19T00:00:00Z",
+    }
+    assert first["interval"] == {"level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1}
+    assert first["commit"] == "abc1234"
     # fields the registry document does not carry stay null, never invented
     assert body["models"][1]["metrics"] is None
     assert body["models"][1]["stage"] is None
+    assert body["models"][1]["split"] is None
+    assert body["models"][1]["interval"] is None
+    assert body["models"][1]["commit"] is None
 
 
 async def test_benchmark_without_aemet_key_still_returns_series(client, app):
@@ -272,6 +302,7 @@ async def test_openapi_documents_every_contract_path(client):
         "/api/weather/series",
         "/api/weather/summary",
         "/api/weather/range/{city}",
+        "/api/weather/quality",
         "/api/map/stations",
         "/api/predictions/latest",
         "/api/predictions/{city}",
@@ -513,6 +544,80 @@ async def test_map_stations_returns_geojson_and_caches(client, weather_repo):
     second = await client.get("/api/map/stations", headers={"If-None-Match": first.headers["etag"]})
     assert second.status_code == 304
     assert weather_repo.calls.count("latest_per_city") == 1
+
+
+async def test_quality_returns_meter_shape_and_caches(client, app, now):
+    quality = [
+        CityQuality(
+            city="Madrid",
+            expected_hours=168,
+            observed_hours=165,
+            completeness=165 / 168,
+            max_gap_hours=3.0,
+            null_rate=0.012,
+            last_observed_at=now - timedelta(hours=1),
+            age_hours=1.0,
+            status="ok",
+        )
+    ]
+    repo = FakeWeatherRepository(quality=quality)
+    app.dependency_overrides[get_weather_repo] = lambda: repo
+
+    first = await client.get("/api/weather/quality", params={"days": 7})
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["days"] == 7
+    assert body["generated_at"].endswith("Z")
+    assert len(body["cities"]) == 1
+    city = body["cities"][0]
+    assert set(city) == {
+        "city",
+        "expected_hours",
+        "observed_hours",
+        "completeness",
+        "max_gap_hours",
+        "null_rate",
+        "last_observed_at",
+        "age_hours",
+        "status",
+    }
+    assert city["city"] == "Madrid"
+    assert city["expected_hours"] == 168
+    assert city["observed_hours"] == 165
+    assert city["max_gap_hours"] == 3.0
+    assert city["null_rate"] == 0.012
+    assert city["age_hours"] == 1.0
+    assert city["status"] == "ok"
+    assert city["last_observed_at"].endswith("Z")
+    assert "max-age=300" in first.headers["cache-control"]
+
+    second = await client.get(
+        "/api/weather/quality", params={"days": 7}, headers={"If-None-Match": first.headers["etag"]}
+    )
+    assert second.status_code == 304
+    assert repo.calls.count("quality_report") == 1
+    assert repo.last_quality_window[0] == 7
+
+
+async def test_quality_passes_days_to_the_repo(client, app, weather_repo):
+    response = await client.get("/api/weather/quality", params={"days": 30})
+
+    assert response.status_code == 200
+    assert weather_repo.last_quality_window[0] == 30
+
+
+async def test_quality_rejects_out_of_range_days(client):
+    for days in (0, 31):
+        response = await client.get("/api/weather/quality", params={"days": days})
+        assert response.status_code == 422, days
+
+
+async def test_quality_accepts_boundary_days(client, weather_repo):
+    for days in (1, 30):
+        response = await client.get("/api/weather/quality", params={"days": days})
+        assert response.status_code == 200, days
+        assert weather_repo.last_quality_window[0] == days
 
 
 async def test_range_paginates_with_cursor_oldest_first(client, now):

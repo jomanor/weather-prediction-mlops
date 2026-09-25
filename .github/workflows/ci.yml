@@ -72,7 +72,7 @@ jobs:
             pymongo \
             requests \
             python-dotenv \
-            mlflow \
+            mlflow==2.19.0 \
             httpx \
             mongomock
       - name: Run pipeline unit tests
@@ -116,13 +116,26 @@ jobs:
           path: frontend/dist
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 5. Integration tests (PRs only — testcontainers spins up Kafka + Mongo)
+  # 5. Integration tests (PRs and branch/main pushes). The mongo:6 service
+  #    backs the real index guardrails in
+  #    tests/integration/test_mongo_index_sort.py; the remaining integration
+  #    tests run offline against mongomock. ``pymongo`` is installed below for
+  #    both.
   # ─────────────────────────────────────────────────────────────────────────
   integration-test:
     name: Integration tests
     runs-on: ubuntu-latest
     needs: pipeline-test
-    if: github.event_name == 'pull_request'
+    services:
+      mongo:
+        image: mongo:6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "echo 'db.runCommand(\"ping\").ok' | mongosh localhost:27017/test --quiet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -147,6 +160,7 @@ jobs:
         run: pytest tests/integration/ -q
         env:
           PYTHONPATH: ${{ github.workspace }}
+          MONGO_URI: mongodb://localhost:27017
 
   # ─────────────────────────────────────────────────────────────────────────
   # 6. Docker build validation
