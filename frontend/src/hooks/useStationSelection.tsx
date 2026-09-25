@@ -36,3 +36,19 @@ export function useStationSelection(): StationSelectionValue {
   if (!value) throw new Error('useStationSelection must be used within StationSelectionProvider')
   return value
 }
+
+/**
+ * Resolve the URL-backed city against the loaded registry. An unknown value is
+ * treated as no selection (the caller falls back to the first city), matching
+ * the overview and the map, which only ever highlight a known city. While the
+ * registry is still loading (`loaded` false) the URL value is trusted so the
+ * station queries can start without waiting for the list.
+ */
+export function resolveCity(
+  selectedCity: string | null,
+  cities: readonly string[],
+  loaded: boolean,
+): string {
+  if (selectedCity && (!loaded || cities.includes(selectedCity))) return selectedCity
+  return cities[0] ?? ''
+}
