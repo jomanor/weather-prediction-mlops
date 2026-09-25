@@ -66,3 +66,15 @@ export const SERIES_LABELS = {
   model: 'Spark GBT',
   aemet: 'AEMET',
 } as const
+
+/**
+ * MapLibre `paint` values are the one documented exception to "no hardcoded
+ * hex". The style spec accepts colour strings only — not CSS custom properties
+ * — and the GL worker cannot resolve `getComputedStyle`, so the values cannot
+ * be read from the DOM. They are kept here, beside the chart palette, so both
+ * themes stay in one reviewable place.
+ */
+export const MAP_PAINT = {
+  hillshadeShadow: { light: '#5b6470', dark: '#000000' },
+  building: { light: '#cfd6dd', dark: '#1b222b' },
+} as const

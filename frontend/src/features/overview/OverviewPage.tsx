@@ -1,24 +1,37 @@
 import { CloudOff, RefreshCw } from 'lucide-react'
-import { lazy, Suspense, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { lazy, Suspense, useMemo } from 'react'
 
-import { useBenchmarkSummary, useCities, useLatestPredictions, useStations } from '@/api/queries'
+import { useBenchmarkSummary, useCities } from '@/api/queries'
 import type { Prediction } from '@/api/schemas'
 import { Button } from '@/components/ui/Button'
 import { ErrorState, LoadingBlock } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelBody, PanelHeader } from '@/components/ui/Panel'
+import { Segmented } from '@/components/ui/Segmented'
 import { CityManager } from '@/features/overview/CityManager'
+import { useLatestPredictions, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
+import { useStationSelection } from '@/hooks/useStationSelection'
+import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { formatNumber, formatPercent, formatTemperature, formatWind, isNum } from '@/lib/format'
 
 const StationMap = lazy(() =>
   import('@/components/map/StationMap').then((module) => ({ default: module.StationMap })),
 )
 
+const TABS = [
+  { value: 'red' as const, label: 'Red' },
+  { value: 'estaciones' as const, label: 'Estaciones' },
+]
+
+const TAB_SCHEMA: { tab: UrlCodec<'red' | 'estaciones'> } = {
+  tab: urlOption(['red', 'estaciones'] as const, 'red'),
+}
+
 export function OverviewPage() {
-  const navigate = useNavigate()
-  const [managing, setManaging] = useState(false)
+  const [tab, setTab] = useUrlState(TAB_SCHEMA)
+  const { selectedCity, selectCity } = useStationSelection()
+  const managing = tab.tab === 'estaciones'
 
   const citiesQuery = useCities()
   const stationsQuery = useStations()
@@ -125,14 +138,12 @@ export function OverviewPage() {
                     Act. {new Date(refreshedAt).toLocaleTimeString('es-ES')}
                   </span>
                 ) : null}
-                <Button
-                  size="sm"
-                  aria-pressed={managing}
-                  onClick={() => setManaging((open) => !open)}
-                >
-                  <ListIcon active={managing} />
-                  {managing ? 'Cerrar estaciones' : 'Gestionar estaciones'}
-                </Button>
+                <Segmented
+                  value={tab.tab}
+                  onChange={(value) => setTab({ tab: value }, { replace: false })}
+                  options={TABS}
+                  label="Vista"
+                />
               </>
             }
           />
@@ -143,8 +154,8 @@ export function OverviewPage() {
               <Suspense fallback={<LoadingBlock label="Cargando mapa…" />}>
                 <StationMap
                   stations={stations}
-                  selectedCity={null}
-                  onSelect={(city) => navigate(`/stations?city=${encodeURIComponent(city)}`)}
+                  selectedCity={selectedCity}
+                  onSelect={selectCity}
                 />
               </Suspense>
             )}
@@ -209,23 +220,4 @@ function Stat({
   )
 }
 
-function ListIcon({ active }: { active: boolean }) {
-  return active ? <XMark /> : <ListGlyph />
-}
-
-function ListGlyph() {
-  return (
-    <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <path d="M2 4.5h8M2 8h12M2 11.5h8" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function XMark() {
-  return (
-    <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-    </svg>
-  )
-}
 

@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -89,8 +90,18 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 
   const isDark = theme === 'dark' || (theme === 'system' && systemDark)
 
-  useEffect(() => {
+  /* The `dark` class lives on <html>, so the chart palette read from
+   * `getComputedStyle` must run *after* it flips. A post-paint effect leaves
+   * the charts one theme behind until the next toggle; a layout effect applies
+   * the class before paint and `appliedDark` mirrors what is actually on the
+   * DOM, so the palette recomputes in the same commit. */
+  const [appliedDark, setAppliedDark] = useState(
+    () => typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
+  )
+
+  useLayoutEffect(() => {
     document.documentElement.classList.toggle('dark', isDark)
+    setAppliedDark(isDark)
   }, [isDark])
 
   const setTheme = useCallback((next: ThemeChoice) => {
@@ -120,8 +131,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Recomputed after paint so the palette reads the freshly applied tokens.
-  const palette = useMemo(() => readChartPalette(isDark), [isDark])
+  /* Recomputed from the theme actually applied to the DOM, never the pending one. */
+  const palette = useMemo(() => readChartPalette(appliedDark), [appliedDark])
 
   const value = useMemo<PreferencesValue>(
     () => ({ theme, isDark, setTheme, units, setUnits, mapLayers, setMapLayers, locale: 'es-ES', palette }),
