@@ -19,6 +19,10 @@ def create_spark_session(app_name="WeatherMLOps"):
         # Local runs default to 200 shuffle partitions, which is mostly task
         # scheduling overhead on a 4-core runner.
         .config("spark.sql.shuffle.partitions", "8")
+        # Local mode otherwise gives the driver the JVM default heap (1 GB),
+        # which the cached training frames exhaust (`OutOfMemoryError: Java
+        # heap space`). CI raises this with SPARK_DRIVER_MEMORY.
+        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "2g"))
         .getOrCreate()
     )
 
