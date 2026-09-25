@@ -1,7 +1,7 @@
 """Router happy paths, 404s and contract-shaped payloads (offline, fake repos)."""
 
 from app.services.aemet import get_aemet_service
-from tests.fakes import FakeAemetService
+from tests.fakes import FakeAemetService, FakeDatabase
 
 
 async def test_health(client):
@@ -13,6 +13,28 @@ async def test_health(client):
     assert body["service"] == "weather-api"
     assert body["version"] == "2.0.0"
     assert body["time"].endswith("Z")
+
+
+async def test_health_liveness_is_shallow(client):
+    # No ``app.state.db`` is set: liveness must not touch Mongo.
+    response = await client.get("/api/health")
+    assert response.status_code == 200
+
+
+async def test_health_ready_ok(client, app):
+    app.state.db = FakeDatabase()
+    response = await client.get("/api/health/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "database": "weather_db"}
+
+
+async def test_health_ready_unavailable_when_mongo_is_down(client, app):
+    app.state.db = FakeDatabase(error=RuntimeError("no mongod"))
+    response = await client.get("/api/health/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable", "database": "weather_db"}
 
 
 async def test_cities(client):
@@ -63,7 +85,7 @@ async def test_current_weather_unknown_city_is_404(client):
     assert response.json() == {"detail": "City 'Atlantis' not found"}
 
 
-async def test_history_is_newest_first(client):
+async def test_history_is_chronological(client):
     response = await client.get("/api/weather/history/Madrid", params={"hours": 24, "limit": 200})
 
     assert response.status_code == 200
@@ -72,7 +94,8 @@ async def test_history_is_newest_first(client):
     assert body["hours"] == 24
     assert body["count"] == 3
     temperatures = [point["temperature"] for point in body["points"]]
-    assert temperatures == [22.0, 21.0, 20.0]
+    # Charts read left to right from oldest to newest.
+    assert temperatures == [20.0, 21.0, 22.0]
 
 
 async def test_history_without_data_is_404(client):
@@ -129,13 +152,14 @@ async def test_predictions_latest(client):
     assert prediction["city"] == "Madrid"
 
 
-async def test_predictions_for_city(client):
+async def test_predictions_for_city_chronological(client):
     response = await client.get("/api/predictions/Madrid", params={"limit": 48})
 
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 2
-    assert [item["predicted_temperature"] for item in body] == [21.5, 20.4]
+    # Served oldest to newest so time-series charts read left to right.
+    assert [item["predicted_temperature"] for item in body] == [20.4, 21.5]
 
 
 async def test_predictions_for_unknown_city_is_404(client):
@@ -228,6 +252,7 @@ async def test_openapi_documents_every_contract_path(client):
     schema = (await client.get("/openapi.json")).json()
     assert {
         "/api/health",
+        "/api/health/ready",
         "/api/cities",
         "/api/geo/search",
         "/api/weather/current",

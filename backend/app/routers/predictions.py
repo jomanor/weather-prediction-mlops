@@ -31,4 +31,6 @@ async def predictions_for_city(
             status_code=404,
             detail=f"No predictions found for city '{city}'. Run the inference job first.",
         )
-    return predictions
+    # ``for_city`` returns newest-first so ``limit`` keeps the latest window;
+    # serve chronological order because charts read oldest to newest.
+    return list(reversed(predictions))
