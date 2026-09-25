@@ -154,3 +154,12 @@ async def test_geo_search_route_upstream_failure_is_502(client, app):
 
     assert response.status_code == 502
     assert response.json() == {"detail": "Geocoding request failed: boom"}
+
+
+async def test_geo_search_route_is_cached_per_query(client, geo):
+    await client.get("/api/geo/search", params={"q": "Valencia"})
+    await client.get("/api/geo/search", params={"q": " Valencia "})
+    assert geo.queries == ["Valencia"]  # second call served from cache
+
+    await client.get("/api/geo/search", params={"q": "Madrid"})
+    assert geo.queries == ["Valencia", "Madrid"]  # distinct key
