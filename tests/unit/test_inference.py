@@ -5,13 +5,14 @@ Unit tests for spark-jobs/inference.py.
 Tests model loading, registry queries, and batch inference transformations.
 """
 
+import logging
 import os
 import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pyspark.sql import Row
+from pyspark.sql import DataFrameWriter, Row
 from pyspark.sql.types import (
     DoubleType,
     StringType,
@@ -65,8 +66,11 @@ class TestLoadLatestModel:
             assert model is None
             assert meta is None
 
-    def test_load_latest_model_mlflow_success(self):
+    def test_load_latest_model_mlflow_success_no_registry_entry(self):
+        # MLflow artifact loads, but there is no model_registry doc -> fall back
+        # to the MLflow-derived metadata (no interval, honest "MLflow-*" version).
         mock_db = MagicMock()
+        mock_db["model_registry"].find_one.return_value = None
         mock_fs = MagicMock()
         mock_model = MagicMock()
 
@@ -76,7 +80,37 @@ class TestLoadLatestModel:
                     mock_db, mock_fs, "temp_prediction_1h", MagicMock()
                 )
                 assert model == mock_model
-                assert "MLflow" in meta["version"]
+                assert meta["version"].startswith("MLflow-")
+                assert "interval" not in meta
+
+    def test_load_latest_model_mlflow_artifact_uses_registry_metadata(self):
+        # Regression: MLflow artifact wins, but metadata must come from the
+        # newest model_registry doc so interval + lineage are not dropped.
+        entry = {
+            "model_name": "temp_prediction_1h_LinearRegression",
+            "version": "20260925_201254",
+            "gridfs_file_id": "mock_id",
+            "interval": {
+                "level": 0.8,
+                "lower_offset": -0.8971481336983871,
+                "upper_offset": 0.5871447896789732,
+            },
+        }
+        mock_db = MagicMock()
+        mock_db["model_registry"].find_one.return_value = entry
+        mock_model = MagicMock()
+
+        with patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "http://localhost:5000"}):
+            with patch("mlflow.spark.load_model", return_value=mock_model):
+                model, meta = inference.load_latest_model(
+                    mock_db, MagicMock(), "temp_prediction_1h", MagicMock()
+                )
+
+        assert model == mock_model
+        assert meta == entry
+        assert meta["model_name"] == "temp_prediction_1h_LinearRegression"
+        assert meta["version"] == "20260925_201254"
+        assert meta["interval"]["lower_offset"] == pytest.approx(-0.8971481336983871)
 
 
 class TestInferenceTransformation:
@@ -235,3 +269,81 @@ class TestBuildOutputDf:
         assert row.interval_level is None
         assert row.temp_model_name == "unknown"
         assert row.rain_model_name == "unknown"
+
+    def test_build_output_df_registry_lineage_and_offsets(self, spark, pred_df):
+        # The registry doc's model_name/version drive the row lineage, and its
+        # interval offsets drive temp_lower/temp_upper (the production values
+        # from the failing run).
+        temp_meta = {
+            "model_name": "temp_prediction_1h_LinearRegression",
+            "version": "20260925_201254",
+            "interval": {
+                "level": 0.8,
+                "lower_offset": -0.8971481336983871,
+                "upper_offset": 0.5871447896789732,
+            },
+        }
+        rain_meta = {
+            "model_name": "rain_prediction_1h_GradientBoostedTrees",
+            "version": "20260925_201257",
+        }
+
+        out = inference.build_output_df(pred_df, temp_meta, rain_meta)
+
+        row = out.first()
+        assert row.temp_model_name == "temp_prediction_1h_LinearRegression"
+        assert row.temp_model_version == "20260925_201254"
+        assert row.temp_lower == pytest.approx(21.5 + (-0.8971481336983871))
+        assert row.temp_upper == pytest.approx(21.5 + 0.5871447896789732)
+        assert row.interval_level == 0.8
+        assert row.rain_model_name == "rain_prediction_1h_GradientBoostedTrees"
+
+
+class _FakeModel:
+    """A pipeline stand-in whose transform adds a ``prediction`` column."""
+
+    stages = []
+
+    def __init__(self, offset):
+        self.offset = offset
+
+    def transform(self, df):
+        return df.withColumn("prediction", df["temperature"] + self.offset)
+
+
+class TestRunInferenceInterval:
+    def test_warns_and_nulls_when_no_interval(self, spark, caplog):
+        features = spark.createDataFrame(
+            [
+                Row(
+                    city="Madrid",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0),
+                    temperature=20.0,
+                )
+            ],
+            schema=StructType(
+                [
+                    StructField("city", StringType(), False),
+                    StructField("timestamp", TimestampType(), False),
+                    StructField("temperature", DoubleType(), True),
+                ]
+            ),
+        )
+
+        # Neither source yields an interval block -> warning + null columns.
+        temp_meta = {"model_name": "legacy", "version": "v0"}
+        rain_meta = {"model_name": "r", "version": "v1"}
+
+        with caplog.at_level(logging.WARNING, logger="inference"):
+            with patch.object(DataFrameWriter, "save"):
+                inference.run_inference(
+                    spark,
+                    _FakeModel(1.5),
+                    _FakeModel(0.0),
+                    features,
+                    "mongodb://fake",
+                    temp_meta,
+                    rain_meta,
+                )
+
+        assert any("no 'interval' block" in r.message for r in caplog.records)

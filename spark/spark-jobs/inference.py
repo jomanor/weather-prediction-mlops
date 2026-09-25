@@ -80,8 +80,20 @@ def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:
 
 
 def load_latest_model(db, fs, model_name_prefix: str, spark):
-    """Fetch the latest matching model from MLflow Registry or GridFS fallback and load it as a
-    PipelineModel. Returns (PipelineModel, metadata_dict) or (None, None)."""
+    """Fetch the latest matching model and its registry metadata.
+
+    The **artifact** is loaded MLflow-first with a GridFS fallback, but the
+    **metadata** (``model_name``, ``version``, ``interval``) is always resolved
+    from the newest matching ``model_registry`` document. The MLflow file store
+    is ephemeral and carries no interval/lineage, so we never trust it for
+    metadata: the registry is canonical. Returns (PipelineModel, metadata_dict)
+    or (None, None).
+    """
+    # Resolve the registry metadata first, regardless of where the artifact
+    # ends up loading from. Only this doc carries the honest model_name/version
+    # and the prediction-interval block.
+    entry = _latest_model_entry(db, model_name_prefix)
+
     mlflow_uri = os.getenv("MLFLOW_TRACKING_URI")
     if mlflow_uri:
         try:
@@ -104,15 +116,15 @@ def load_latest_model(db, fs, model_name_prefix: str, spark):
                             "Attempting to load model '%s' from MLflow Registry...", model_uri
                         )
                         model = mlflow.spark.load_model(model_uri)
-                        meta = {"model_name": cand, "version": f"MLflow-{stage}"}
                         logger.info("Successfully loaded model from MLflow Registry: %s", model_uri)
-                        return model, meta
+                        if entry is not None:
+                            return model, entry
+                        return model, {"model_name": cand, "version": f"MLflow-{stage}"}
                     except Exception:
                         continue
         except Exception as e:
             logger.info("MLflow model load skipped/failed (%s), falling back to GridFS...", e)
 
-    entry = _latest_model_entry(db, model_name_prefix)
     if entry is None:
         logger.warning("No model found for prefix '%s'. Skipping.", model_name_prefix)
         return None, None
