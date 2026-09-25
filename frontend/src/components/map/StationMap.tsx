@@ -15,6 +15,14 @@ const STYLES = {
 
 const IBERIA_CENTER: [number, number] = [-3.9, 39.9]
 
+/** Map transitions follow the OS motion preference. */
+function motionDuration(ms: number): number {
+  return typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 0
+    : ms
+}
+
 /* Geomatic layers. Free and keyless: AWS Open Data terrain tiles (Terrarium
  * encoding) for relief, RainViewer's public radar mosaic for precipitation. */
 const DEM_SOURCE = 'meteoml-dem-hillshade'
@@ -140,10 +148,10 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
 
         if (mapLayers.terrain3d) {
           map.setTerrain({ source: TERRAIN_DEM_SOURCE, exaggeration: 1.2 })
-          if (map.getPitch() < 1) map.easeTo({ pitch: 55, duration: 600 })
+          if (map.getPitch() < 1) map.easeTo({ pitch: 55, duration: motionDuration(600) })
         } else {
           map.setTerrain(null)
-          if (map.getPitch() > 1) map.easeTo({ pitch: 0, duration: 600 })
+          if (map.getPitch() > 1) map.easeTo({ pitch: 0, duration: motionDuration(600) })
         }
 
         /* Building extrusions ride the vector tiles the basemap already
@@ -202,12 +210,16 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
       const element = existing?.getElement()
       if (element) {
         element.dataset.selected = String(selected)
+        element.setAttribute('aria-pressed', String(selected))
+        element.setAttribute('aria-label', `${city}, ${label} observada`)
         element.innerHTML = renderPin(city, label)
       } else {
         const node = document.createElement('button')
         node.type = 'button'
         node.className = 'station-pin'
         node.dataset.selected = String(selected)
+        node.setAttribute('aria-pressed', String(selected))
+        node.setAttribute('aria-label', `${city}, ${label} observada`)
         node.innerHTML = renderPin(city, label)
         node.addEventListener('click', (event) => {
           event.stopPropagation()
@@ -236,7 +248,7 @@ export function StationMap({ stations, selectedCity, onSelect, className }: Stat
     map.easeTo({
       center: [station.longitude as number, station.latitude as number],
       zoom: Math.max(map.getZoom(), 7),
-      duration: 700,
+      duration: motionDuration(700),
     })
   }, [selectedCity, geoStations])
 

@@ -4,7 +4,8 @@ import { Bar, BarChart, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis
 import type { SeriesPoint } from '@/api/schemas'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
-import { formatDateTime, formatSigned, isNum } from '@/lib/format'
+import { useChartSync } from '@/hooks/useChartSync'
+import { formatDateTimeMs, formatSigned, isNum } from '@/lib/format'
 import type { ChartPalette } from '@/lib/chart-theme'
 
 interface ResidualChartProps {
@@ -13,20 +14,23 @@ interface ResidualChartProps {
   palette: ChartPalette
 }
 
-/** Model error per hour, diverging around zero. */
+/** Model error per hour, diverging around zero, on the shared time axis. */
 export function ResidualChart({ points, height = 160, palette }: ResidualChartProps) {
   const { units } = usePreferences()
+  const { domain } = useChartSync()
 
   const data = useMemo(
     () =>
-      points.map((point) => ({
-        t: formatDateTime(point.timestamp),
-        residual: isNum(point.residual_model)
-          ? units === 'imperial'
-            ? point.residual_model * 1.8
-            : point.residual_model
-          : null,
-      })),
+      points
+        .map((point) => ({
+          ts: new Date(point.timestamp).getTime(),
+          residual: isNum(point.residual_model)
+            ? units === 'imperial'
+              ? point.residual_model * 1.8
+              : point.residual_model
+            : null,
+        }))
+        .filter((row) => Number.isFinite(row.ts)),
     [points, units],
   )
 
@@ -38,6 +42,8 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
     return values.length ? Math.max(...values) * 1.15 : 1
   }, [data])
 
+  const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
+
   const axisProps = {
     stroke: palette.axis,
     tick: { fill: palette.textMuted, fontSize: 10, fontFamily: 'JetBrains Mono Variable, monospace' },
@@ -48,7 +54,15 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
         <ReferenceLine y={0} stroke={palette.axis} />
-        <XAxis dataKey="t" minTickGap={48} {...axisProps} />
+        <XAxis
+          dataKey="ts"
+          type="number"
+          scale="time"
+          domain={xDomain}
+          minTickGap={48}
+          tickFormatter={(value: number) => formatDateTimeMs(value)}
+          {...axisProps}
+        />
         <YAxis
           domain={[-bound, bound]}
           width={52}
@@ -60,6 +74,7 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
           cursor={{ fill: palette.grid }}
           content={
             <ChartTooltip
+              title={(label) => formatDateTimeMs(Number(label))}
               format={(entry) =>
                 entry.value === null
                   ? '—'

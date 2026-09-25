@@ -1,8 +1,7 @@
 import { AlertTriangle, Info } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useEffect, useMemo } from 'react'
 
-import { useBenchmark, useBenchmarkSummary, useCities } from '@/api/queries'
+import { useBenchmarkSummary, useCities } from '@/api/queries'
 import { usePreferences } from '@/app/preferences'
 import { BenchmarkChart } from '@/components/charts/BenchmarkChart'
 import { ResidualChart } from '@/components/charts/ResidualChart'
@@ -12,25 +11,48 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { MetricsCompare } from '@/features/benchmark/MetricsCompare'
+import { useBenchmark } from '@/features/benchmark/queries'
+import { useChartSync } from '@/hooks/useChartSync'
+import { useStationSelection } from '@/hooks/useStationSelection'
+import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
 import { formatNumber, isNum } from '@/lib/format'
 
-const RANGES = [
+const RANGE_HOURS = [24, 48, 72] as const
+type BenchmarkRange = (typeof RANGE_HOURS)[number]
+
+const RANGES: ReadonlyArray<{ value: BenchmarkRange; label: string }> = [
   { value: 24, label: '24 h' },
   { value: 48, label: '48 h' },
   { value: 72, label: '72 h' },
 ]
 
+/* URL state: `range` is the benchmark window; the city is shared app-wide. */
+const BENCHMARK_SCHEMA: { range: UrlCodec<BenchmarkRange> } = {
+  range: urlOption(RANGE_HOURS, 24),
+}
+
 export function BenchmarkPage() {
-  const [params, setParams] = useSearchParams()
+  const [state, setState] = useUrlState(BENCHMARK_SCHEMA)
+  const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
+  const { setWindow } = useChartSync()
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
-  const [hours, setHours] = useState(24)
 
-  const city = params.get('city') ?? cities?.[0] ?? ''
+  const city = selectedCity ?? cities[0] ?? ''
+  const hours = state.range
   const benchmark = useBenchmark(city, hours)
   const summary = useBenchmarkSummary()
+
+  /* Align the benchmark and residual charts on the observed series' time window. */
+  const anchor = benchmark.data?.series.at(-1)?.timestamp
+  useEffect(() => {
+    if (!anchor) return
+    const anchorMs = new Date(anchor).getTime()
+    if (Number.isFinite(anchorMs)) setWindow(hours, anchorMs)
+  }, [anchor, hours, setWindow])
+
 
   const verdict = useMemo(() => {
     const modelMae = benchmark.data?.metrics.model.mae
@@ -42,12 +64,6 @@ export function BenchmarkPage() {
       ? `El modelo Spark GBT reduce el MAE en ${formatNumber(difference, 2)} °C frente a AEMET.`
       : `AEMET reduce el MAE en ${formatNumber(difference, 2)} °C frente al modelo Spark GBT.`
   }, [benchmark.data])
-
-  const selectCity = (next: string) => {
-    const updated = new URLSearchParams(params)
-    updated.set('city', next)
-    setParams(updated, { replace: true })
-  }
 
   const hasSeries = Boolean(benchmark.data?.series.length)
 
@@ -73,7 +89,12 @@ export function BenchmarkPage() {
                 </option>
               ))}
             </select>
-            <Segmented value={hours} onChange={setHours} options={RANGES} label="Ventana" />
+            <Segmented
+              value={hours}
+              onChange={(value) => setState({ range: value })}
+              options={RANGES}
+              label="Ventana"
+            />
           </>
         }
       />
@@ -223,16 +244,30 @@ export function BenchmarkPage() {
                   {summary.data.cities.map((row) => {
                     const modelBetter =
                       isNum(row.model.mae) && isNum(row.aemet.mae) && row.model.mae < row.aemet.mae
+                    const selected = row.city === city
                     return (
                       <tr
                         key={row.city}
+                        tabIndex={0}
+                        aria-selected={selected}
+                        data-selected={selected}
                         onClick={() => selectCity(row.city)}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Enter' && event.key !== ' ') return
+                          event.preventDefault()
+                          selectCity(row.city)
+                        }}
                         className={cn(
-                          'cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-panel-2',
-                          row.city === city && 'bg-panel-2',
+                          'relative cursor-pointer border-b border-line/60 transition-colors last:border-0 hover:bg-panel-2',
+                          selected && 'bg-panel-2',
                         )}
                       >
-                        <td className="whitespace-nowrap px-4 py-2 font-medium text-fg">{row.city}</td>
+                        <td className="whitespace-nowrap px-4 py-2 font-medium text-fg">
+                          {selected ? (
+                            <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-accent" />
+                          ) : null}
+                          {row.city}
+                        </td>
                         <td
                           className={cn(
                             'nums whitespace-nowrap px-4 py-2 text-right',

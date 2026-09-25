@@ -98,6 +98,11 @@ export function formatDateTime(iso: string | null | undefined, locale = 'es-ES')
   }).format(date)
 }
 
+/** Chart x-axis tick: epoch milliseconds -> "dd MMM HH:mm". */
+export function formatDateTimeMs(ms: number, locale = 'es-ES'): string {
+  return formatDateTime(new Date(ms).toISOString(), locale)
+}
+
 export function formatRelative(iso: string | null | undefined, locale = 'es-ES'): string {
   if (!iso) return EMPTY
   const date = new Date(iso)

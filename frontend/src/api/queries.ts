@@ -1,22 +1,16 @@
-import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from '@tanstack/react-query'
+import { useQuery, type UseQueryOptions } from '@tanstack/react-query'
 import { z } from 'zod'
 
-import { apiGet, apiSend } from './client'
-import {
-  benchmarkSchema,
-  benchmarkSummarySchema,
-  citySchema,
-  currentWeatherSchema,
-  geoSearchResponseSchema,
-  healthSchema,
-  historyResponseSchema,
-  latestPredictionsSchema,
-  modelsResponseSchema,
-  predictionSchema,
-  stationsResponseSchema,
-  statsResponseSchema,
-  type City,
-} from './schemas'
+import { apiGet } from './client'
+import { benchmarkSummarySchema, citySchema, healthSchema } from './schemas'
+
+/**
+ * Shared query layer.
+ *
+ * The contract lives in `client.ts`/`schemas.ts`; this module holds only the
+ * cache-key map and the hooks that more than one feature needs. Feature-scoped
+ * hooks live in `features/<name>/queries.ts` and build on `useApiQuery`.
+ */
 
 const MINUTE = 60_000
 
@@ -43,7 +37,8 @@ interface ApiQueryOptions<T> {
   retry?: UseQueryOptions<T, Error, T, readonly unknown[]>['retry']
 }
 
-function useApiQuery<T>(
+/** Shared `useQuery` wrapper: typed path, schema validation and sane defaults. */
+export function useApiQuery<T>(
   key: readonly unknown[],
   path: string,
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -62,103 +57,12 @@ function useApiQuery<T>(
 export const useHealth = () =>
   useApiQuery(queryKeys.health, '/health', healthSchema, { refetchInterval: 5 * MINUTE })
 
+/** Station registry; used by the shell search, the overview and the charts. */
 export const useCities = () =>
   useApiQuery(queryKeys.cities, '/cities', z.array(citySchema), { staleTime: 30 * MINUTE })
 
-/** Free-form location lookup against the Open-Meteo geocoding proxy. */
-export function useGeoSearch(query: string) {
-  return useApiQuery(queryKeys.geo(query), `/geo/search?q=${encodeURIComponent(query)}`, geoSearchResponseSchema, {
-    enabled: query.trim().length >= 2,
-    staleTime: 30 * MINUTE,
-    retry: false,
-  })
-}
-
-export function useAddCity() {
-  const client = useQueryClient()
-  return useMutation<City, Error, Omit<City, never>, unknown>({
-    mutationFn: (city) =>
-      apiSend('POST', '/cities', citySchema, {
-        body: { name: city.name.trim(), latitude: city.latitude, longitude: city.longitude },
-      }) as Promise<City>,
-    onSuccess: async () => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: queryKeys.cities }),
-        client.invalidateQueries({ queryKey: queryKeys.stations }),
-      ])
-    },
-  })
-}
-
-/** Removes a station from the registry; historical data is kept upstream. */
-export function useRemoveCity() {
-  const client = useQueryClient()
-  return useMutation<null, Error, string>({
-    mutationFn: (name) =>
-      apiSend('DELETE', `/cities/${encodeURIComponent(name)}`, null, { allowNotFound: true }),
-    onSuccess: async () => {
-      await Promise.all([
-        client.invalidateQueries({ queryKey: queryKeys.cities }),
-        client.invalidateQueries({ queryKey: queryKeys.stations }),
-      ])
-    },
-  })
-}
-
-export const useStations = () =>
-  useApiQuery(queryKeys.stations, '/weather/current', stationsResponseSchema, {
-    refetchInterval: 5 * MINUTE,
-  })
-
-export const useCurrentWeather = (city: string) =>
-  useApiQuery(
-    queryKeys.station(city),
-    `/weather/current/${encodeURIComponent(city)}`,
-    currentWeatherSchema,
-    { refetchInterval: 5 * MINUTE, enabled: Boolean(city) },
-  )
-
-export const useHistory = (city: string, hours = 24) =>
-  useApiQuery(
-    queryKeys.history(city, hours),
-    `/weather/history/${encodeURIComponent(city)}?hours=${hours}&limit=500`,
-    historyResponseSchema,
-    { enabled: Boolean(city) },
-  )
-
-export const useStats = (city: string, hours = 24) =>
-  useApiQuery(
-    queryKeys.stats(city, hours),
-    `/weather/stats/${encodeURIComponent(city)}?hours=${hours}`,
-    statsResponseSchema,
-    { enabled: Boolean(city), allowNotFound: true },
-  )
-
-export const useLatestPredictions = () =>
-  useApiQuery(queryKeys.latestPredictions, '/predictions/latest', latestPredictionsSchema, {
-    refetchInterval: 10 * MINUTE,
-  })
-
-export const usePredictions = (city: string, limit = 48) =>
-  useApiQuery(
-    queryKeys.predictions(city, limit),
-    `/predictions/${encodeURIComponent(city)}?limit=${limit}`,
-    z.array(predictionSchema),
-    { enabled: Boolean(city), allowNotFound: true },
-  )
-
-export const useBenchmark = (city: string, hours = 24) =>
-  useApiQuery(
-    queryKeys.benchmark(city, hours),
-    `/benchmark/${encodeURIComponent(city)}?hours=${hours}`,
-    benchmarkSchema,
-    { enabled: Boolean(city), refetchInterval: 30 * MINUTE },
-  )
-
+/** National MAE roll-up shared by the overview and the benchmark page. */
 export const useBenchmarkSummary = () =>
   useApiQuery(queryKeys.benchmarkSummary, '/benchmark', benchmarkSummarySchema, {
     refetchInterval: 30 * MINUTE,
   })
-
-export const useModels = () =>
-  useApiQuery(queryKeys.models, '/models', modelsResponseSchema, { staleTime: 10 * MINUTE })

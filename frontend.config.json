@@ -1,0 +1,18 @@
+{
+  "assumed": true,
+  "platform": "web",
+  "stack": { "framework": "react", "language": "typescript" },
+  "styling": "tailwind",
+  "component_base": "none",
+  "icons": "lucide",
+  "theme": {
+    "mode": "both",
+    "accent": "#0b76b8",
+    "neutrals": "graphite",
+    "radius": "0.25rem"
+  },
+  "fonts": { "ui": "Inter Variable", "mono": "JetBrains Mono Variable" },
+  "motion": "standard",
+  "references": ["linear.app", "stripe.com", "grafana.com", "teenage.engineering"],
+  "notes": "assumed:true — written from the existing system because the user delegated design decisions (\"as long as you do cool things, i am okay with anything\"). Run /ui-setup to confirm or change.\n\nSource of truth for tokens: `frontend/src/styles/index.css` (Tailwind v4 `@import 'tailwindcss'` + `@custom-variant dark`, no tailwind.config file). Do not create a second token set — extend that file.\n\nConventions already in place and binding for all future UI work:\n- Instrument-panel aesthetic: graphite surfaces, hairline rules, sharp 0.25rem radius, one signal colour (the accent) for interaction only.\n- Colour is data. `--obs` (observed, silver/ink), `--model` (ML, violet), `--aemet` (AEMET, amber) are reserved for series; `--ok/--warn/--bad` are semantic only. Never reuse them for chrome.\n- Both themes must be handled by the same tokens (light + `.dark`). Never hardcode a hex in a component; use the `--color-*` Tailwind theme mappings.\n- Data ramps (planned, roadmap U4) are a separate family to add here: `--temp-1..7`, `--rain-1..5`, `--wind-1..4` — sequential, perceptually even, colour-blind safe; never substitute for the series colours above.\n- Charts read oldest -> newest (API contract); x-axis is time, left to right.\n- Map already uses MapLibre + Carto vector basemap + Terrarium hillshade + RainViewer radar in `src/components/map/StationMap.tsx`. Keep those providers (keyless); no paid tiles.\n- A11y: never encode meaning in colour alone (pair with a label/icon); honour `prefers-reduced-motion`; visible focus; 16px inputs on mobile.\n- Feedback states (loading skeleton, empty, error) come from `src/components/shell/Feedback.tsx`; reuse rather than re-implement."
+}
