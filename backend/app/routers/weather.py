@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from app.core.cache import TTLCache, cached, get_cache
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.routers.cities import MAX_NAME_LENGTH
+from app.schemas.quality import WeatherQuality
 from app.schemas.weather import (
     WEATHER_FIELDS,
     CitySeries,
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/weather", tags=["weather"])
 HOURS_QUERY = Query(default=24, ge=1, le=168, description="Hours of data (max 168 = 1 week)")
 
 CURRENT_TTL_SECONDS = 30
+QUALITY_TTL_SECONDS = 300
 MAX_BULK_CITIES = 15
 MAX_RANGE_LIMIT = 2000
 MAX_SPARKLINE_POINTS = 48
@@ -45,6 +47,7 @@ STEP_HOURS_QUERY = Query(
     le=24,
     description="Downsample to at most one point per N hours (1-24)",
 )
+DAYS_QUERY = Query(default=7, ge=1, le=30, description="Quality lookback window in days (1-30)")
 
 
 def _parse_cities(raw: str) -> list[str]:
@@ -267,6 +270,33 @@ def _downsample(values: list[float], limit: int) -> list[float]:
         return list(values)
     step = (len(values) - 1) / (limit - 1)
     return [values[round(index * step)] for index in range(limit)]
+
+
+@router.get("/quality", response_model=WeatherQuality)
+async def weather_quality(
+    request: Request,
+    response: Response,
+    days: int = DAYS_QUERY,
+    repo: WeatherRepository = Depends(get_weather_repo),
+    cache: TTLCache = Depends(get_cache),
+) -> WeatherQuality | Response:
+    """Per-city completeness/gap/null/age meter over ``weather_features``.
+
+    Cached with the shared helper so it gets an ETag and ``Cache-Control`` like
+    every other read route; the window is part of the cache key.
+    """
+    now = datetime.now(timezone.utc)
+
+    async def load() -> WeatherQuality:
+        return WeatherQuality(
+            generated_at=now,
+            days=days,
+            cities=await repo.quality_report(days, now),
+        )
+
+    return await cached(
+        request, response, cache, f"weather:quality:{days}", QUALITY_TTL_SECONDS, load
+    )
 
 
 @router.get("/stats/{city}", response_model=WeatherStats)

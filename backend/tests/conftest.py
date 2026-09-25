@@ -66,7 +66,8 @@ def weather_points(now: datetime) -> list[CurrentWeather]:
 
 @pytest.fixture
 def prediction_points(now: datetime) -> list[Prediction]:
-    """Two model predictions for the two older observation timestamps."""
+    """Two model predictions: the newer one carries an interval, the older does not."""
+    intervals = {1: (19.6, 23.4, 0.8), 2: (None, None, None)}
     return [
         Prediction(
             city="Madrid",
@@ -76,6 +77,9 @@ def prediction_points(now: datetime) -> list[Prediction]:
             predicted_temperature=predicted,
             predicted_rain=0.0,
             observed_temperature=observed,
+            temp_lower=intervals[offset][0],
+            temp_upper=intervals[offset][1],
+            interval_level=intervals[offset][2],
             temp_model_name="temp_prediction_1h_GradientBoostedTrees",
             temp_model_version="20260923_020000",
             rain_model_name="rain_prediction_1h_GradientBoostedTrees",
@@ -92,6 +96,13 @@ def aemet_temps(now: datetime) -> dict[datetime, float]:
 
 @pytest.fixture
 def model_infos(now: datetime) -> list[ModelInfo]:
+    split = {
+        "kind": "temporal",
+        "train_end": "2026-09-16T00:00:00Z",
+        "val_end": "2026-09-19T00:00:00Z",
+        "test_start": "2026-09-19T00:00:00Z",
+    }
+    interval = {"level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1}
     return [
         ModelInfo(
             name="temp_prediction_1h_GradientBoostedTrees",
@@ -99,8 +110,19 @@ def model_infos(now: datetime) -> list[ModelInfo]:
             target="temperature",
             horizon_hours=1,
             created_at=now - timedelta(hours=12),
-            metrics=ModelMetrics(rmse=1.44, mae=1.12, r2=0.91),
+            metrics=ModelMetrics(
+                rmse=1.44,
+                mae=1.12,
+                r2=0.91,
+                persistence_rmse=3.05,
+                climatology_rmse=3.41,
+                skill_score=0.53,
+                coverage=0.79,
+            ),
             stage="production",
+            split=split,
+            interval=interval,
+            commit="abc1234",
         ),
         ModelInfo(
             name="rain_prediction_1h_RandomForest",
@@ -110,6 +132,9 @@ def model_infos(now: datetime) -> list[ModelInfo]:
             created_at=now - timedelta(hours=12),
             metrics=None,
             stage=None,
+            split=None,
+            interval=None,
+            commit=None,
         ),
     ]
 
