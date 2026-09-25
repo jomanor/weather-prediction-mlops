@@ -21,6 +21,18 @@ from app.core.coerce import as_utc, first_not_none, to_float, to_int
 from app.db.mongo import get_db
 from app.schemas.weather import CurrentWeather
 
+#: Both writers request ``wind_speed_unit=ms`` (see ``scripts/ingest_weather.py``
+#: and ``kafka/kafka-producer/producer.py``), so stored wind speeds are m/s;
+#: the API contract (``CurrentWeather.wind_speed``) is km/h. Convert here, at
+#: the boundary, and nowhere else.
+MS_TO_KMH = 3.6
+
+
+def _wind_kmh(value: Any) -> float | None:
+    """Stored m/s -> contract km/h, preserving None for missing values."""
+    speed = to_float(value)
+    return speed * MS_TO_KMH if speed is not None else None
+
 
 def _from_weather_data(doc: dict[str, Any]) -> CurrentWeather | None:
     """``weather_data`` document -> CurrentWeather."""
@@ -45,7 +57,7 @@ def _from_weather_data(doc: dict[str, Any]) -> CurrentWeather | None:
         ),
         humidity=to_float(first_not_none(doc.get("humidity"), main.get("humidity"))),
         pressure=to_float(first_not_none(doc.get("pressure"), main.get("pressure"))),
-        wind_speed=to_float(first_not_none(doc.get("wind_speed"), wind.get("speed"))),
+        wind_speed=_wind_kmh(first_not_none(doc.get("wind_speed"), wind.get("speed"))),
         wind_direction=to_float(first_not_none(doc.get("wind_direction"), wind.get("deg"))),
         precipitation=to_float(data.get("precipitation")),
         cloud_cover=to_float(clouds.get("all")),
@@ -71,7 +83,7 @@ def _from_raw_weather(doc: dict[str, Any]) -> CurrentWeather | None:
         apparent_temperature=to_float(current.get("apparent_temperature")),
         humidity=to_float(current.get("relative_humidity_2m")),
         pressure=to_float(current.get("surface_pressure")),
-        wind_speed=to_float(current.get("wind_speed_10m")),
+        wind_speed=_wind_kmh(current.get("wind_speed_10m")),
         wind_direction=to_float(current.get("wind_direction_10m")),
         precipitation=to_float(current.get("precipitation")),
         cloud_cover=to_float(current.get("cloud_cover")),
