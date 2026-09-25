@@ -106,8 +106,20 @@ that invalidates model lineage and forces a re-backfill.
 ## Status
 
 - [x] PR #6 repopulate 90 d history; PR #7 blocking-sort fix; PR #8 training + inference fixes; PR #9 Modelos tab null metrics
-- [x] Batch 1: B1 wind km/h at the API boundary, B2 local-hour time features, B3 real `model_type`, B4 clarified as by-design, B5 chronological chart series, R1 inference upsert (connector `operationType=replace` + `upsertDocument`, 15 legacy duplicates removed), R2 TTL (raw 180 d / predictions 90 d / weather_data 30 d), R3 missing `weather_features` + predictions indexes, R5 `GET /api/health/ready`
-- [ ] Batch 2: F1, F2, L2, L3, L4, L5, U1, U2, U3, U4, U5
-- [ ] Batch 3: D1, M1, D3, R4
-- [ ] Batch 4: M2, M3, M4, D2, D4, L1, L5, U6, U7
+- [x] Batch 1 (PR #10): B1 wind km/h at the API boundary, B2 local-hour time features, B3 real `model_type`, B4 clarified as by-design, B5 chronological chart series, R1 inference upsert (connector `operationType=replace` + `upsertDocument`, 15 legacy duplicates removed), R2 TTL (raw 180 d / predictions 90 d / weather_data 30 d), R3 missing `weather_features` + predictions indexes, R5 `GET /api/health/ready`
+- [x] Batch 2 (PR #11 backend, PR #12 frontend): F1 feature-module registry + lazy routes, F2 per-feature queries + shared hooks (`useUrlState`, `useStationSelection`, `useChartSync`), L2 in-process TTL cache + ETag/304, L3 background index/seed so a cold start serves immediately, L4 `GET /api/weather/series` + `/api/weather/summary` + `/api/map/stations` (GeoJSON), L5 `GET /api/weather/range/{city}` (keyset), U1 map/table/chart cross-filtering, U2 URL-restored view state
+- [ ] Batch 3: U3 radar playback, U4 data colour ramps, U5 clustered markers + basemap switcher, D1, M1, D3, R4
+- [ ] Batch 4: M2, M3, M4, D2, D4, L1, U6, U7
 - [ ] Batch 5: M5, M6, L6, R6
+
+## Accepted follow-ups
+
+Found in review, deliberately deferred (none blocking):
+
+- `core/cache.py` `cached()` has no single-flight: two concurrent cold-start misses for the same key both run the loader. Same value, so only a duplicate aggregate.
+- A city can look truncated if `weather_data`'s 30-day TTL evicts rows mid-window while `raw_weather` (180 d) still has them, because the fallback is per city and source-exclusive.
+- `model_repo.list_models` sorts on `timestamp` alone; the sort rule wants a `model_name` prefix (`[("model_name", 1), ("timestamp", -1)]`). Harmless at registry size, fix before the registry grows.
+- `useChartSync`'s shared domain is set by data loads and never reset, so a chart can transiently inherit another page's window (hidden behind loading states).
+- `CityManager` deletes a station without confirmation.
+- `useUrlState`'s casts are sound only because one concrete schema drives each param key; nothing prevents two surfaces from reusing a key.
+- The frontend does not consume any Batch 2 endpoint yet: `/series`, `/summary`, `/range`, `/map/stations` and `/health/ready` are ready for U3-U5 and the map work.
