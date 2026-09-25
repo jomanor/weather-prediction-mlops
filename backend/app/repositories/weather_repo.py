@@ -96,6 +96,61 @@ def _map_all(docs: list[dict[str, Any]], mapper) -> list[CurrentWeather]:
     return [point for point in (mapper(doc) for doc in docs) if point is not None]
 
 
+#: Contract field -> stored paths, used to build a Mongo projection. Both the
+#: top-level and nested spellings are listed because the two writers disagree;
+#: ``_from_weather_data`` / ``_from_raw_weather`` already resolve either one.
+_CURRENT_FIELD_PATHS: dict[str, tuple[str, ...]] = {
+    "temperature": ("temperature", "data.main.temp"),
+    "apparent_temperature": ("feels_like", "data.main.feels_like"),
+    "humidity": ("humidity", "data.main.humidity"),
+    "pressure": ("pressure", "data.main.pressure"),
+    "wind_speed": ("wind_speed", "data.wind.speed"),
+    "wind_direction": ("wind_direction", "data.wind.deg"),
+    "precipitation": ("data.precipitation",),
+    "cloud_cover": ("data.clouds.all",),
+    "weather_code": ("data.weather",),
+}
+
+_RAW_FIELD_PATHS: dict[str, tuple[str, ...]] = {
+    "temperature": ("payload.current.temperature_2m",),
+    "apparent_temperature": ("payload.current.apparent_temperature",),
+    "humidity": ("payload.current.relative_humidity_2m",),
+    "pressure": ("payload.current.surface_pressure",),
+    "wind_speed": ("payload.current.wind_speed_10m",),
+    "wind_direction": ("payload.current.wind_direction_10m",),
+    "precipitation": ("payload.current.precipitation",),
+    "cloud_cover": ("payload.current.cloud_cover",),
+    "weather_code": ("payload.current.weather_code",),
+}
+
+
+def _projection(fields: list[str] | None, paths: dict[str, tuple[str, ...]]):
+    """Projection limited to ``fields`` plus the identity columns, or None for all."""
+    if not fields:
+        return None
+    projection: dict[str, int] = {"city": 1, "timestamp": 1}
+    for field in fields:
+        for path in paths.get(field, ()):
+            projection[path] = 1
+    return projection
+
+
+def _downsample_by_step(points: list[CurrentWeather], step_hours: int) -> list[CurrentWeather]:
+    """Keep the first observation per ``step_hours``-wide UTC bucket, per city."""
+    if step_hours <= 1:
+        return points
+    bucket_seconds = step_hours * 3600
+    kept: list[CurrentWeather] = []
+    seen: set[tuple[str, int]] = set()
+    for point in points:
+        bucket = int(point.observed_at.timestamp()) // bucket_seconds
+        if (point.city, bucket) in seen:
+            continue
+        seen.add((point.city, bucket))
+        kept.append(point)
+    return kept
+
+
 class WeatherRepository:
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._db = db
@@ -148,8 +203,13 @@ class WeatherRepository:
         end: datetime,
         limit: int = 1000,
         newest_first: bool = True,
+        after: datetime | None = None,
     ) -> list[CurrentWeather]:
-        query = {"city": city, "timestamp": {"$gte": start, "$lte": end}}
+        """Observations in ``[start, end]``, optionally strictly after ``after`` (keyset)."""
+        window: dict[str, datetime] = {"$gte": start, "$lte": end}
+        if after is not None:
+            window["$gt"] = after
+        query = {"city": city, "timestamp": window}
         direction = -1 if newest_first else 1
 
         cursor = self._current.find(query).sort("timestamp", direction).limit(limit)
@@ -160,6 +220,44 @@ class WeatherRepository:
         cursor = self._raw.find(query).sort("timestamp", direction).limit(limit)
         docs = [doc async for doc in cursor]
         return _map_all(docs, _from_raw_weather)
+
+    async def find_many_in_range(
+        self,
+        cities: list[str],
+        start: datetime,
+        end: datetime,
+        fields: list[str] | None = None,
+        step_hours: int = 1,
+    ) -> list[CurrentWeather]:
+        """Bulk read for ``cities`` in ``[start, end]`` with one query per collection.
+
+        ``weather_data`` is read first; any requested city without rows in range
+        falls back to ``raw_weather`` (the repo's usual policy, applied per city
+        here because the request spans cities). ``fields`` limits the Mongo
+        projection to the requested contract fields — never to the query alone.
+        Sorted ``(city, timestamp)`` so the compound index feeds the sort.
+        """
+        requested = list(dict.fromkeys(city for city in cities if city))
+        if not requested:
+            return []
+
+        query = {"city": {"$in": requested}, "timestamp": {"$gte": start, "$lte": end}}
+        sort: list[tuple[str, int]] = [("city", 1), ("timestamp", 1)]
+
+        cursor = self._current.find(query, _projection(fields, _CURRENT_FIELD_PATHS)).sort(sort)
+        points = _map_all([doc async for doc in cursor], _from_weather_data)
+
+        missing = [city for city in requested if city not in {point.city for point in points}]
+        if missing:
+            fallback = {
+                "city": {"$in": missing},
+                "timestamp": {"$gte": start, "$lte": end},
+            }
+            raw_cursor = self._raw.find(fallback, _projection(fields, _RAW_FIELD_PATHS)).sort(sort)
+            points.extend(_map_all([doc async for doc in raw_cursor], _from_raw_weather))
+
+        points.sort(key=lambda point: (point.city, point.observed_at))
+        return _downsample_by_step(points, step_hours)
 
 
 def get_weather_repo(db: AsyncIOMotorDatabase = Depends(get_db)) -> WeatherRepository:

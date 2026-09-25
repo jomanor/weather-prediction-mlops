@@ -16,15 +16,20 @@ from app.services.geo import GeocodingError
 class FakeWeatherRepository:
     def __init__(self, points: list[CurrentWeather] | None = None) -> None:
         self.points = list(points or [])
+        #: Method names in call order, so tests can prove a cache hit skipped Mongo.
+        self.calls: list[str] = []
 
     async def list_cities(self) -> list[str]:
+        self.calls.append("list_cities")
         return sorted({point.city for point in self.points})
 
     async def latest_for_city(self, city: str) -> CurrentWeather | None:
+        self.calls.append("latest_for_city")
         matches = [point for point in self.points if point.city == city]
         return max(matches, key=lambda point: point.observed_at) if matches else None
 
     async def latest_per_city(self) -> list[CurrentWeather]:
+        self.calls.append("latest_per_city")
         latest: dict[str, CurrentWeather] = {}
         for point in self.points:
             current = latest.get(point.city)
@@ -39,14 +44,36 @@ class FakeWeatherRepository:
         end: datetime,
         limit: int = 1000,
         newest_first: bool = True,
+        after: datetime | None = None,
     ) -> list[CurrentWeather]:
+        self.calls.append("find_range")
         matches = [
             point
             for point in self.points
-            if point.city == city and start <= point.observed_at <= end
+            if point.city == city
+            and start <= point.observed_at <= end
+            and (after is None or point.observed_at > after)
         ]
         matches.sort(key=lambda point: point.observed_at, reverse=newest_first)
         return matches[:limit]
+
+    async def find_many_in_range(
+        self,
+        cities: list[str],
+        start: datetime,
+        end: datetime,
+        fields: list[str] | None = None,
+        step_hours: int = 1,
+    ) -> list[CurrentWeather]:
+        self.calls.append("find_many_in_range")
+        wanted = set(cities)
+        matches = [
+            point
+            for point in self.points
+            if point.city in wanted and start <= point.observed_at <= end
+        ]
+        matches.sort(key=lambda point: (point.city, point.observed_at))
+        return matches
 
 
 class FakePredictionRepository:
@@ -116,8 +143,10 @@ class FakeCityRepository:
 
     def __init__(self, cities: list[City] | None = None) -> None:
         self.cities = list(cities or [])
+        self.calls: list[str] = []
 
     async def list(self) -> list[City]:
+        self.calls.append("list")
         return sorted(self.cities, key=lambda city: city.name)
 
     async def get(self, name: str) -> City | None:

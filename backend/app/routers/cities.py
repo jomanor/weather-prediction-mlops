@@ -1,7 +1,8 @@
 """Station registry (``/api/cities``) and geocoding proxy (``/api/geo/search``)."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
+from app.core.cache import TTLCache, cached, get_cache
 from app.repositories.city_repo import CityRepository, get_city_repo
 from app.schemas.city import City, GeoSearchResponse
 from app.services.geo import GeocodingError, GeocodingService, get_geo_service
@@ -9,11 +10,18 @@ from app.services.geo import GeocodingError, GeocodingService, get_geo_service
 router = APIRouter(tags=["cities"])
 
 MAX_NAME_LENGTH = 100
+CITIES_TTL_SECONDS = 60
+GEO_TTL_SECONDS = 300
 
 
 @router.get("/cities", response_model=list[City])
-async def list_cities(repo: CityRepository = Depends(get_city_repo)) -> list[City]:
-    return await repo.list()
+async def list_cities(
+    request: Request,
+    response: Response,
+    repo: CityRepository = Depends(get_city_repo),
+    cache: TTLCache = Depends(get_cache),
+) -> list[City] | Response:
+    return await cached(request, response, cache, "cities:list", CITIES_TTL_SECONDS, repo.list)
 
 
 @router.post("/cities", response_model=City, status_code=201)
@@ -42,11 +50,26 @@ async def delete_city(name: str, repo: CityRepository = Depends(get_city_repo)) 
 
 @router.get("/geo/search", response_model=GeoSearchResponse)
 async def geo_search(
+    request: Request,
+    response: Response,
     q: str | None = Query(default=None, description="Place name to geocode"),
     service: GeocodingService = Depends(get_geo_service),
-) -> GeoSearchResponse:
-    try:
-        results = await service.search(q or "")
-    except GeocodingError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return GeoSearchResponse(results=results)
+    cache: TTLCache = Depends(get_cache),
+) -> GeoSearchResponse | Response:
+    query = q or ""
+
+    async def load() -> GeoSearchResponse:
+        try:
+            results = await service.search(query)
+        except GeocodingError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return GeoSearchResponse(results=results)
+
+    return await cached(
+        request,
+        response,
+        cache,
+        f"geo:{query.strip().lower()}",
+        GEO_TTL_SECONDS,
+        load,
+    )
