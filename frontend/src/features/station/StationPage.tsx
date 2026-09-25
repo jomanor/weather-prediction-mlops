@@ -15,7 +15,7 @@ import { DerivedPanel } from '@/features/station/DerivedPanel'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
 import { useCurrentWeather, useHistory, usePredictions } from '@/features/station/queries'
 import { useChartSync } from '@/hooks/useChartSync'
-import { useStationSelection } from '@/hooks/useStationSelection'
+import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
 
@@ -49,7 +49,7 @@ export function StationPage() {
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
-  const city = selectedCity ?? cities[0] ?? ''
+  const city = resolveCity(selectedCity, cities, cityList !== undefined)
   const hours = state.hours
   const variable = state.var
 

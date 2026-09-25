@@ -65,4 +65,23 @@ describe('StationTable cross-filtering', () => {
     await userEvent.keyboard('{Enter}')
     expect(screen.getByTestId('probe')).toHaveTextContent('Madrid')
   })
+
+  it('keeps the surface params when opening a station', () => {
+    render(
+      <MemoryRouter initialEntries={['/overview?tab=estaciones']}>
+        <PreferencesProvider>
+          <StationSelectionProvider>
+            <StationTable
+              rows={[{ name: 'Madrid', station: STATION }]}
+              predictions={new Map<string, Prediction>()}
+            />
+          </StationSelectionProvider>
+        </PreferencesProvider>
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: /Abrir la estación Madrid/ })).toHaveAttribute(
+      'href',
+      '/stations?tab=estaciones&city=Madrid',
+    )
+  })
 })

@@ -13,7 +13,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import { MetricsCompare } from '@/features/benchmark/MetricsCompare'
 import { useBenchmark } from '@/features/benchmark/queries'
 import { useChartSync } from '@/hooks/useChartSync'
-import { useStationSelection } from '@/hooks/useStationSelection'
+import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
 import { formatNumber, isNum } from '@/lib/format'
@@ -40,7 +40,7 @@ export function BenchmarkPage() {
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
-  const city = selectedCity ?? cities[0] ?? ''
+  const city = resolveCity(selectedCity, cities, cityList !== undefined)
   const hours = state.range
   const benchmark = useBenchmark(city, hours)
   const summary = useBenchmarkSummary()

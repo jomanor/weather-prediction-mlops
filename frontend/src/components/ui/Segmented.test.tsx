@@ -22,4 +22,23 @@ describe('Segmented', () => {
     await userEvent.click(screen.getByRole('radio', { name: '48 h' }))
     expect(onChange).toHaveBeenCalledWith(48)
   })
+
+  it('moves and selects with the arrow keys over a single tab stop', async () => {
+    const onChange = vi.fn()
+    render(<Segmented value={24} onChange={onChange} options={OPTIONS} label="Rango" />)
+    const first = screen.getByRole('radio', { name: '24 h' })
+    const second = screen.getByRole('radio', { name: '48 h' })
+
+    expect(first).toHaveAttribute('tabindex', '0')
+    expect(second).toHaveAttribute('tabindex', '-1')
+
+    first.focus()
+    await userEvent.keyboard('{ArrowRight}')
+    expect(onChange).toHaveBeenLastCalledWith(48)
+    expect(second).toHaveFocus()
+
+    await userEvent.keyboard('{ArrowLeft}')
+    expect(onChange).toHaveBeenLastCalledWith(24)
+    expect(first).toHaveFocus()
+  })
 })

@@ -1,5 +1,5 @@
 import { ArrowUpRight, Check } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 
 import type { CurrentWeather, Prediction } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
@@ -36,6 +36,14 @@ interface StationTableProps {
 export function StationTable({ rows, predictions }: StationTableProps) {
   const { selectedCity, selectCity } = useStationSelection()
   const { units } = usePreferences()
+  const location = useLocation()
+
+  /* Keep the surface's params (e.g. the overview tab); only `city` changes. */
+  const stationLink = (name: string) => {
+    const params = new URLSearchParams(location.search)
+    params.set('city', name)
+    return { pathname: '/stations', search: params.toString() }
+  }
 
   const withObservations = rows.filter((row) => row.station)
 
@@ -116,7 +124,7 @@ export function StationTable({ rows, predictions }: StationTableProps) {
                       </span>
                     </span>
                     <Link
-                      to={`/stations?city=${encodeURIComponent(row.name)}`}
+                      to={stationLink(row.name)}
                       onClick={(event) => event.stopPropagation()}
                       aria-label={`Abrir la estación ${row.name}`}
                       className="ml-0.5 rounded p-0.5 text-fg-3 opacity-0 transition-opacity hover:text-fg group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
