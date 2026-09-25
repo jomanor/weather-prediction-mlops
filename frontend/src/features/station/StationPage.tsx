@@ -18,6 +18,7 @@ import { useChartSync } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
+import { formatPercent, isNum } from '@/lib/format'
 
 const HOURS = [24, 48, 72, 168] as const
 type StationHours = (typeof HOURS)[number]
@@ -56,6 +57,8 @@ export function StationPage() {
   const current = useCurrentWeather(city)
   const history = useHistory(city, hours)
   const predictions = usePredictions(city, 24)
+  const intervalLevel =
+    predictions.data?.find((prediction) => isNum(prediction.interval_level))?.interval_level ?? null
 
   /* Share the observed window with the benchmark charts on the same time axis. */
   const anchor = history.data?.points.at(-1)?.observed_at
@@ -70,6 +73,9 @@ export function StationPage() {
       ? [
           { label: 'Temperatura', color: palette.aemet },
           { label: 'Precipitación', color: palette.accent },
+          ...(intervalLevel !== null
+            ? [{ label: `Modelo (nivel ${formatPercent(intervalLevel * 100, 0)})`, color: palette.model }]
+            : []),
         ]
       : variable === 'precipitation'
         ? [{ label: 'Precipitación', color: palette.accent }]
@@ -165,7 +171,12 @@ export function StationPage() {
                     description="Amplía el rango temporal o comprueba que el backfill ha cargado datos históricos."
                   />
                 ) : (
-                  <HistoryChart points={history.data.points} palette={palette} variable={variable} />
+                  <HistoryChart
+                    points={history.data.points}
+                    predictions={predictions.data ?? []}
+                    palette={palette}
+                    variable={variable}
+                  />
                 )}
               </div>
             </Panel>

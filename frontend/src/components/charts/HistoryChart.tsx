@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import {
+  Area,
   Bar,
   CartesianGrid,
   ComposedChart,
@@ -10,17 +11,20 @@ import {
   YAxis,
 } from 'recharts'
 
-import type { WeatherPoint } from '@/api/schemas'
+import type { Prediction, WeatherPoint } from '@/api/schemas'
+import { buildHistoryChartData } from '@/components/charts/history-rows'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
 import { useChartSync } from '@/hooks/useChartSync'
-import { convertTemperature, formatDateTimeMs, formatNumber, isNum } from '@/lib/format'
+import { formatDateTimeMs, formatNumber } from '@/lib/format'
 import type { ChartPalette } from '@/lib/chart-theme'
 
 export type HistoryVariable = 'temperature' | 'precipitation' | 'wind'
 
 interface HistoryChartProps {
   points: WeatherPoint[]
+  /** Model predictions; temperature intervals draw the uncertainty band. */
+  predictions?: Prediction[]
   height?: number
   palette: ChartPalette
   /** Selected observed variable; `temperature` also overlays precipitation. */
@@ -30,6 +34,7 @@ interface HistoryChartProps {
 /** Observed history for the selected variable, on a shared time axis. */
 export function HistoryChart({
   points,
+  predictions = [],
   height = 260,
   palette,
   variable = 'temperature',
@@ -37,46 +42,15 @@ export function HistoryChart({
   const { units } = usePreferences()
   const { domain } = useChartSync()
 
-  const { data, temperatureDomain, precipitationMax, windDomain } = useMemo(() => {
-    const rows = points
-      .map((point) => ({
-        ts: new Date(point.observed_at).getTime(),
-        temperature: isNum(point.temperature) ? convertTemperature(point.temperature, units) : null,
-        precipitation: point.precipitation,
-        wind: isNum(point.wind_speed)
-          ? units === 'imperial'
-            ? point.wind_speed * 0.621371
-            : point.wind_speed
-          : null,
-      }))
-      .filter((row) => Number.isFinite(row.ts))
+  const { rows: data, temperatureDomain, precipitationMax, windDomain, hasInterval, hasModel } =
+    useMemo(() => buildHistoryChartData(points, predictions, units), [points, predictions, units])
 
-    const temperatures = rows
-      .map((row) => row.temperature)
-      .filter((value): value is number => value !== null)
-    let temperatureDomain: [number, number] = [0, 1]
-    if (temperatures.length) {
-      const min = Math.min(...temperatures)
-      const max = Math.max(...temperatures)
-      const pad = Math.max((max - min) * 0.15, 1)
-      temperatureDomain = [Math.floor(min - pad), Math.ceil(max + pad)]
-    }
-
-    const precipitationMax = Math.max(1, ...rows.map((row) => row.precipitation ?? 0)) * 1.2
-
-    const winds = rows.map((row) => row.wind).filter((value): value is number => value !== null)
-    let windDomain: [number, number] = [0, 1]
-    if (winds.length) {
-      const min = Math.min(...winds)
-      const max = Math.max(...winds)
-      const pad = Math.max((max - min) * 0.15, 1)
-      windDomain = [Math.max(0, Math.floor(min - pad)), Math.ceil(max + pad)]
-    }
-
-    return { data: rows, temperatureDomain, precipitationMax, windDomain }
-  }, [points, units])
-
-  const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
+  /* The synced window ends at the last observation; extend it so the final
+     forecast interval is not clipped off the right edge. */
+  const lastTs = data.length ? data[data.length - 1].ts : 0
+  const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain
+    ? [domain[0], Math.max(domain[1], lastTs)]
+    : ['dataMin', 'dataMax']
 
   const axisProps = {
     stroke: palette.axis,
@@ -144,6 +118,52 @@ export function HistoryChart({
             />
           }
         />
+
+        {variable === 'temperature' && hasInterval ? (
+          <>
+            {/* Range band as two stacked areas: transparent base lifts the
+                tinted size area to [lower, upper]. */}
+            <Area
+              yAxisId="value"
+              type="linear"
+              dataKey="band_base"
+              stackId="interval"
+              stroke="none"
+              fill="transparent"
+              connectNulls={false}
+              isAnimationActive={false}
+              tooltipType="none"
+            />
+            <Area
+              yAxisId="value"
+              type="linear"
+              dataKey="band_size"
+              stackId="interval"
+              name="Banda"
+              stroke="none"
+              fill={palette.model}
+              fillOpacity={0.16}
+              connectNulls={false}
+              isAnimationActive={false}
+              tooltipType="none"
+            />
+          </>
+        ) : null}
+
+        {variable === 'temperature' && hasModel ? (
+          <Line
+            yAxisId="value"
+            type="monotone"
+            dataKey="model"
+            name="Modelo"
+            stroke={palette.model}
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            dot={false}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        ) : null}
 
         {variable === 'temperature' ? (
           <Bar

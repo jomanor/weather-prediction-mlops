@@ -39,8 +39,18 @@ def model_from_doc(doc: dict[str, Any]) -> ModelInfo | None:
             rmse=to_float(raw_metrics.get("rmse")),
             mae=to_float(raw_metrics.get("mae")),
             r2=to_float(raw_metrics.get("r2")),
+            persistence_rmse=to_float(raw_metrics.get("persistence_rmse")),
+            climatology_rmse=to_float(raw_metrics.get("climatology_rmse")),
+            skill_score=to_float(raw_metrics.get("skill_score")),
+            brier=to_float(raw_metrics.get("brier")),
+            persistence_brier=to_float(raw_metrics.get("persistence_brier")),
+            prevalence=to_float(raw_metrics.get("prevalence")),
+            coverage=to_float(raw_metrics.get("coverage")),
         )
 
+    split = doc.get("split")
+    interval = doc.get("interval")
+    commit = doc.get("commit")
     return ModelInfo(
         name=name,
         version=doc.get("version"),
@@ -49,6 +59,9 @@ def model_from_doc(doc: dict[str, Any]) -> ModelInfo | None:
         created_at=as_utc(doc.get("timestamp")),
         metrics=metrics,
         stage=doc.get("stage") or doc.get("current_stage"),
+        split=split if isinstance(split, dict) else None,
+        interval=interval if isinstance(interval, dict) else None,
+        commit=commit if isinstance(commit, str) else None,
     )
 
 
@@ -61,7 +74,9 @@ class ModelRepository:
         return self._db["model_registry"]
 
     async def list_models(self, limit: int = 100) -> list[ModelInfo]:
-        cursor = self._collection.find({}).sort("timestamp", -1).limit(limit)
+        # ``model_registry`` has a ``{model_name: 1, timestamp: -1}`` index and no
+        # city field, so this is the index-compatible sort (city-prefix rule N/A).
+        cursor = self._collection.find({}).sort([("model_name", 1), ("timestamp", -1)]).limit(limit)
         docs = [doc async for doc in cursor]
         return [model for model in (model_from_doc(doc) for doc in docs) if model is not None]
 

@@ -15,6 +15,10 @@ import type { UnitSystem } from '@/lib/format'
 const THEME_KEY = 'meteoml.theme'
 const UNITS_KEY = 'meteoml.units'
 const MAP_KEY = 'meteoml.map'
+const BASEMAP_KEY = 'meteoml.basemap'
+
+export type BasemapId = 'positron' | 'dark' | 'topo'
+const BASEMAPS = ['positron', 'dark', 'topo'] as const
 
 export interface MapLayers {
   hillshade: boolean
@@ -52,6 +56,9 @@ interface PreferencesValue {
   setUnits: (units: UnitSystem) => void
   mapLayers: MapLayers
   setMapLayers: (layers: MapLayers) => void
+  /** Keyless basemap choice; defaults to the OS theme on first run. */
+  basemap: BasemapId
+  setBasemap: (basemap: BasemapId) => void
   locale: string
   palette: ChartPalette
 }
@@ -80,6 +87,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   )
   const [systemDark, setSystemDark] = useState(prefersDark)
   const [mapLayers, setMapLayersState] = useState<MapLayers>(readMap)
+  /* Explicit choice wins; before the first choice the basemap follows the OS
+     theme so the initial view still matches the rest of the shell. */
+  const [basemap, setBasemapState] = useState<BasemapId>(() =>
+    readStored(BASEMAP_KEY, BASEMAPS, prefersDark() ? 'dark' : 'positron'),
+  )
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -131,12 +143,44 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const setBasemap = useCallback((next: BasemapId) => {
+    setBasemapState(next)
+    try {
+      localStorage.setItem(BASEMAP_KEY, next)
+    } catch {
+      /* storage unavailable */
+    }
+  }, [])
+
   /* Recomputed from the theme actually applied to the DOM, never the pending one. */
   const palette = useMemo(() => readChartPalette(appliedDark), [appliedDark])
 
   const value = useMemo<PreferencesValue>(
-    () => ({ theme, isDark, setTheme, units, setUnits, mapLayers, setMapLayers, locale: 'es-ES', palette }),
-    [theme, isDark, setTheme, units, setUnits, mapLayers, setMapLayers, palette],
+    () => ({
+      theme,
+      isDark,
+      setTheme,
+      units,
+      setUnits,
+      mapLayers,
+      setMapLayers,
+      basemap,
+      setBasemap,
+      locale: 'es-ES',
+      palette,
+    }),
+    [
+      theme,
+      isDark,
+      setTheme,
+      units,
+      setUnits,
+      mapLayers,
+      setMapLayers,
+      basemap,
+      setBasemap,
+      palette,
+    ],
   )
 
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>

@@ -10,6 +10,7 @@ export interface ChartPalette {
   textMuted: string
   panel: string
   line: string
+  lineStrong: string
   ok: string
   warn: string
   bad: string
@@ -26,6 +27,7 @@ const FALLBACK: ChartPalette = {
   textMuted: '#97a1ad',
   panel: '#13161a',
   line: '#232932',
+  lineStrong: '#3a424e',
   ok: '#3ecf8e',
   warn: '#e0a11a',
   bad: '#f2604f',
@@ -36,6 +38,17 @@ function readVar(name: string, fallback: string): string {
   if (typeof window === 'undefined') return fallback
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
   return value || fallback
+}
+
+/**
+ * Resolve a CSS custom property to a literal value.
+ *
+ * MapLibre `paint`/`layout` values and SVG attributes cannot resolve `var()`,
+ * so colours are read from the token sheet on the main thread and passed down
+ * as literals. Components must never hardcode a hex; this is the bridge.
+ */
+export function readCssVar(name: string, fallback: string): string {
+  return readVar(name, fallback)
 }
 
 /**
@@ -54,6 +67,7 @@ export function readChartPalette(isDark: boolean): ChartPalette {
     textMuted: readVar('--fg-3', FALLBACK.textMuted),
     panel: readVar('--panel', FALLBACK.panel),
     line: readVar('--line', FALLBACK.line),
+    lineStrong: readVar('--line-strong', FALLBACK.lineStrong),
     ok: readVar('--ok', FALLBACK.ok),
     warn: readVar('--warn', FALLBACK.warn),
     bad: readVar('--bad', FALLBACK.bad),

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
+from app.core.cities import DEFAULT_CITIES
 from app.repositories.weather_repo import (
     _CURRENT_IDENTITY,
     _RAW_IDENTITY,
@@ -11,6 +12,7 @@ from app.repositories.weather_repo import (
     _from_raw_weather,
     _from_weather_data,
     _projection,
+    _quality_status,
 )
 from app.schemas.weather import CurrentWeather
 from tests.fakes import FakeMongoCollection, FakeMongoDb
@@ -240,3 +242,156 @@ def test_downsample_keeps_first_point_per_bucket_and_noop_for_step_one():
         OBSERVED_AT - timedelta(hours=2),
         OBSERVED_AT,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Data-quality meter (Contract 1): weather_features, city-prefixed sort
+# ---------------------------------------------------------------------------
+
+
+def _feature(city: str, hour: float, temperature: float | None = 20.0) -> dict:
+    return {
+        "city": city,
+        "timestamp": OBSERVED_AT - timedelta(hours=hour),
+        "temperature": temperature,
+    }
+
+
+async def test_quality_report_per_city_queries_are_city_prefixed_and_sorted():
+    features = FakeMongoCollection(
+        [
+            _feature("Madrid", 0, 20.0),
+            _feature("Madrid", 1, None),
+            _feature("Madrid", 3, 22.0),
+            _feature("Madrid", 4, 23.0),
+            _feature("Alicante", 0, 30.0),
+            _feature("Alicante", 1, 30.5),
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = await repo.quality_report(days=1, now=OBSERVED_AT)
+
+    # Seeded from the fixed 14-station registry, never ``distinct``: a city
+    # with zero feature rows must still appear (see the outage test below).
+    expected_cities = sorted(name for name, _, _ in DEFAULT_CITIES)
+    assert [city.city for city in report] == expected_cities
+    assert len(expected_cities) == 14
+    # One equality-prefixed query per city: ``city`` is pinned, so the
+    # ``{city: 1, timestamp: -1}`` index serves the ascending timestamp sort.
+    assert len(features.cursors) == len(expected_cities)
+    for cursor in features.cursors:
+        assert cursor.sort_spec == [("city", 1), ("timestamp", 1)]
+    assert features.find_calls[0][0] == {
+        "city": "Alicante",
+        "timestamp": {"$gte": OBSERVED_AT - timedelta(days=1), "$lte": OBSERVED_AT},
+    }
+    assert features.find_calls[0][1] == {"city": 1, "timestamp": 1, "temperature": 1}
+
+
+async def test_quality_report_computes_gaps_nulls_completeness_and_age():
+    features = FakeMongoCollection(
+        [
+            _feature("Madrid", hour, temperature)
+            for hour, temperature in ((0, 13.0), (1, 12.0), (3, None), (4, 10.0))
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
+    city = report["Madrid"]
+
+    assert city.city == "Madrid"
+    assert city.expected_hours == 24
+    assert city.observed_hours == 4
+    assert city.completeness == 4 / 24
+    # Observed at -4h, -3h, -1h, now -> gaps of 1 h, 2 h, 1 h.
+    assert city.max_gap_hours == 2.0
+    assert city.null_rate == 0.25
+    assert city.last_observed_at == OBSERVED_AT
+    assert city.age_hours == 0.0
+    assert city.status == "bad"  # completeness 0.17 dominates a fresh timestamp
+
+
+async def test_quality_report_dedupes_duplicate_timestamps():
+    features = FakeMongoCollection(
+        [
+            _feature("Madrid", 0, 20.0),
+            _feature("Madrid", 0, 22.0),  # same hour written twice
+            _feature("Madrid", 2, 21.0),
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
+    madrid = report["Madrid"]
+
+    assert madrid.observed_hours == 2  # two distinct hours, not three rows
+    assert madrid.max_gap_hours == 2.0  # not collapsed to 0 by the duplicate
+
+
+async def test_quality_report_city_with_zero_features_is_bad():
+    # ``weather_features`` only ever has Madrid; every other station in the
+    # canonical registry has vanished entirely and must be reported, not dropped.
+    features = FakeMongoCollection([_feature("Madrid", 0, 20.0)])
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
+
+    assert len(report) == 14
+    missing = report["Barcelona"]
+    assert missing.observed_hours == 0
+    assert missing.completeness == 0.0
+    assert missing.null_rate is None
+    assert missing.last_observed_at is None
+    assert missing.age_hours is None
+    assert missing.status == "bad"
+
+
+async def test_quality_report_city_outside_window_is_empty_and_bad():
+    features = FakeMongoCollection(
+        [
+            _feature("Madrid", 100, 10.0),  # far outside a 1-day window
+            _feature("Alicante", 1, 30.0),
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
+
+    madrid = report["Madrid"]
+    assert madrid.observed_hours == 0
+    assert madrid.completeness == 0.0
+    assert madrid.max_gap_hours == 0.0  # fewer than two points
+    assert madrid.null_rate is None
+    assert madrid.last_observed_at is None
+    assert madrid.age_hours is None
+    assert madrid.status == "bad"
+
+
+async def test_quality_report_completeness_is_clamped_to_one():
+    features = FakeMongoCollection(
+        [_feature("Madrid", hour) for hour in range(25)]  # 25 rows in a 1-day window
+    )
+    repo = WeatherRepository(FakeMongoDb(weather_features=features))
+
+    report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
+
+    assert report["Madrid"].observed_hours == 25
+    assert report["Madrid"].completeness == 1.0
+
+
+def test_quality_status_worst_metric_wins():
+    assert _quality_status(0.99, 1.0) == "ok"
+    assert _quality_status(0.90, 1.0) == "warn"  # completeness-only downgrade
+    assert _quality_status(0.99, 5.0) == "warn"  # age-only downgrade
+    assert _quality_status(0.50, 1.0) == "bad"
+    assert _quality_status(0.99, None) == "bad"  # never observed
+
+
+def test_quality_status_grades_at_exact_thresholds():
+    assert _quality_status(0.95, 2.0) == "ok"
+    assert _quality_status(0.80, 6.0) == "warn"
+    assert _quality_status(0.7999, 2.0) == "bad"
+    assert _quality_status(0.95, 2.0001) == "warn"
+    assert _quality_status(0.95, None) == "bad"  # missing last observation

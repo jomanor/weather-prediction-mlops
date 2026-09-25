@@ -7,9 +7,61 @@ All Spark tests use master("local[1]") — no cluster needed in CI.
 Mongo tests use mongomock to avoid a real connection.
 """
 
+import ast
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+#: Repository root, for guardrail tests that read the declared schema/constants
+#: from source instead of importing modules that need FastAPI/Motor/Spark.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _eval_constant(node: ast.AST):
+    """Evaluate a literal/arithmetic AST node (Constants, containers, ``*``/``+``/``-``)."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(_eval_constant(element) for element in node.elts)
+    if isinstance(node, ast.List):
+        return [_eval_constant(element) for element in node.elts]
+    if isinstance(node, ast.Dict):
+        return {
+            _eval_constant(key): _eval_constant(value) for key, value in zip(node.keys, node.values)
+        }
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _eval_constant(node.operand)
+        return -value if isinstance(node.op, ast.USub) else value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Add, ast.Sub)):
+        left = _eval_constant(node.left)
+        right = _eval_constant(node.right)
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        return left + right if isinstance(node.op, ast.Add) else left - right
+    raise ValueError(f"unsupported constant node: {type(node).__name__}")
+
+
+def eval_python_constant(source_path, name: str):
+    """Read a module-level constant from source, without importing the module.
+
+    The guardrail tests need the *declared* TTLs and indexes from
+    ``backend/app/db/mongo.py``, but that module imports FastAPI and Motor, which
+    the ``pipeline-test`` environment does not install. Parsing the source keeps
+    the tests deriving the values instead of restating them.
+    """
+    tree = ast.parse(Path(source_path).read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return _eval_constant(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == name:
+                return _eval_constant(node.value)
+    raise KeyError(f"{name} not found in {source_path}")
+
 
 # ---------------------------------------------------------------------------
 # Spark
