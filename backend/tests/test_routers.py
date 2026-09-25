@@ -1,7 +1,17 @@
 """Router happy paths, 404s and contract-shaped payloads (offline, fake repos)."""
 
+from datetime import timedelta
+
+from app.repositories.weather_repo import WeatherRepository, get_weather_repo
+from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
-from tests.fakes import FakeAemetService, FakeDatabase
+from tests.fakes import (
+    FakeAemetService,
+    FakeDatabase,
+    FakeMongoCollection,
+    FakeMongoDb,
+    FakeWeatherRepository,
+)
 
 
 async def test_health(client):
@@ -259,9 +269,312 @@ async def test_openapi_documents_every_contract_path(client):
         "/api/weather/current/{city}",
         "/api/weather/history/{city}",
         "/api/weather/stats/{city}",
+        "/api/weather/series",
+        "/api/weather/summary",
+        "/api/weather/range/{city}",
+        "/api/map/stations",
         "/api/predictions/latest",
         "/api/predictions/{city}",
         "/api/benchmark",
         "/api/benchmark/{city}",
         "/api/models",
     } <= set(schema["paths"])
+
+
+# ---------------------------------------------------------------------------
+# L2 - TTL cache + HTTP validators
+# ---------------------------------------------------------------------------
+
+
+async def test_cities_cache_hit_skips_repository(client, city_repo):
+    first = await client.get("/api/cities")
+    second = await client.get("/api/cities")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert city_repo.calls.count("list") == 1
+
+
+async def test_cities_etag_then_304_round_trip(client, city_repo):
+    first = await client.get("/api/cities")
+    etag = first.headers["etag"]
+    assert "max-age=60" in first.headers["cache-control"]
+    assert "stale-while-revalidate" in first.headers["cache-control"]
+
+    second = await client.get("/api/cities", headers={"If-None-Match": etag})
+
+    assert second.status_code == 304
+    assert second.headers["etag"] == etag
+    # The validator came from the cached payload, never from a second query.
+    assert city_repo.calls.count("list") == 1
+
+
+async def test_if_none_match_accepts_a_comma_separated_list(client):
+    first = await client.get("/api/cities")
+    etag = first.headers["etag"]
+
+    matched = await client.get("/api/cities", headers={"If-None-Match": f'"bogus",  {etag}'})
+    assert matched.status_code == 304
+
+    unmatched = await client.get("/api/cities", headers={"If-None-Match": '"bogus", "other"'})
+    assert unmatched.status_code == 200
+
+
+async def test_if_none_match_star_matches_any_representation(client):
+    await client.get("/api/cities")
+    response = await client.get("/api/cities", headers={"If-None-Match": "*"})
+    assert response.status_code == 304
+
+
+async def test_if_none_match_weak_validator_matches(client):
+    first = await client.get("/api/cities")
+    response = await client.get(
+        "/api/cities", headers={"If-None-Match": f"W/{first.headers['etag']}"}
+    )
+    assert response.status_code == 304
+
+
+async def test_current_weather_cache_hit_and_data_age_header(client, weather_repo):
+    first = await client.get("/api/weather/current")
+    assert first.status_code == 200
+    assert int(first.headers["x-data-age-seconds"]) >= 0
+
+    second = await client.get(
+        "/api/weather/current", headers={"If-None-Match": first.headers["etag"]}
+    )
+
+    assert second.status_code == 304
+    assert weather_repo.calls.count("latest_per_city") == 1
+
+
+async def test_current_weather_for_city_data_age_header(client, weather_repo):
+    first = await client.get("/api/weather/current/Madrid")
+    assert int(first.headers["x-data-age-seconds"]) >= 0
+
+    second = await client.get(
+        "/api/weather/current/Madrid", headers={"If-None-Match": first.headers["etag"]}
+    )
+
+    assert second.status_code == 304
+    assert weather_repo.calls.count("latest_for_city") == 1
+
+
+# ---------------------------------------------------------------------------
+# L4 / L5 - bulk series, summary, map and range
+# ---------------------------------------------------------------------------
+
+
+async def test_series_bulk_returns_chronological_series(client):
+    response = await client.get("/api/weather/series", params={"cities": "Madrid", "hours": 24})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["hours"] == 24
+    assert body["count"] == 1
+    series = body["cities"][0]
+    assert series["city"] == "Madrid"
+    assert series["count"] == 3
+    assert series["latest_timestamp"].endswith("Z")
+    assert [point["temperature"] for point in series["points"]] == [20.0, 21.0, 22.0]
+
+
+async def test_series_rejects_unknown_field(client):
+    response = await client.get(
+        "/api/weather/series", params={"cities": "Madrid", "fields": "temperature,bogus"}
+    )
+    assert response.status_code == 422
+
+
+async def test_series_rejects_too_many_cities(client):
+    cities = ",".join(f"City{index}" for index in range(16))
+    response = await client.get("/api/weather/series", params={"cities": cities})
+    assert response.status_code == 422
+
+
+async def test_series_rejects_empty_cities(client):
+    response = await client.get("/api/weather/series", params={"cities": " , "})
+    assert response.status_code == 422
+
+
+async def test_series_rejects_out_of_range_hours(client):
+    response = await client.get("/api/weather/series", params={"cities": "Madrid", "hours": 169})
+    assert response.status_code == 422
+
+
+async def test_series_rejects_overlong_city_name(client):
+    response = await client.get("/api/weather/series", params={"cities": "M" * 101})
+    assert response.status_code == 422
+
+
+async def test_series_rejects_out_of_range_step_hours(client):
+    for step in (0, 25):
+        response = await client.get(
+            "/api/weather/series", params={"cities": "Madrid", "step_hours": step}
+        )
+        assert response.status_code == 422, step
+
+
+async def test_series_step_hours_downsamples(client, app, now):
+    points = [
+        CurrentWeather(
+            city="Madrid",
+            temperature=float(index),
+            observed_at=now - timedelta(hours=index),
+        )
+        for index in range(7)
+    ]
+    repo = FakeWeatherRepository(points)
+    app.dependency_overrides[get_weather_repo] = lambda: repo
+
+    # Seven consecutive hourly points span exactly two 6 h buckets.
+    sampled = await client.get(
+        "/api/weather/series",
+        params={"cities": "Madrid", "hours": 24, "step_hours": 6},
+    )
+    assert sampled.status_code == 200
+    assert repo.last_step_hours == 6
+    assert sampled.json()["cities"][0]["count"] == 2
+
+    unsampled = await client.get(
+        "/api/weather/series",
+        params={"cities": "Madrid", "hours": 24, "step_hours": 1},
+    )
+    assert unsampled.json()["cities"][0]["count"] == 7
+
+
+async def test_series_raw_fallback_returns_coordinates(client, app, now):
+    raw = FakeMongoCollection(
+        [
+            {
+                "city": "Alicante",
+                "timestamp": now - timedelta(hours=1),
+                "payload": {
+                    "latitude": 38.3452,
+                    "longitude": -0.481,
+                    "current": {"temperature_2m": 25.0},
+                },
+            }
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(FakeMongoCollection([]), raw))
+    app.dependency_overrides[get_weather_repo] = lambda: repo
+
+    response = await client.get("/api/weather/series", params={"cities": "Alicante", "hours": 24})
+
+    assert response.status_code == 200
+    point = response.json()["cities"][0]["points"][0]
+    assert point["latitude"] == 38.3452
+    assert point["longitude"] == -0.481
+    assert point["temperature"] == 25.0
+
+    summary = await client.get("/api/weather/summary", params={"cities": "Alicante", "hours": 24})
+    assert summary.status_code == 200
+    assert summary.json()["cities"][0]["min"] == 25.0
+
+
+async def test_summary_computes_aggregates_and_sparkline(client):
+    response = await client.get("/api/weather/summary", params={"cities": "Madrid", "hours": 24})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    summary = body["cities"][0]
+    assert summary["city"] == "Madrid"
+    assert summary["min"] == 20.0
+    assert summary["max"] == 22.0
+    assert summary["first"] == 20.0
+    assert summary["last"] == 22.0
+    assert summary["trend"] == 2.0
+    assert summary["points"] == [20.0, 21.0, 22.0]
+
+
+async def test_summary_rejects_too_many_cities(client):
+    cities = ",".join(f"City{index}" for index in range(16))
+    response = await client.get("/api/weather/summary", params={"cities": cities})
+    assert response.status_code == 422
+
+
+async def test_map_stations_returns_geojson_and_caches(client, weather_repo):
+    first = await client.get("/api/map/stations")
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["type"] == "FeatureCollection"
+    assert len(body["features"]) == 1
+    feature = body["features"][0]
+    assert feature["type"] == "Feature"
+    assert feature["geometry"] == {"type": "Point", "coordinates": [-3.7038, 40.4168]}
+    properties = feature["properties"]
+    assert properties["city"] == "Madrid"
+    assert properties["temperature"] == 22.0
+    assert properties["relative_humidity"] == 60.0
+    assert properties["observed_at"].endswith("Z")
+
+    second = await client.get("/api/map/stations", headers={"If-None-Match": first.headers["etag"]})
+    assert second.status_code == 304
+    assert weather_repo.calls.count("latest_per_city") == 1
+
+
+async def test_range_paginates_with_cursor_oldest_first(client, now):
+    start = (now - timedelta(hours=3)).isoformat()
+    end = (now + timedelta(hours=1)).isoformat()
+
+    first = await client.get(
+        "/api/weather/range/Madrid", params={"from": start, "to": end, "limit": 2}
+    )
+
+    assert first.status_code == 200
+    body = first.json()
+    assert [point["temperature"] for point in body["points"]] == [20.0, 21.0]
+    assert body["next_cursor"] is not None
+
+    second = await client.get(
+        "/api/weather/range/Madrid",
+        params={"from": start, "to": end, "limit": 2, "cursor": body["next_cursor"]},
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert [point["temperature"] for point in body["points"]] == [22.0]
+    assert body["next_cursor"] is None
+
+
+async def test_range_rejects_inverted_window(client, now):
+    response = await client.get(
+        "/api/weather/range/Madrid",
+        params={"from": now.isoformat(), "to": (now - timedelta(hours=1)).isoformat()},
+    )
+    assert response.status_code == 422
+
+
+async def test_range_rejects_cursor_outside_window(client, now):
+    start = (now - timedelta(hours=3)).isoformat()
+    end = now.isoformat()
+    for cursor in (
+        (now - timedelta(hours=4)).isoformat(),
+        (now + timedelta(hours=1)).isoformat(),
+    ):
+        response = await client.get(
+            "/api/weather/range/Madrid",
+            params={"from": start, "to": end, "cursor": cursor},
+        )
+        assert response.status_code == 422, cursor
+
+
+async def test_range_rejects_malformed_timestamp(client):
+    response = await client.get(
+        "/api/weather/range/Madrid", params={"from": "not-a-date", "to": "also-bad"}
+    )
+    assert response.status_code == 422
+
+
+async def test_range_caps_limit(client, now):
+    response = await client.get(
+        "/api/weather/range/Madrid",
+        params={
+            "from": (now - timedelta(hours=3)).isoformat(),
+            "to": (now + timedelta(hours=1)).isoformat(),
+            "limit": 2001,
+        },
+    )
+    assert response.status_code == 422

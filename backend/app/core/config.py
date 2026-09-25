@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     mongo_db: str = "weather_db"
     mongo_timeout_ms: int = 5000
 
+    #: Index creation and registry seeding run once per process, asynchronously,
+    #: so a cold request does not pay for them. Set false to skip entirely.
+    ensure_indexes_on_start: bool = True
+
     cors_origins: str = "http://localhost:5173"
 
     aemet_api_key: str | None = None
