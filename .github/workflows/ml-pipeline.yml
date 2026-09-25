@@ -97,6 +97,9 @@ jobs:
       # `runner` is not a valid context in a job-level env block; the
       # workspace is writable and thrown away with the runner.
       SPARK_TMP_DIR: ${{ github.workspace }}/.spark-tmp
+      # Cached training frames need more than the 1 GB JVM default; the runner
+      # has 16 GB.
+      SPARK_DRIVER_MEMORY: 6g
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
