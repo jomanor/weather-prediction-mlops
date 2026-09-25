@@ -136,13 +136,24 @@ jobs:
         if: needs.resolve.outputs.features == '1'
         run: python spark/spark-jobs/batch_processing.py
 
+      - name: Pipeline summary (features)
+        if: ${{ always() && needs.resolve.outputs.features == '1' }}
+        run: python scripts/pipeline_summary.py >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: Train models
         if: needs.resolve.outputs.train == '1'
         run: python spark/spark-jobs/ml_training.py
 
       - name: Prune old model artifacts
-        if: needs.resolve.outputs.train == '1'
+        # Always prune once the train stage was selected: a failed/partial
+        # training run still leaves artifacts (and matching registry rows) that
+        # the next run would otherwise accumulate. Stage gating is unchanged.
+        if: ${{ always() && needs.resolve.outputs.train == '1' }}
         run: python scripts/prune_models.py
+
+      - name: Pipeline summary (train)
+        if: ${{ always() && needs.resolve.outputs.train == '1' }}
+        run: python scripts/pipeline_summary.py >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Score latest features
         if: needs.resolve.outputs.inference == '1'
