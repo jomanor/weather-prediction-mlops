@@ -2,8 +2,16 @@
 
 from datetime import timedelta
 
+from app.repositories.weather_repo import WeatherRepository, get_weather_repo
+from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
-from tests.fakes import FakeAemetService, FakeDatabase
+from tests.fakes import (
+    FakeAemetService,
+    FakeDatabase,
+    FakeMongoCollection,
+    FakeMongoDb,
+    FakeWeatherRepository,
+)
 
 
 async def test_health(client):
@@ -301,6 +309,31 @@ async def test_cities_etag_then_304_round_trip(client, city_repo):
     assert city_repo.calls.count("list") == 1
 
 
+async def test_if_none_match_accepts_a_comma_separated_list(client):
+    first = await client.get("/api/cities")
+    etag = first.headers["etag"]
+
+    matched = await client.get("/api/cities", headers={"If-None-Match": f'"bogus",  {etag}'})
+    assert matched.status_code == 304
+
+    unmatched = await client.get("/api/cities", headers={"If-None-Match": '"bogus", "other"'})
+    assert unmatched.status_code == 200
+
+
+async def test_if_none_match_star_matches_any_representation(client):
+    await client.get("/api/cities")
+    response = await client.get("/api/cities", headers={"If-None-Match": "*"})
+    assert response.status_code == 304
+
+
+async def test_if_none_match_weak_validator_matches(client):
+    first = await client.get("/api/cities")
+    response = await client.get(
+        "/api/cities", headers={"If-None-Match": f"W/{first.headers['etag']}"}
+    )
+    assert response.status_code == 304
+
+
 async def test_current_weather_cache_hit_and_data_age_header(client, weather_repo):
     first = await client.get("/api/weather/current")
     assert first.status_code == 200
@@ -366,6 +399,77 @@ async def test_series_rejects_empty_cities(client):
 async def test_series_rejects_out_of_range_hours(client):
     response = await client.get("/api/weather/series", params={"cities": "Madrid", "hours": 169})
     assert response.status_code == 422
+
+
+async def test_series_rejects_overlong_city_name(client):
+    response = await client.get("/api/weather/series", params={"cities": "M" * 101})
+    assert response.status_code == 422
+
+
+async def test_series_rejects_out_of_range_step_hours(client):
+    for step in (0, 25):
+        response = await client.get(
+            "/api/weather/series", params={"cities": "Madrid", "step_hours": step}
+        )
+        assert response.status_code == 422, step
+
+
+async def test_series_step_hours_downsamples(client, app, now):
+    points = [
+        CurrentWeather(
+            city="Madrid",
+            temperature=float(index),
+            observed_at=now - timedelta(hours=index),
+        )
+        for index in range(7)
+    ]
+    repo = FakeWeatherRepository(points)
+    app.dependency_overrides[get_weather_repo] = lambda: repo
+
+    # Seven consecutive hourly points span exactly two 6 h buckets.
+    sampled = await client.get(
+        "/api/weather/series",
+        params={"cities": "Madrid", "hours": 24, "step_hours": 6},
+    )
+    assert sampled.status_code == 200
+    assert repo.last_step_hours == 6
+    assert sampled.json()["cities"][0]["count"] == 2
+
+    unsampled = await client.get(
+        "/api/weather/series",
+        params={"cities": "Madrid", "hours": 24, "step_hours": 1},
+    )
+    assert unsampled.json()["cities"][0]["count"] == 7
+
+
+async def test_series_raw_fallback_returns_coordinates(client, app, now):
+    raw = FakeMongoCollection(
+        [
+            {
+                "city": "Alicante",
+                "timestamp": now - timedelta(hours=1),
+                "payload": {
+                    "latitude": 38.3452,
+                    "longitude": -0.481,
+                    "current": {"temperature_2m": 25.0},
+                },
+            }
+        ]
+    )
+    repo = WeatherRepository(FakeMongoDb(FakeMongoCollection([]), raw))
+    app.dependency_overrides[get_weather_repo] = lambda: repo
+
+    response = await client.get("/api/weather/series", params={"cities": "Alicante", "hours": 24})
+
+    assert response.status_code == 200
+    point = response.json()["cities"][0]["points"][0]
+    assert point["latitude"] == 38.3452
+    assert point["longitude"] == -0.481
+    assert point["temperature"] == 25.0
+
+    summary = await client.get("/api/weather/summary", params={"cities": "Alicante", "hours": 24})
+    assert summary.status_code == 200
+    assert summary.json()["cities"][0]["min"] == 25.0
 
 
 async def test_summary_computes_aggregates_and_sparkline(client):
@@ -441,6 +545,20 @@ async def test_range_rejects_inverted_window(client, now):
         params={"from": now.isoformat(), "to": (now - timedelta(hours=1)).isoformat()},
     )
     assert response.status_code == 422
+
+
+async def test_range_rejects_cursor_outside_window(client, now):
+    start = (now - timedelta(hours=3)).isoformat()
+    end = now.isoformat()
+    for cursor in (
+        (now - timedelta(hours=4)).isoformat(),
+        (now + timedelta(hours=1)).isoformat(),
+    ):
+        response = await client.get(
+            "/api/weather/range/Madrid",
+            params={"from": start, "to": end, "cursor": cursor},
+        )
+        assert response.status_code == 422, cursor
 
 
 async def test_range_rejects_malformed_timestamp(client):

@@ -5,6 +5,7 @@ Used through FastAPI dependency overrides, so the whole suite runs offline.
 
 from datetime import datetime
 
+from app.repositories.weather_repo import _downsample_by_step
 from app.schemas.city import City, GeoResult
 from app.schemas.models import ModelInfo
 from app.schemas.predictions import Prediction
@@ -13,11 +14,134 @@ from app.services.aemet import AemetForecast
 from app.services.geo import GeocodingError
 
 
+class FakeMongoCursor:
+    """Async cursor double that honours ``sort()``, ``limit()`` and ``projection``.
+
+    A cursor that ignores these hides the two failure modes this suite exists to
+    catch: a sort direction that does not match the index, and a projection that
+    drops a field the mapper needs.
+    """
+
+    def __init__(self, documents: list[dict], projection: dict | None = None) -> None:
+        self._documents = documents
+        self._projection = projection
+        self._sort: list[tuple[str, int]] = []
+        self._limit: int | None = None
+        #: Recorded so tests can assert the requested sort/index direction.
+        self.sort_spec: list[tuple[str, int]] = []
+
+    def sort(self, spec, direction: int | None = None):
+        self._sort = [(spec, direction)] if direction is not None else list(spec)
+        self.sort_spec = list(self._sort)
+        return self
+
+    def limit(self, count: int):
+        self._limit = count
+        return self
+
+    def _resolved(self) -> list[dict]:
+        documents = list(self._documents)
+        # Stable multi-key sort: apply keys least-significant first.
+        for key, direction in reversed(self._sort):
+            documents.sort(key=lambda doc, k=key: doc.get(k), reverse=direction < 0)
+        if self._limit is not None:
+            documents = documents[: self._limit]
+        return [_apply_projection(doc, self._projection) for doc in documents]
+
+    def __aiter__(self):
+        self._iterator = iter(self._resolved())
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+def _apply_projection(document: dict, projection: dict | None) -> dict:
+    """Apply a Mongo inclusion projection, preserving nested paths."""
+    if not projection:
+        return document
+    projected: dict = {}
+    for path, include in projection.items():
+        if not include:
+            continue
+        value: object = document
+        for part in path.split("."):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                value = None
+                break
+        if value is None:
+            continue
+        target = projected
+        parts = path.split(".")
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+    return projected
+
+
+def _matches(document: dict, query: dict) -> bool:
+    for key, expected in query.items():
+        actual = document.get(key)
+        if isinstance(expected, dict):
+            if "$in" in expected and actual not in expected["$in"]:
+                return False
+            if "$gte" in expected and not (actual is not None and actual >= expected["$gte"]):
+                return False
+            if "$gt" in expected and not (actual is not None and actual > expected["$gt"]):
+                return False
+            if "$lte" in expected and not (actual is not None and actual <= expected["$lte"]):
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+class FakeMongoCollection:
+    """Collection double: filters, then hands a cursor that sorts/projects."""
+
+    def __init__(self, documents: list[dict] | None = None) -> None:
+        self.documents = list(documents or [])
+        self.find_calls: list[tuple[dict, dict | None]] = []
+        self.cursors: list[FakeMongoCursor] = []
+
+    def find(self, query, projection=None):
+        self.find_calls.append((query, projection))
+        cursor = FakeMongoCursor(
+            [doc for doc in self.documents if _matches(doc, query)], projection
+        )
+        self.cursors.append(cursor)
+        return cursor
+
+
+class FakeMongoDb:
+    """Minimal Motor database double for repository-level tests."""
+
+    def __init__(
+        self,
+        weather_data: FakeMongoCollection | None = None,
+        raw_weather: FakeMongoCollection | None = None,
+    ) -> None:
+        self._collections = {
+            "weather_data": weather_data or FakeMongoCollection(),
+            "raw_weather": raw_weather or FakeMongoCollection(),
+        }
+
+    def __getitem__(self, name):
+        return self._collections[name]
+
+
 class FakeWeatherRepository:
     def __init__(self, points: list[CurrentWeather] | None = None) -> None:
         self.points = list(points or [])
         #: Method names in call order, so tests can prove a cache hit skipped Mongo.
         self.calls: list[str] = []
+        #: Last ``step_hours`` a bulk read was asked for, to prove query wiring.
+        self.last_step_hours = 1
 
     async def list_cities(self) -> list[str]:
         self.calls.append("list_cities")
@@ -66,6 +190,7 @@ class FakeWeatherRepository:
         step_hours: int = 1,
     ) -> list[CurrentWeather]:
         self.calls.append("find_many_in_range")
+        self.last_step_hours = step_hours
         wanted = set(cities)
         matches = [
             point
@@ -73,7 +198,7 @@ class FakeWeatherRepository:
             if point.city in wanted and start <= point.observed_at <= end
         ]
         matches.sort(key=lambda point: (point.city, point.observed_at))
-        return matches
+        return _downsample_by_step(matches, step_hours)
 
 
 class FakePredictionRepository:

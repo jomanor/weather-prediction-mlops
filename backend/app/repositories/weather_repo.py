@@ -123,12 +123,29 @@ _RAW_FIELD_PATHS: dict[str, tuple[str, ...]] = {
     "weather_code": ("payload.current.weather_code",),
 }
 
+#: Columns ``_from_weather_data`` / ``_from_raw_weather`` need regardless of the
+#: requested projection: the two collections store the coordinates in different
+#: places (top-level vs. nested under ``payload``), so the identity set is
+#: collection-specific. Omitting them serializes ``latitude``/``longitude`` as
+#: null whenever a projection is used.
+_CURRENT_IDENTITY: tuple[str, ...] = ("city", "timestamp", "latitude", "longitude")
+_RAW_IDENTITY: tuple[str, ...] = (
+    "city",
+    "timestamp",
+    "payload.latitude",
+    "payload.longitude",
+)
 
-def _projection(fields: list[str] | None, paths: dict[str, tuple[str, ...]]):
-    """Projection limited to ``fields`` plus the identity columns, or None for all."""
+
+def _projection(
+    fields: list[str] | None,
+    paths: dict[str, tuple[str, ...]],
+    identity: tuple[str, ...],
+):
+    """Projection limited to ``fields`` plus ``identity`` columns, or None for all."""
     if not fields:
         return None
-    projection: dict[str, int] = {"city": 1, "timestamp": 1}
+    projection: dict[str, int] = {column: 1 for column in identity}
     for field in fields:
         for path in paths.get(field, ()):
             projection[path] = 1
@@ -235,16 +252,22 @@ class WeatherRepository:
         falls back to ``raw_weather`` (the repo's usual policy, applied per city
         here because the request spans cities). ``fields`` limits the Mongo
         projection to the requested contract fields — never to the query alone.
-        Sorted ``(city, timestamp)`` so the compound index feeds the sort.
+
+        Sorted ``(city asc, timestamp desc)`` to match the
+        ``{city: 1, timestamp: -1}`` index, so the server walks the index with no
+        blocking ``SORT`` stage (code 292). Output is ascending because the
+        in-Python sort below reorders the points.
         """
         requested = list(dict.fromkeys(city for city in cities if city))
         if not requested:
             return []
 
         query = {"city": {"$in": requested}, "timestamp": {"$gte": start, "$lte": end}}
-        sort: list[tuple[str, int]] = [("city", 1), ("timestamp", 1)]
+        sort: list[tuple[str, int]] = [("city", 1), ("timestamp", -1)]
 
-        cursor = self._current.find(query, _projection(fields, _CURRENT_FIELD_PATHS)).sort(sort)
+        cursor = self._current.find(
+            query, _projection(fields, _CURRENT_FIELD_PATHS, _CURRENT_IDENTITY)
+        ).sort(sort)
         points = _map_all([doc async for doc in cursor], _from_weather_data)
 
         missing = [city for city in requested if city not in {point.city for point in points}]
@@ -253,7 +276,9 @@ class WeatherRepository:
                 "city": {"$in": missing},
                 "timestamp": {"$gte": start, "$lte": end},
             }
-            raw_cursor = self._raw.find(fallback, _projection(fields, _RAW_FIELD_PATHS)).sort(sort)
+            raw_cursor = self._raw.find(
+                fallback, _projection(fields, _RAW_FIELD_PATHS, _RAW_IDENTITY)
+            ).sort(sort)
             points.extend(_map_all([doc async for doc in raw_cursor], _from_raw_weather))
 
         points.sort(key=lambda point: (point.city, point.observed_at))

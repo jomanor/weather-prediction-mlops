@@ -22,6 +22,11 @@ from app.services.geo import GeocodingService
 
 logger = logging.getLogger(__name__)
 
+#: Bound on awaiting the background index/seed task during shutdown. A slow
+#: ``create_index`` on a free-tier Atlas cluster must not hold the process open
+#: forever; on timeout the task is cancelled and shutdown continues.
+PREPARE_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
 
 async def _prepare_database(db) -> None:
     """Ensure indexes and seed the registry, once per process, off the request path.
@@ -74,10 +79,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             task = app.state.prepare_database_task
             if task is not None:
-                try:
-                    await task
-                except Exception:  # noqa: BLE001 - shutdown must not raise
-                    logger.exception("Background database preparation failed")
+                # Bounded wait: ``asyncio.wait`` returns ``done`` empty on timeout
+                # and leaves the task running, instead of blocking shutdown.
+                done, _ = await asyncio.wait({task}, timeout=PREPARE_SHUTDOWN_TIMEOUT_SECONDS)
+                if task in done:
+                    error = task.exception()
+                    if error is not None:
+                        logger.exception("Background database preparation failed", exc_info=error)
+                else:
+                    logger.warning(
+                        "Background database preparation did not finish within %.0fs; cancelling",
+                        PREPARE_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                    task.cancel()
             await app.state.aemet.aclose()
             await app.state.geo.aclose()
             client.close()

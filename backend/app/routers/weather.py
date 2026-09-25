@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from app.core.cache import TTLCache, cached, get_cache
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
+from app.routers.cities import MAX_NAME_LENGTH
 from app.schemas.weather import (
     WEATHER_FIELDS,
     CitySeries,
@@ -38,6 +39,12 @@ FIELDS_QUERY = Query(
     default=None,
     description="Comma-separated weather fields to project (defaults to all)",
 )
+STEP_HOURS_QUERY = Query(
+    default=1,
+    ge=1,
+    le=24,
+    description="Downsample to at most one point per N hours (1-24)",
+)
 
 
 def _parse_cities(raw: str) -> list[str]:
@@ -46,6 +53,13 @@ def _parse_cities(raw: str) -> list[str]:
         raise HTTPException(
             status_code=422,
             detail=f"cities must contain between 1 and {MAX_BULK_CITIES} names",
+        )
+    # Same cap the registry applies to a city name (reused, not re-declared):
+    # an unbounded name would go straight into the ``$in``.
+    if any(len(name) > MAX_NAME_LENGTH for name in names):
+        raise HTTPException(
+            status_code=422,
+            detail=f"city names must be at most {MAX_NAME_LENGTH} characters",
         )
     return names
 
@@ -159,13 +173,17 @@ async def weather_range(
     if start >= end:
         raise HTTPException(status_code=422, detail="from must be earlier than to")
 
+    after = _as_utc(cursor) if cursor is not None else None
+    if after is not None and not start <= after <= end:
+        raise HTTPException(status_code=422, detail="cursor must fall within [from, to]")
+
     points: list[WeatherPoint] = await repo.find_range(
         city,
         start,
         end,
         limit=limit,
         newest_first=False,
-        after=_as_utc(cursor) if cursor is not None else None,
+        after=after,
     )
     next_cursor = points[-1].observed_at if len(points) == limit else None
     return WeatherRangeResponse(
@@ -178,6 +196,7 @@ async def weather_series(
     cities: str = CITIES_QUERY,
     hours: int = HOURS_QUERY,
     fields: str | None = FIELDS_QUERY,
+    step_hours: int = STEP_HOURS_QUERY,
     repo: WeatherRepository = Depends(get_weather_repo),
 ) -> SeriesResponse:
     """One bulk query for up to 15 cities; one compact series per city."""
@@ -185,7 +204,7 @@ async def weather_series(
     selected = _parse_fields(fields)
     now = datetime.now(timezone.utc)
     points = await repo.find_many_in_range(
-        names, now - timedelta(hours=hours), now, fields=selected
+        names, now - timedelta(hours=hours), now, fields=selected, step_hours=step_hours
     )
     return SeriesResponse(
         hours=hours,

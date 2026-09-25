@@ -1,5 +1,8 @@
 """Lifespan wiring: ping before serving, indexes/seed in the background, close on shutdown."""
 
+import asyncio
+import logging
+
 from app import main as main_module
 
 
@@ -102,4 +105,31 @@ async def test_lifespan_closes_client_when_mongo_is_down(settings, monkeypatch):
     except RuntimeError as exc:
         assert "no mongod" in str(exc)
 
+    assert client.closed is True
+
+
+async def test_lifespan_shutdown_bounds_and_cancels_stuck_preparation(
+    settings, monkeypatch, caplog
+):
+    client = _FakeClient()
+
+    async def fake_ping(_client):
+        return None
+
+    async def stuck_ensure_indexes(_db):
+        await asyncio.Event().wait()  # never completes
+
+    monkeypatch.setattr(main_module, "create_client", lambda _settings: client)
+    monkeypatch.setattr(main_module, "ping", fake_ping)
+    monkeypatch.setattr(main_module, "ensure_indexes", stuck_ensure_indexes)
+    monkeypatch.setattr(main_module, "seed_default_cities", lambda _db: asyncio.sleep(0))
+    monkeypatch.setattr(main_module, "PREPARE_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+
+    app = main_module.create_app(settings)
+
+    with caplog.at_level(logging.WARNING):
+        async with app.router.lifespan_context(app):
+            pass  # shutdown must not block on the stuck index task
+
+    assert "did not finish within" in caplog.text
     assert client.closed is True
