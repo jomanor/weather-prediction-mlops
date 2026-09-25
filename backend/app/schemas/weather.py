@@ -53,6 +53,65 @@ class CurrentWeatherList(BaseModel):
     stations: list[CurrentWeather]
 
 
+#: Fields a bulk query may project on. ``city`` and ``observed_at`` are always
+#: present; everything else has to be named here to be accepted.
+WEATHER_FIELDS: frozenset[str] = frozenset(
+    {
+        "temperature",
+        "apparent_temperature",
+        "humidity",
+        "pressure",
+        "wind_speed",
+        "wind_direction",
+        "precipitation",
+        "cloud_cover",
+        "weather_code",
+    }
+)
+
+
+class CitySeries(BaseModel):
+    """One city's compact series inside a bulk response."""
+
+    city: str
+    count: int
+    latest_timestamp: datetime | None = None
+    points: list[WeatherPoint]
+
+
+class SeriesResponse(BaseModel):
+    hours: int
+    count: int
+    cities: list[CitySeries]
+
+
+class CitySummary(BaseModel):
+    """Server-side aggregates plus a numeric sparkline (temperature)."""
+
+    city: str
+    min: float | None = None
+    max: float | None = None
+    first: float | None = None
+    last: float | None = None
+    trend: float | None = None
+    points: list[float]
+
+
+class SummaryResponse(BaseModel):
+    hours: int
+    count: int
+    cities: list[CitySummary]
+
+
+class WeatherRangeResponse(BaseModel):
+    """Keyset-paginated range, always oldest -> newest."""
+
+    city: str
+    count: int
+    points: list[WeatherPoint]
+    next_cursor: datetime | None = None
+
+
 class HistoryResponse(BaseModel):
     city: str
     hours: int

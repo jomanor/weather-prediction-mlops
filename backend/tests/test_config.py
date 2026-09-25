@@ -13,6 +13,7 @@ def test_defaults(monkeypatch):
     assert settings.cors_origins_list == ["http://localhost:5173"]
     assert settings.aemet_api_key is None
     assert settings.aemet_cache_ttl_seconds == 3600
+    assert settings.ensure_indexes_on_start is True
 
 
 def test_cors_origins_comma_separated(monkeypatch):
@@ -53,6 +54,14 @@ async def test_cors_preflight(client):
     )
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://example.com"
+
+
+async def test_cors_exposes_validator_and_freshness_headers(client):
+    response = await client.get("/api/health", headers={"Origin": "http://example.com"})
+
+    exposed = response.headers["access-control-expose-headers"].lower()
+    for header in ("etag", "cache-control", "x-data-age-seconds"):
+        assert header in exposed
 
 
 async def test_request_id_header_is_echoed(client):
