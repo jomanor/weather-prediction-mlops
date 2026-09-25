@@ -39,7 +39,13 @@ FEATURES_CONFIG = {
 
 
 ML_CONFIG = {
-    "data_split": {"train": 0.6, "validation": 0.2, "test": 0.2, "seed": 42},
+    "data_split": {
+        "kind": "temporal",
+        "train": 0.6,
+        "validation": 0.2,
+        "test": 0.2,
+        "seed": 42,
+    },
     # Two folds, not three: the third fold bought little and every fold
     # multiplies the number of fits.
     "cross_validation": {"num_folds": 2, "seed": 42},

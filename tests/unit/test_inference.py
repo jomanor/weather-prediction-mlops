@@ -7,7 +7,7 @@ Tests model loading, registry queries, and batch inference transformations.
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,64 +81,157 @@ class TestLoadLatestModel:
 
 class TestInferenceTransformation:
     @pytest.fixture()
-    def sample_features_df(self, spark):
+    def pred_df(self, spark):
         schema = StructType(
             [
                 StructField("city", StringType(), False),
                 StructField("timestamp", TimestampType(), False),
                 StructField("temperature", DoubleType(), True),
-                StructField("humidity", DoubleType(), True),
-                StructField("pressure", DoubleType(), True),
-                StructField("wind_speed", DoubleType(), True),
-                StructField("specific_humidity", DoubleType(), True),
-                StructField("wind_u", DoubleType(), True),
-                StructField("wind_v", DoubleType(), True),
-                StructField("precip_sum_6h", DoubleType(), True),
+                StructField("predicted_temperature", DoubleType(), True),
+                StructField("predicted_rain", DoubleType(), True),
             ]
         )
         data = [
             Row(
                 city="Madrid",
                 timestamp=datetime(2026, 6, 29, 12, 0, 0),
-                temperature=25.0,
-                humidity=40.0,
-                pressure=1015.0,
-                wind_speed=3.5,
-                specific_humidity=8.2,
-                wind_u=-2.5,
-                wind_v=-1.5,
-                precip_sum_6h=0.0,
+                temperature=20.0,
+                predicted_temperature=21.5,
+                predicted_rain=0.4,
             )
         ]
         return spark.createDataFrame(data, schema=schema)
 
-    def test_run_inference_dataframe_schema(self, spark, sample_features_df):
-        mock_temp_model = MagicMock()
-        # Transform adds "prediction" column
-        mock_temp_model.transform.side_effect = lambda df: df.withColumn(
-            "prediction", df["temperature"] + 1.5
+    def test_build_output_df_exact_id(self, spark):
+        # A tz-aware timestamp makes int(ts.timestamp()) the unambiguous UTC
+        # epoch, matching F.unix_timestamp("timestamp") regardless of the
+        # session/driver timezone.
+        ts = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+        schema = StructType(
+            [
+                StructField("city", StringType(), False),
+                StructField("timestamp", TimestampType(), False),
+                StructField("temperature", DoubleType(), True),
+                StructField("predicted_temperature", DoubleType(), True),
+                StructField("predicted_rain", DoubleType(), True),
+            ]
+        )
+        df = spark.createDataFrame(
+            [
+                Row(
+                    city="Madrid",
+                    timestamp=ts,
+                    temperature=20.0,
+                    predicted_temperature=21.5,
+                    predicted_rain=0.4,
+                )
+            ],
+            schema=schema,
         )
 
-        mock_rain_model = MagicMock()
-        mock_rain_model.transform.side_effect = lambda df: df.withColumn(
-            "prediction", df["temperature"] * 0.0
+        out = inference.build_output_df(
+            df,
+            temp_meta={"model_name": "t", "version": "v1"},
+            rain_meta={"model_name": "r", "version": "v1"},
+        )
+        row = out.first()
+        assert row._id == f"Madrid_{int(ts.timestamp())}_1h"
+
+
+class TestOutputSchemaColumns:
+    def test_output_schema_columns_exact_contract(self):
+        expected = [
+            "_id",
+            "city",
+            "source_timestamp",
+            "prediction_timestamp",
+            "predicted_temperature",
+            "predicted_rain",
+            "observed_temperature",
+            "horizon_hours",
+            "temp_model_name",
+            "temp_model_version",
+            "rain_model_name",
+            "rain_model_version",
+            "temp_lower",
+            "temp_upper",
+            "interval_level",
+        ]
+        assert inference.output_schema_columns() == expected
+
+
+class TestBuildOutputDf:
+    @pytest.fixture()
+    def pred_df(self, spark):
+        schema = StructType(
+            [
+                StructField("city", StringType(), False),
+                StructField("timestamp", TimestampType(), False),
+                StructField("temperature", DoubleType(), True),
+                StructField("predicted_temperature", DoubleType(), True),
+                StructField("predicted_rain", DoubleType(), True),
+            ]
+        )
+        data = [
+            Row(
+                city="Madrid",
+                timestamp=datetime(2026, 6, 29, 12, 0, 0),
+                temperature=20.0,
+                predicted_temperature=21.5,
+                predicted_rain=0.4,
+            )
+        ]
+        return spark.createDataFrame(data, schema=schema)
+
+    def test_build_output_df_with_interval(self, spark, pred_df):
+        temp_meta = {
+            "model_name": "temp_prediction_1h_GBT",
+            "version": "v1",
+            "interval": {"level": 0.8, "lower_offset": -2.0, "upper_offset": 2.5},
+        }
+        rain_meta = {"model_name": "rain_prediction_1h_GBT", "version": "v1"}
+
+        out = inference.build_output_df(pred_df, temp_meta, rain_meta)
+
+        assert out.columns == inference.output_schema_columns()
+        row = out.first()
+        assert row.temp_lower == 21.5 + (-2.0)
+        assert row.temp_upper == 21.5 + 2.5
+        assert row.interval_level == 0.8
+        # _id composition unchanged: {city}_{epoch(source_timestamp)}_{horizon}h
+        assert row._id.startswith("Madrid_")
+        assert row._id.endswith("_1h")
+
+    def test_build_output_df_without_interval(self, spark, pred_df):
+        out = inference.build_output_df(
+            pred_df, temp_meta={"model_name": "legacy", "version": "v0"}, rain_meta={}
         )
 
-        # Mock MongoDB write
-        writer = sample_features_df.write
-        with patch.object(writer, "format") as mock_fmt:
-            mock_fmt.return_value.option.return_value.mode.return_value.save = MagicMock()
+        assert out.columns == inference.output_schema_columns()
+        row = out.first()
+        assert row.temp_lower is None
+        assert row.temp_upper is None
+        assert row.interval_level is None
 
-            # We test the column selection and renaming logic without throwing
-            pred_df = mock_temp_model.transform(sample_features_df).withColumnRenamed(
-                "prediction", "predicted_temperature"
-            )
-            pred_df = mock_rain_model.transform(pred_df).withColumnRenamed(
-                "prediction", "predicted_rain"
-            )
+    def test_build_output_df_partial_interval_treated_as_absent(self, spark, pred_df):
+        # A malformed/partial interval block must not raise; it is nulled out.
+        out = inference.build_output_df(
+            pred_df,
+            temp_meta={"model_name": "t", "version": "v1", "interval": {"level": 0.8}},
+            rain_meta={},
+        )
 
-            assert "predicted_temperature" in pred_df.columns
-            assert "predicted_rain" in pred_df.columns
-            row = pred_df.first()
-            assert row.predicted_temperature == 26.5
-            assert row.predicted_rain == 0.0
+        row = out.first()
+        assert row.temp_lower is None
+        assert row.temp_upper is None
+        assert row.interval_level is None
+
+    def test_build_output_df_no_temp_meta(self, spark, pred_df):
+        out = inference.build_output_df(pred_df, temp_meta=None, rain_meta=None)
+
+        row = out.first()
+        assert row.temp_lower is None
+        assert row.temp_upper is None
+        assert row.interval_level is None
+        assert row.temp_model_name == "unknown"
+        assert row.rain_model_name == "unknown"

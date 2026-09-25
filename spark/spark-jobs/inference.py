@@ -180,6 +180,85 @@ def _pipeline_scratch_columns(model) -> list[str]:
     return scratch
 
 
+def output_schema_columns() -> list[str]:
+    """Exact write-column names, in write order, for ``weather_predictions``.
+
+    Pure and importable without a Spark session or a database connection; the
+    CI output-schema guard imports this and asserts the contract verbatim.
+    """
+    return [
+        "_id",
+        "city",
+        "source_timestamp",
+        "prediction_timestamp",
+        "predicted_temperature",
+        "predicted_rain",
+        "observed_temperature",
+        "horizon_hours",
+        "temp_model_name",
+        "temp_model_version",
+        "rain_model_name",
+        "rain_model_version",
+        "temp_lower",
+        "temp_upper",
+        "interval_level",
+    ]
+
+
+def build_output_df(pred_df, temp_meta: dict | None = None, rain_meta: dict | None = None):
+    """Add the additive interval columns and project the final write schema.
+
+    ``temp_lower`` / ``temp_upper`` / ``interval_level`` come from the loaded
+    temperature model's ``interval`` registry block; all three are null when the
+    model carries no interval (legacy document) or no temperature model loaded.
+    """
+    horizon = FEATURES_CONFIG["target_horizon"]
+    temp_meta = temp_meta or {}
+    rain_meta = rain_meta or {}
+
+    interval = temp_meta.get("interval") or {}
+    lower = interval.get("lower_offset")
+    upper = interval.get("upper_offset")
+    level = interval.get("level")
+    if lower is not None and upper is not None and level is not None:
+        pred_df = pred_df.withColumn(
+            "temp_lower", F.col("predicted_temperature") + F.lit(float(lower))
+        )
+        pred_df = pred_df.withColumn(
+            "temp_upper", F.col("predicted_temperature") + F.lit(float(upper))
+        )
+        pred_df = pred_df.withColumn("interval_level", F.lit(float(level)))
+    else:
+        pred_df = pred_df.withColumn("temp_lower", F.lit(None).cast("double"))
+        pred_df = pred_df.withColumn("temp_upper", F.lit(None).cast("double"))
+        pred_df = pred_df.withColumn("interval_level", F.lit(None).cast("double"))
+
+    expressions = {
+        "_id": F.concat_ws(
+            "_",
+            F.col("city"),
+            F.unix_timestamp("timestamp").cast("string"),
+            F.lit(f"{horizon}h"),
+        ),
+        "city": F.col("city"),
+        "source_timestamp": F.col("timestamp"),
+        "prediction_timestamp": F.current_timestamp(),
+        "predicted_temperature": F.col("predicted_temperature"),
+        "temp_lower": F.col("temp_lower"),
+        "temp_upper": F.col("temp_upper"),
+        "interval_level": F.col("interval_level"),
+        "predicted_rain": F.col("predicted_rain"),
+        "observed_temperature": F.col("temperature"),
+        "horizon_hours": F.lit(horizon),
+        "temp_model_name": F.lit(temp_meta.get("model_name", "unknown")),
+        "temp_model_version": F.lit(temp_meta.get("version", "unknown")),
+        "rain_model_name": F.lit(rain_meta.get("model_name", "unknown")),
+        "rain_model_version": F.lit(rain_meta.get("version", "unknown")),
+    }
+
+    return pred_df.select(*[expressions[name].alias(name) for name in output_schema_columns()])
+
+
 def run_inference(
     spark,
     temp_model,
@@ -212,30 +291,13 @@ def run_inference(
     else:
         pred_df = pred_df.withColumn("predicted_rain", F.lit(None).cast("double"))
 
-    horizon = FEATURES_CONFIG["target_horizon"]
+    if temp_model is not None and not (temp_meta or {}).get("interval"):
+        logger.warning(
+            "Loaded temperature model has no 'interval' block; "
+            "temp_lower/temp_upper/interval_level will be null."
+        )
 
-    output = pred_df.select(
-        # Stable string _id so hourly re-runs replace the same document instead
-        # of appending a fresh one (and growing the collection without bound).
-        F.concat_ws(
-            "_",
-            F.col("city"),
-            F.unix_timestamp("timestamp").cast("string"),
-            F.lit(f"{horizon}h"),
-        ).alias("_id"),
-        F.col("city"),
-        F.col("timestamp").alias("source_timestamp"),
-        F.current_timestamp().alias("prediction_timestamp"),
-        F.col("predicted_temperature"),
-        F.col("predicted_rain"),
-        # Include the observed temperature so callers can compute error on-the-fly
-        F.col("temperature").alias("observed_temperature"),
-        F.lit(horizon).alias("horizon_hours"),
-        F.lit(temp_meta["model_name"] if temp_meta else "unknown").alias("temp_model_name"),
-        F.lit(temp_meta["version"] if temp_meta else "unknown").alias("temp_model_version"),
-        F.lit(rain_meta["model_name"] if rain_meta else "unknown").alias("rain_model_name"),
-        F.lit(rain_meta["version"] if rain_meta else "unknown").alias("rain_model_version"),
-    )
+    output = build_output_df(pred_df, temp_meta, rain_meta)
 
     row_count = output.count()
     logger.info("Writing %d prediction rows to weather_predictions…", row_count)
