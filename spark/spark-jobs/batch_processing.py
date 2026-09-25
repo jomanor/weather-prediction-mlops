@@ -74,6 +74,7 @@ def extract_weather_data(spark):
         F.col("payload.current.weather_code").alias("weather_code"),
         F.col("payload.latitude").alias("latitude"),
         F.col("payload.longitude").alias("longitude"),
+        F.col("payload.utc_offset_seconds").alias("utc_offset_seconds"),
     )
 
     df_flat = df_flat.withColumn("timestamp", F.to_timestamp("timestamp"))
@@ -123,12 +124,44 @@ def add_atmospheric_features(df):
 # ---------------------------------------------------------------------------
 
 
+def solar_offset_seconds(longitude):
+    """Deterministic UTC offset (seconds) derived from longitude — fallback.
+
+    One hour of local solar time per 15° of longitude, rounded to the nearest
+    hour: ``round(longitude / 15) * 3600``. Used only when a row carries no
+    ``utc_offset_seconds`` from Open-Meteo, so historical rows without an offset
+    still get a physically sensible local hour.
+    """
+    return int(round(longitude / 15.0)) * 3600
+
+
+def _local_timestamp_col(df):
+    """Column expression for the timestamp shifted to local wall-clock time.
+
+    Prefers the real Open-Meteo ``utc_offset_seconds`` when the flattened frame
+    carries it (added by ``extract_weather_data``); otherwise falls back to the
+    longitude-based solar offset so the hour is never null for valid rows.
+    """
+    utc_epoch_seconds = F.unix_timestamp("timestamp")
+    solar = F.round(F.col("longitude") / 15.0) * 3600
+    if "utc_offset_seconds" in df.columns:
+        offset = F.coalesce(F.col("utc_offset_seconds"), solar)
+    else:
+        offset = solar
+    return (utc_epoch_seconds + offset.cast("long")).cast("timestamp")
+
+
 def create_time_features(df):
-    df = df.withColumn("hour", F.hour("timestamp"))
-    df = df.withColumn("day_of_week", F.dayofweek("timestamp"))
-    df = df.withColumn("day_of_month", F.dayofmonth("timestamp"))
-    df = df.withColumn("month", F.month("timestamp"))
-    df = df.withColumn("quarter", F.quarter("timestamp"))
+    # All time-of-day features use local time, not UTC: Spain sits 1-2 h and
+    # Pasadena ~8 h off UTC, so an offset (real or longitude-derived) is applied
+    # before extracting the calendar fields.
+    local_ts = _local_timestamp_col(df)
+
+    df = df.withColumn("hour", F.hour(local_ts))
+    df = df.withColumn("day_of_week", F.dayofweek(local_ts))
+    df = df.withColumn("day_of_month", F.dayofmonth(local_ts))
+    df = df.withColumn("month", F.month(local_ts))
+    df = df.withColumn("quarter", F.quarter(local_ts))
 
     # Cyclical encoding
     df = df.withColumn("hour_sin", F.sin(F.col("hour") * 2 * 3.14159 / 24))

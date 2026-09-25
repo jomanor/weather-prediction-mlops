@@ -142,6 +142,21 @@ class FakeCityRepository:
         return True
 
 
+class FakeDatabase:
+    """Minimal Motor database stand-in for the readiness probe."""
+
+    def __init__(self, name: str = "weather_db", error: Exception | None = None) -> None:
+        self.name = name
+        self.error = error
+        self.commands: list[dict] = []
+
+    async def command(self, command: str, **kwargs) -> dict:
+        self.commands.append({"command": command, **kwargs})
+        if self.error is not None:
+            raise self.error
+        return {"ok": 1}
+
+
 class FakeGeocodingService:
     """Same surface as ``GeocodingService`` but never touches the network."""
 

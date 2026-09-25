@@ -240,9 +240,9 @@ def train_temperature_prediction_model(df, horizon=1):
             ],
             key=lambda x: x[1],
             reverse=True,
-        )[:10]
+        )[:15]
 
-        print("\nTop 10 Important Features:")
+        print("\nTop 15 Important Features:")
         for feature, importance in important_features:
             print(f"  {feature}: {importance:.4f}")
 
@@ -254,11 +254,16 @@ def train_temperature_prediction_model(df, horizon=1):
             [(feature_cols[i], abs(float(coef))) for i, coef in enumerate(coefficients)],
             key=lambda x: x[1],
             reverse=True,
-        )[:10]
+        )[:15]
 
-        print("\nTop 10 Important Features (by absolute coefficient):")
+        print("\nTop 15 Important Features (by absolute coefficient):")
         for feature, coef in important_features:
             print(f"  {feature}: {coef:.4f}")
+
+    # The tuned values actually fitted for the winning algorithm (filtered to the
+    # grid keys), plus the held-out size for the registry's ``n_test``.
+    params = _extract_grid_params(best_model, param_grids[best_model_name])
+    n_test = test_df.count()
 
     for frame in (train_df, val_df, test_df):
         frame.unpersist()
@@ -271,7 +276,9 @@ def train_temperature_prediction_model(df, horizon=1):
             "rmse": test_rmse,
             "mae": test_mae,
             "r2": test_r2,
+            "n_test": n_test,
         },
+        params,
     )
 
 
@@ -390,7 +397,10 @@ def train_rain_prediction_model(df, horizon=1):
         [(feature_cols[i], float(importance)) for i, importance in enumerate(feature_importance)],
         key=lambda x: x[1],
         reverse=True,
-    )[:10]
+    )[:15]
+
+    params = _extract_grid_params(best_model, param_grids[best_model_name])
+    n_test = test_df.count()
 
     for frame in (train_df, val_df, test_df):
         frame.unpersist()
@@ -402,13 +412,44 @@ def train_rain_prediction_model(df, horizon=1):
         {
             "auc_roc": test_auc,
             "auc_pr": test_pr_auc,
+            "n_test": n_test,
         },
+        params,
     )
 
 
 # ---------------------------------------------------------------------------
 # MLflow logging helper
 # ---------------------------------------------------------------------------
+
+
+def _json_safe(value):
+    """Coerce a Spark/NumPy scalar to a JSON-serializable Python primitive.
+
+    ``extractParamMap`` and ``featureImportances`` can surface NumPy or Java
+    boxed scalars, which PyMongo cannot encode into BSON; collapse them to plain
+    int/float/str so the registry document stays insertable.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
+def _extract_grid_params(best_model, param_maps):
+    """Return the fitted values of the parameters that were searched, keyed by
+    parameter name and made JSON-serializable."""
+    grid_keys = {param.name for param in param_maps[0]}
+    fitted = best_model.stages[-1].extractParamMap()
+    return {
+        param.name: _json_safe(value) for param, value in fitted.items() if param.name in grid_keys
+    }
 
 
 def _log_to_mlflow(
@@ -456,7 +497,18 @@ def _log_to_mlflow(
         print(f"MLflow run '{run_name}' logged successfully.")
 
 
-def save_model(model, model_name, db_name="weather_db", metadata_collection="model_registry"):
+def save_model(
+    model,
+    model_name,
+    model_type,
+    target,
+    horizon,
+    metrics=None,
+    important_features=None,
+    params=None,
+    db_name="weather_db",
+    metadata_collection="model_registry",
+):
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
     temp_dir = os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp")
     os.makedirs(temp_dir, exist_ok=True)
@@ -479,11 +531,27 @@ def save_model(model, model_name, db_name="weather_db", metadata_collection="mod
 
         metadata = {
             "model_name": model_name,
-            "model_type": model.__class__.__name__,
+            "model_type": model_type,
             "gridfs_file_id": file_id,
             "timestamp": datetime.now(),
             "version": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "target": target,
+            "horizon_hours": horizon,
+            "stage": "staging",
+            "schema_version": 2,
         }
+
+        # Additive fields: the trainers already compute these; persist them so the
+        # registry answers "which algorithm won, how well, and why".
+        if metrics:
+            metadata["metrics"] = {k: _json_safe(v) for k, v in metrics.items()}
+        if important_features:
+            metadata["feature_importance"] = [
+                {"name": name, "importance": _json_safe(importance)}
+                for name, importance in important_features
+            ]
+        if params:
+            metadata["params"] = {k: _json_safe(v) for k, v in params.items()}
 
         db[metadata_collection].insert_one(metadata)
 
@@ -516,23 +584,41 @@ def main():
 
         print(f"\n=== Training models with {horizon}h prediction horizon ===\n")
 
-        temp_model, temp_model_name, temp_features, temp_metrics = (
+        temp_model, temp_model_name, temp_features, temp_metrics, temp_params = (
             train_temperature_prediction_model(df, horizon)
         )
-        rain_model, rain_model_name, rain_features, rain_metrics = train_rain_prediction_model(
-            df, horizon
+        rain_model, rain_model_name, rain_features, rain_metrics, rain_params = (
+            train_rain_prediction_model(df, horizon)
         )
 
         # --- persist to GridFS (used by inference.py) ---
-        save_model(temp_model, f"temp_prediction_{horizon}h_{temp_model_name}")
-        save_model(rain_model, f"rain_prediction_{horizon}h_{rain_model_name}")
+        save_model(
+            temp_model,
+            f"temp_prediction_{horizon}h_{temp_model_name}",
+            model_type=temp_model_name,
+            target="temperature",
+            horizon=horizon,
+            metrics=temp_metrics,
+            important_features=temp_features,
+            params=temp_params,
+        )
+        save_model(
+            rain_model,
+            f"rain_prediction_{horizon}h_{rain_model_name}",
+            model_type=rain_model_name,
+            target="rain",
+            horizon=horizon,
+            metrics=rain_metrics,
+            important_features=rain_features,
+            params=rain_params,
+        )
 
         # --- log to MLflow ---
         _log_to_mlflow(
             run_name=f"temp_{temp_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             model_type="temperature",
             model_name=temp_model_name,
-            params={},
+            params=temp_params,
             metrics=temp_metrics,
             important_features=temp_features,
             model=temp_model,
@@ -542,7 +628,7 @@ def main():
             run_name=f"rain_{rain_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             model_type="rain",
             model_name=rain_model_name,
-            params={},
+            params=rain_params,
             metrics=rain_metrics,
             important_features=rain_features,
             model=rain_model,

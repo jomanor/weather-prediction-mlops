@@ -10,12 +10,13 @@ All DB read/writes are stubbed out.
 import os
 import sys
 import unittest.mock as mock
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
     DoubleType,
+    LongType,
     StringType,
     StructField,
     StructType,
@@ -163,6 +164,71 @@ class TestCreateTimeFeatures:
         row = result.select("hour_sin", "hour_cos").first()
         assert -1.0 <= row["hour_sin"] <= 1.0
         assert -1.0 <= row["hour_cos"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# create_time_features — local hour (not UTC)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalHour:
+    """Diurnal features must use local time, not the UTC timestamp."""
+
+    def test_solar_offset_seconds_rounds_to_nearest_hour(self):
+        # Madrid (-3.70°) → 0h; Pasadena (-118.15°) → -8h; +30° → +2h.
+        assert bp.solar_offset_seconds(-3.7038) == 0
+        assert bp.solar_offset_seconds(-118.15) == -8 * 3600
+        assert bp.solar_offset_seconds(2.1734) == 0
+        assert bp.solar_offset_seconds(30.0) == 2 * 3600
+
+    def test_local_hour_uses_utc_offset_when_present(self, spark):
+        """Same UTC instant, offset +1h vs -7h => local hours 8 apart (mod 24)."""
+        schema = StructType(
+            [
+                StructField("city", StringType(), True),
+                StructField("timestamp", TimestampType(), True),
+                StructField("longitude", DoubleType(), True),
+                StructField("utc_offset_seconds", LongType(), True),
+            ]
+        )
+        base = 1_750_000_000
+        ts = datetime.fromtimestamp(base, tz=timezone.utc)
+        rows = [
+            Row(city="Madrid", timestamp=ts, longitude=-3.7038, utc_offset_seconds=3600),
+            Row(city="Pasadena", timestamp=ts, longitude=-118.15, utc_offset_seconds=-25200),
+        ]
+        df = spark.createDataFrame(rows, schema=schema)
+        result = bp.create_time_features(df)
+
+        hours = {r["city"]: r["hour"] for r in result.select("city", "hour").collect()}
+        # CET (+1) vs PST (-7): 8 hours apart regardless of the session timezone.
+        assert (hours["Madrid"] - hours["Pasadena"]) % 24 == 8
+
+    def test_local_hour_falls_back_to_longitude(self, spark):
+        """Without utc_offset_seconds, the longitude-based solar offset applies."""
+        schema = StructType(
+            [
+                StructField("city", StringType(), True),
+                StructField("timestamp", TimestampType(), True),
+                StructField("longitude", DoubleType(), True),
+                StructField("utc_offset_seconds", LongType(), True),
+            ]
+        )
+        base = 1_750_000_000
+        ts = datetime.fromtimestamp(base, tz=timezone.utc)
+        rows = [
+            Row(
+                city="Pasadena_explicit", timestamp=ts, longitude=-118.15, utc_offset_seconds=-28800
+            ),
+            Row(city="Pasadena_fallback", timestamp=ts, longitude=-118.15, utc_offset_seconds=None),
+        ]
+        df = spark.createDataFrame(rows, schema=schema)
+        result = bp.create_time_features(df)
+
+        hours = {r["city"]: r["hour"] for r in result.select("city", "hour").collect()}
+        # Solar fallback for -118.15° is -8h: must match the explicit offset.
+        assert hours["Pasadena_explicit"] == hours["Pasadena_fallback"]
+        assert hours["Pasadena_fallback"] is not None
 
 
 # ---------------------------------------------------------------------------
