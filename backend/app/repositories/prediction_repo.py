@@ -45,13 +45,17 @@ class PredictionRepository:
         return self._db["weather_predictions"]
 
     async def latest_per_city(self) -> list[Prediction]:
+        # Sort by (city, prediction_timestamp) to match the
+        # ``{city: 1, prediction_timestamp: -1}`` index, and allow disk use so
+        # the blocking sort cannot fail with MongoDB code 292 as the collection
+        # grows. See the same pattern in ``WeatherRepository.latest_per_city``.
         pipeline = [
-            {"$sort": {"prediction_timestamp": -1}},
+            {"$sort": {"city": 1, "prediction_timestamp": -1}},
             {"$group": {"_id": "$city", "latest": {"$first": "$$ROOT"}}},
             {"$replaceRoot": {"newRoot": "$latest"}},
             {"$sort": {"city": 1}},
         ]
-        docs = [doc async for doc in self._collection.aggregate(pipeline)]
+        docs = [doc async for doc in self._collection.aggregate(pipeline, allowDiskUse=True)]
         return _map_all(docs)
 
     async def for_city(self, city: str, limit: int = 48) -> list[Prediction]:
