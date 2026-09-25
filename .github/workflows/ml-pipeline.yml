@@ -78,7 +78,10 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.features == '1' || needs.resolve.outputs.train == '1' || needs.resolve.outputs.inference == '1'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Training fits three algorithms under cross-validation; 30 min was not
+    # enough and the nightly job was cancelled at the limit. 60 leaves room
+    # while the trimmed grids keep a run well under it.
+    timeout-minutes: 60
     env:
       MONGO_URI: ${{ secrets.MONGO_URI }}
       # There is no MLflow server on a runner, and ml_training falls back to
