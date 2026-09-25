@@ -105,6 +105,13 @@ def train_temperature_prediction_model(df, horizon=1):
     seed = ML_CONFIG["data_split"]["seed"]
 
     train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
+    # Cross-validation re-executes the plan once per candidate fit. Without this
+    # cache every fit re-reads weather_features from Atlas, which is what pushed
+    # the job past the CI timeout. cache() spills to disk, so it stays safe on
+    # the runner's modest driver heap.
+    train_df = train_df.cache()
+    val_df = val_df.cache()
+    test_df = test_df.cache()
 
     print(
         f"Train size: {train_df.count()}, "
@@ -182,6 +189,9 @@ def train_temperature_prediction_model(df, horizon=1):
             evaluator=evaluator,
             numFolds=ML_CONFIG["cross_validation"]["num_folds"],
             seed=ML_CONFIG["cross_validation"]["seed"],
+            # Fit candidate models concurrently: local mode has one executor, so
+            # without this the runner's other cores sit idle.
+            parallelism=min(4, os.cpu_count() or 1),
         )
 
         cv_model = cv.fit(train_df)
@@ -250,6 +260,9 @@ def train_temperature_prediction_model(df, horizon=1):
         for feature, coef in important_features:
             print(f"  {feature}: {coef:.4f}")
 
+    for frame in (train_df, val_df, test_df):
+        frame.unpersist()
+
     return (
         best_model,
         best_model_name,
@@ -273,6 +286,13 @@ def train_rain_prediction_model(df, horizon=1):
     seed = ML_CONFIG["data_split"]["seed"]
 
     train_df, val_df, test_df = df.randomSplit([train_ratio, val_ratio, test_ratio], seed=seed)
+    # Cross-validation re-executes the plan once per candidate fit. Without this
+    # cache every fit re-reads weather_features from Atlas, which is what pushed
+    # the job past the CI timeout. cache() spills to disk, so it stays safe on
+    # the runner's modest driver heap.
+    train_df = train_df.cache()
+    val_df = val_df.cache()
+    test_df = test_df.cache()
 
     print(
         f"Train size: {train_df.count()}, "
@@ -333,6 +353,9 @@ def train_rain_prediction_model(df, horizon=1):
             evaluator=evaluator,
             numFolds=ML_CONFIG["cross_validation"]["num_folds"],
             seed=ML_CONFIG["cross_validation"]["seed"],
+            # Fit candidate models concurrently: local mode has one executor, so
+            # without this the runner's other cores sit idle.
+            parallelism=min(4, os.cpu_count() or 1),
         )
 
         cv_model = cv.fit(train_df)
@@ -368,6 +391,9 @@ def train_rain_prediction_model(df, horizon=1):
         key=lambda x: x[1],
         reverse=True,
     )[:10]
+
+    for frame in (train_df, val_df, test_df):
+        frame.unpersist()
 
     return (
         best_model,
@@ -480,7 +506,11 @@ def main():
     spark = create_spark_session("WeatherMLTraining")
 
     try:
-        df = load_features(spark)
+        # Both trainers read the whole feature table (column-presence counts and
+        # then the split), so cache it once: without this the run reads Atlas
+        # four times, which is a large part of the CI runtime.
+        df = load_features(spark).cache()
+        df.count()
 
         horizon = FEATURES_CONFIG["target_horizon"]
 
