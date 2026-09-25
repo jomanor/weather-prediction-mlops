@@ -47,22 +47,38 @@ class PredictionRepository:
     def _collection(self):
         return self._db["weather_predictions"]
 
-    async def latest_per_city(self) -> list[Prediction]:
-        # Sort by (city, prediction_timestamp) to match the
-        # ``{city: 1, prediction_timestamp: -1}`` index, and allow disk use so
-        # the blocking sort cannot fail with MongoDB code 292 as the collection
-        # grows. See the same pattern in ``WeatherRepository.latest_per_city``.
-        pipeline = [
-            {"$sort": {"city": 1, "prediction_timestamp": -1}},
-            {"$group": {"_id": "$city", "latest": {"$first": "$$ROOT"}}},
+    async def latest_per_city(self, horizon: int | None = None) -> list[Prediction]:
+        # One row per ``(city, horizon_hours)``: the inner sort matches the
+        # existing ``{city: 1, horizon_hours: 1, prediction_timestamp: -1}``
+        # index so the group is fed without a blocking SORT (city-prefixed per
+        # the M0 rule); the outer sort orders the returned rows. ``allowDiskUse``
+        # guards the aggregate if the planner cannot use the index. With
+        # ``horizon`` set, the ``$match`` pins one horizon, so the result is one
+        # row per city for that horizon.
+        pipeline: list[dict[str, Any]] = []
+        if horizon is not None:
+            pipeline.append({"$match": {"horizon_hours": horizon}})
+        pipeline += [
+            {"$sort": {"city": 1, "horizon_hours": 1, "prediction_timestamp": -1}},
+            {
+                "$group": {
+                    "_id": {"city": "$city", "horizon_hours": "$horizon_hours"},
+                    "latest": {"$first": "$$ROOT"},
+                }
+            },
             {"$replaceRoot": {"newRoot": "$latest"}},
-            {"$sort": {"city": 1}},
+            {"$sort": {"city": 1, "horizon_hours": 1}},
         ]
         docs = [doc async for doc in self._collection.aggregate(pipeline, allowDiskUse=True)]
         return _map_all(docs)
 
-    async def for_city(self, city: str, limit: int = 48) -> list[Prediction]:
-        cursor = self._collection.find({"city": city}).sort("prediction_timestamp", -1).limit(limit)
+    async def for_city(
+        self, city: str, limit: int = 48, horizon: int | None = None
+    ) -> list[Prediction]:
+        query: dict[str, Any] = {"city": city}
+        if horizon is not None:
+            query["horizon_hours"] = horizon
+        cursor = self._collection.find(query).sort("prediction_timestamp", -1).limit(limit)
         return _map_all([doc async for doc in cursor])
 
     async def find_range(self, city: str, start: datetime, end: datetime) -> list[Prediction]:

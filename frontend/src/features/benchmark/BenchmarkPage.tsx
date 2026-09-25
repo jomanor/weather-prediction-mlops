@@ -1,18 +1,19 @@
 import { AlertTriangle, Info } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 
 import { useBenchmarkSummary, useCities } from '@/api/queries'
 import { usePreferences } from '@/app/preferences'
 import { BenchmarkChart } from '@/components/charts/BenchmarkChart'
 import { ResidualChart } from '@/components/charts/ResidualChart'
 import { SeriesLegend } from '@/components/charts/SeriesLegend'
-import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
+import { Button } from '@/components/ui/Button'
+import { EmptyState, ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { MetricsCompare } from '@/features/benchmark/MetricsCompare'
 import { useBenchmark } from '@/features/benchmark/queries'
-import { useChartSync } from '@/hooks/useChartSync'
+import { useChartWindow } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
@@ -36,7 +37,6 @@ export function BenchmarkPage() {
   const [state, setState] = useUrlState(BENCHMARK_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
-  const { setWindow } = useChartSync()
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
@@ -46,12 +46,7 @@ export function BenchmarkPage() {
   const summary = useBenchmarkSummary()
 
   /* Align the benchmark and residual charts on the observed series' time window. */
-  const anchor = benchmark.data?.series.at(-1)?.timestamp
-  useEffect(() => {
-    if (!anchor) return
-    const anchorMs = new Date(anchor).getTime()
-    if (Number.isFinite(anchorMs)) setWindow(hours, anchorMs)
-  }, [anchor, hours, setWindow])
+  const { brushed, resetWindow } = useChartWindow(hours, benchmark.data?.series.at(-1)?.timestamp)
 
 
   const verdict = useMemo(() => {
@@ -142,19 +137,26 @@ export function BenchmarkPage() {
                 title="Temperatura: observado vs modelos"
                 subtitle={city ? `Estación ${city} · ventana ${hours} h` : undefined}
                 actions={
-                  <SeriesLegend
-                    className="hidden sm:flex"
-                    items={[
-                      { label: 'Observado', color: palette.observed },
-                      { label: 'Spark GBT', color: palette.model, dash: '6 3' },
-                      { label: 'AEMET', color: palette.aemet, dash: '2 3' },
-                    ]}
-                  />
+                  <>
+                    {brushed ? (
+                      <Button size="sm" onClick={resetWindow}>
+                        Restablecer zoom
+                      </Button>
+                    ) : null}
+                    <SeriesLegend
+                      className="hidden sm:flex"
+                      items={[
+                        { label: 'Observado', color: palette.observed },
+                        { label: 'Spark GBT', color: palette.model, dash: '6 3' },
+                        { label: 'AEMET', color: palette.aemet, dash: '2 3' },
+                      ]}
+                    />
+                  </>
                 }
               />
               <div className="p-3">
                 {benchmark.isLoading ? (
-                  <LoadingBlock />
+                  <ChartSkeleton height={280} />
                 ) : hasSeries ? (
                   <BenchmarkChart points={benchmark.data!.series} palette={palette} />
                 ) : (
@@ -200,7 +202,7 @@ export function BenchmarkPage() {
               />
               <div className="p-3">
                 {benchmark.isLoading ? (
-                  <LoadingBlock />
+                  <ChartSkeleton height={160} />
                 ) : hasSeries ? (
                   <ResidualChart points={benchmark.data!.series} palette={palette} />
                 ) : (

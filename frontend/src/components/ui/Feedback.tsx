@@ -1,10 +1,62 @@
 import { AlertTriangle, Inbox, Loader2, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
+import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { cn } from '@/lib/cn'
 
+/**
+ * U7: shimmer skeleton. The shimmer is a CSS animation gated by the OS motion
+ * preference (reduce → a static block, no animation).
+ */
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn('animate-pulse rounded bg-panel-2', className)} />
+  const reduced = usePrefersReducedMotion()
+  return (
+    <div aria-hidden="true" className={cn('rounded bg-panel-2', !reduced && 'shimmer', className)} />
+  )
+}
+
+/** Chart placeholder: a title line, a plot block and an axis strip. */
+export function ChartSkeleton({ height = 260, className }: { height?: number; className?: string }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn('flex flex-col gap-2 p-3', className)}
+      style={{ height }}
+    >
+      <Skeleton className="h-3 w-1/3" />
+      <Skeleton className="min-h-0 flex-1" />
+      <div className="flex gap-2">
+        <Skeleton className="h-2 flex-1" />
+        <Skeleton className="h-2 flex-1" />
+        <Skeleton className="h-2 flex-1" />
+      </div>
+    </div>
+  )
+}
+
+/** Table placeholder: evenly spaced rows, sized like the real table. */
+export function TableSkeleton({ rows = 6, className }: { rows?: number; className?: string }) {
+  return (
+    <div aria-hidden="true" className={cn('space-y-2 p-4', className)}>
+      {Array.from({ length: rows }, (_, index) => (
+        <Skeleton key={index} className="h-6 w-full" />
+      ))}
+    </div>
+  )
+}
+
+/** Map placeholder: a graticule over a flat block. */
+export function MapSkeleton({ className }: { className?: string }) {
+  return (
+    <div aria-hidden="true" className={cn('relative h-full w-full overflow-hidden', className)}>
+      <Skeleton className="absolute inset-0 rounded-none" />
+      <div className="absolute inset-0 grid grid-cols-4 grid-rows-3">
+        {Array.from({ length: 12 }, (_, index) => (
+          <div key={index} className="border border-line/40" />
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function LoadingBlock({ label = 'Cargando…' }: { label?: string }) {

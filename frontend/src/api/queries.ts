@@ -2,7 +2,13 @@ import { useQuery, type UseQueryOptions } from '@tanstack/react-query'
 import { z } from 'zod'
 
 import { apiGet } from './client'
-import { benchmarkSummarySchema, citySchema, healthSchema, weatherQualitySchema } from './schemas'
+import {
+  benchmarkSummarySchema,
+  citySchema,
+  healthSchema,
+  latestPredictionsSchema,
+  weatherQualitySchema,
+} from './schemas'
 
 /**
  * Shared query layer.
@@ -23,8 +29,9 @@ export const queryKeys = {
   station: (city: string) => ['station', city] as const,
   history: (city: string, hours: number) => ['history', city, hours] as const,
   stats: (city: string, hours: number) => ['stats', city, hours] as const,
-  latestPredictions: ['predictions', 'latest'] as const,
-  predictions: (city: string, limit: number) => ['predictions', city, limit] as const,
+  latestPredictions: (horizon: number) => ['predictions', 'latest', horizon] as const,
+  predictions: (city: string, limit: number, horizon: number) =>
+    ['predictions', city, limit, horizon] as const,
   benchmark: (city: string, hours: number) => ['benchmark', city, hours] as const,
   benchmarkSummary: ['benchmark', 'summary'] as const,
   models: ['models'] as const,
@@ -68,6 +75,19 @@ export const useBenchmarkSummary = () =>
   useApiQuery(queryKeys.benchmarkSummary, '/benchmark', benchmarkSummarySchema, {
     refetchInterval: 30 * MINUTE,
   })
+
+/**
+ * Contract 2: latest prediction per city for one horizon. `horizon` is part of
+ * the cache key, so switching horizon on the station page refetches instead of
+ * reusing another horizon's rows.
+ */
+export const useLatestPredictions = (horizon: number) =>
+  useApiQuery(
+    queryKeys.latestPredictions(horizon),
+    `/predictions/latest?horizon=${horizon}`,
+    latestPredictionsSchema,
+    { refetchInterval: 10 * MINUTE },
+  )
 
 /** Per-city data-quality meter; backend caches 300 s, so a 5 min staleTime fits. */
 export const useWeatherQuality = (days = 7) =>

@@ -12,7 +12,7 @@ from app.repositories.model_repo import get_model_repo
 from app.repositories.prediction_repo import get_prediction_repo
 from app.repositories.weather_repo import get_weather_repo
 from app.schemas.city import City, GeoResult
-from app.schemas.models import ModelInfo, ModelMetrics
+from app.schemas.models import ModelDiagnostics, ModelInfo, ModelMetrics, SliceMetric
 from app.schemas.predictions import Prediction
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
@@ -103,6 +103,20 @@ def model_infos(now: datetime) -> list[ModelInfo]:
         "test_start": "2026-09-19T00:00:00Z",
     }
     interval = {"level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1}
+    # Batch 4, Contract 3: the temp model carries the slice diagnostics; the
+    # rain model is a legacy doc without them (must stay ``None``).
+    diagnostics = ModelDiagnostics(
+        by_city=[
+            SliceMetric(label="Madrid", n=24, rmse=1.2, mae=1.0, bias=-0.1),
+            SliceMetric(label="Alicante", n=0),
+        ],
+        by_hour_of_day=[SliceMetric(label="0", n=10, rmse=1.3, mae=1.1, bias=0.0)],
+        by_rain_bucket=[
+            SliceMetric(label="dry", n=40, brier=0.12),
+            SliceMetric(label="heavy", n=0),
+        ],
+        drift_psi={"temperature": 0.08, "humidity": 0.31, "pressure": None},
+    )
     return [
         ModelInfo(
             name="temp_prediction_1h_GradientBoostedTrees",
@@ -123,6 +137,7 @@ def model_infos(now: datetime) -> list[ModelInfo]:
             split=split,
             interval=interval,
             commit="abc1234",
+            diagnostics=diagnostics,
         ),
         ModelInfo(
             name="rain_prediction_1h_RandomForest",
@@ -135,7 +150,28 @@ def model_infos(now: datetime) -> list[ModelInfo]:
             split=None,
             interval=None,
             commit=None,
+            diagnostics=None,
         ),
+    ]
+
+
+@pytest.fixture
+def multi_horizon_predictions(now: datetime) -> list[Prediction]:
+    """One city across horizons 1 and 3, with an older h1 row to group away."""
+
+    def row(horizon: int, age_hours: int, predicted: float) -> Prediction:
+        return Prediction(
+            city="Madrid",
+            source_timestamp=now - timedelta(hours=age_hours),
+            prediction_timestamp=now - timedelta(hours=age_hours - 1),
+            horizon_hours=horizon,
+            predicted_temperature=predicted,
+        )
+
+    return [
+        row(1, 2, 20.0),  # older h1 row: must lose to the fresh h1 row
+        row(1, 0, 21.5),
+        row(3, 0, 22.0),
     ]
 
 

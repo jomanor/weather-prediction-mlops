@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+from app.repositories.prediction_repo import get_prediction_repo
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.schemas.quality import CityQuality
 from app.schemas.weather import CurrentWeather
@@ -11,6 +12,7 @@ from tests.fakes import (
     FakeDatabase,
     FakeMongoCollection,
     FakeMongoDb,
+    FakePredictionRepository,
     FakeWeatherRepository,
 )
 
@@ -186,6 +188,58 @@ async def test_predictions_for_unknown_city_is_404(client):
     assert "Atlantis" in response.json()["detail"]
 
 
+async def test_predictions_latest_returns_every_horizon(client, app, multi_horizon_predictions):
+    app.dependency_overrides[get_prediction_repo] = lambda: FakePredictionRepository(
+        multi_horizon_predictions
+    )
+
+    response = await client.get("/api/predictions/latest")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Omitted horizon -> one row per (city, horizon_hours).
+    assert body["count"] == 2
+    assert [p["horizon_hours"] for p in body["predictions"]] == [1, 3]
+    # The older h1 row lost to the fresh one.
+    assert [p["predicted_temperature"] for p in body["predictions"]] == [21.5, 22.0]
+    assert body["generated_at"] == body["predictions"][0]["prediction_timestamp"]
+
+
+async def test_predictions_latest_filters_one_horizon(client, app, multi_horizon_predictions):
+    app.dependency_overrides[get_prediction_repo] = lambda: FakePredictionRepository(
+        multi_horizon_predictions
+    )
+
+    response = await client.get("/api/predictions/latest", params={"horizon": 1})
+
+    assert response.status_code == 200
+    body = response.json()
+    # Provided horizon -> one row per city.
+    assert body["count"] == 1
+    assert body["predictions"][0]["horizon_hours"] == 1
+    assert body["predictions"][0]["predicted_temperature"] == 21.5
+
+
+async def test_predictions_latest_rejects_out_of_range_horizon(client):
+    for horizon in (0, 49):
+        response = await client.get("/api/predictions/latest", params={"horizon": horizon})
+        assert response.status_code == 422, horizon
+
+
+async def test_predictions_for_city_filters_horizon(client, app, multi_horizon_predictions):
+    app.dependency_overrides[get_prediction_repo] = lambda: FakePredictionRepository(
+        multi_horizon_predictions
+    )
+
+    response = await client.get("/api/predictions/Madrid", params={"horizon": 3})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["horizon_hours"] == 3
+    assert body[0]["predicted_temperature"] == 22.0
+
+
 async def test_benchmark_for_city(client):
     response = await client.get("/api/benchmark/Madrid", params={"hours": 24})
 
@@ -264,12 +318,25 @@ async def test_models(client):
     }
     assert first["interval"] == {"level": 0.8, "lower_offset": -1.9, "upper_offset": 2.1}
     assert first["commit"] == "abc1234"
+    # Batch 4, Contract 3: the diagnostics block is surfaced additively.
+    diagnostics = first["diagnostics"]
+    assert diagnostics["by_city"] == [
+        {"label": "Madrid", "n": 24, "rmse": 1.2, "mae": 1.0, "bias": -0.1, "brier": None},
+        {"label": "Alicante", "n": 0, "rmse": None, "mae": None, "bias": None, "brier": None},
+    ]
+    assert diagnostics["by_hour_of_day"] == [
+        {"label": "0", "n": 10, "rmse": 1.3, "mae": 1.1, "bias": 0.0, "brier": None}
+    ]
+    assert diagnostics["by_rain_bucket"][0]["brier"] == 0.12
+    assert diagnostics["drift_psi"] == {"temperature": 0.08, "humidity": 0.31, "pressure": None}
     # fields the registry document does not carry stay null, never invented
     assert body["models"][1]["metrics"] is None
     assert body["models"][1]["stage"] is None
     assert body["models"][1]["split"] is None
     assert body["models"][1]["interval"] is None
     assert body["models"][1]["commit"] is None
+    # A legacy registry doc has no diagnostics; it must stay None, not {}.
+    assert body["models"][1]["diagnostics"] is None
 
 
 async def test_benchmark_without_aemet_key_still_returns_series(client, app):

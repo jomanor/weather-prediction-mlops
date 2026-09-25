@@ -1,12 +1,52 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { useEffect, useRef } from 'react'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 
 import { NAV_ITEMS } from '@/app/registry'
+import { CommandPalette } from '@/components/shell/CommandPalette'
+import { isEditableTarget, resolveSectionShortcut } from '@/components/shell/shortcuts'
 import { StationSearch } from '@/components/shell/StationSearch'
 import { ThemeToggle } from '@/components/shell/ThemeToggle'
 import { UnitToggle } from '@/components/shell/UnitToggle'
 import { cn } from '@/lib/cn'
 
+const CHORD_WINDOW_MS = 1500
+
+/**
+ * U6: `g` then a section key navigates. The chord disarms on timeout, ignores
+ * keystrokes in fields, and stays inert while the command palette dialog is open.
+ */
+function useSectionShortcuts() {
+  const navigate = useNavigate()
+  const armedAt = useRef<number | null>(null)
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (isEditableTarget(event.target)) return
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
+
+      if (event.key === 'g') {
+        armedAt.current = Date.now()
+        return
+      }
+      if (armedAt.current === null) return
+      const elapsed = Date.now() - armedAt.current
+      armedAt.current = null
+      if (elapsed > CHORD_WINDOW_MS) return
+
+      const shortcut = resolveSectionShortcut(event.key)
+      if (!shortcut) return
+      event.preventDefault()
+      navigate(shortcut.to)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [navigate])
+}
+
 export function AppShell() {
+  useSectionShortcuts()
+
   return (
     <div className="flex min-h-screen flex-col bg-bg">
       <header className="sticky top-0 z-40 border-b border-line bg-panel">
@@ -100,6 +140,8 @@ export function AppShell() {
           )
         })}
       </nav>
+
+      <CommandPalette />
     </div>
   )
 }

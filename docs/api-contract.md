@@ -69,10 +69,13 @@ routes. `completeness = observed_hours / (days * 24)` clamped to 1.0;
 observed rows with a null `temperature` (null when there are no rows);
 `age_hours = now - last_observed_at`.
 
-`status` grades completeness (≥ 0.95 / ≥ 0.80) and age (≤ 2 h / ≤ 6 h)
+`status` grades completeness (≥ 0.95 / ≥ 0.80) and age (≤ 12 h / ≤ 18 h)
 independently; the worst of the two wins and a missing last observation is
 `bad`. Exactly those inclusivity edges apply (`completeness == 0.95` and
-`age_hours == 2.0` are `ok`; `0.80`/`6.0` are `warn`).
+`age_hours == 12.0` are `ok`; `0.80`/`18.0` are `warn`). The age gates are
+calibrated to the ~6 h feature-rebuild cycle (~2x ok, ~3x warn — one missed
+rebuild); the target-drop that previously forced a healthy pipeline to land
+~6 h stale was fixed in Batch 4, so the gates are honest, not loosened.
 
 The response always carries one entry per canonical station (the 14 in
 `app/core/cities.py`), so a city whose feature rows stopped arriving is
@@ -101,15 +104,23 @@ reported `bad` with `observed_hours: 0` instead of disappearing. Duplicate
 
 ## Predictions (real Spark GBT output)
 
-### `GET /api/predictions/latest`
+### `GET /api/predictions/latest?horizon=`
+
+`horizon` is an optional integer 1..48. Omitted, the response carries one row
+per `(city, horizon_hours)` (cities × horizons) — the newest
+`prediction_timestamp` for each pair. Provided, it is filtered to that
+horizon, one row per city. `generated_at` is the max `prediction_timestamp`
+across the returned rows (null when empty).
 
 ```json
-{ "count": 14, "generated_at": "2026-09-23T14:00:00Z", "predictions": [Prediction, ...] }
+{ "count": 70, "generated_at": "2026-09-23T14:00:00Z", "predictions": [Prediction, ...] }
 ```
 
-### `GET /api/predictions/{city}?limit=48`
+### `GET /api/predictions/{city}?limit=48&horizon=`
 
-`Prediction[]` (newest first) or `404` when the city has no predictions.
+`Prediction[]` or `404` when the city has no predictions. `limit` is 1..500
+(default 48) and keeps the latest window; `horizon` is an optional 1..48
+filter. The response is chronological, oldest → newest.
 
 ## Benchmark: model vs AEMET vs observed
 

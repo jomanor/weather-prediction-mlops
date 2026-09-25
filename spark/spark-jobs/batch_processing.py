@@ -4,13 +4,13 @@ batch_processing.py
 Spark feature-engineering job.
 
 Reads from raw_weather (both live consumer records and historical backfill),
-builds atmospheric + time-series features, and writes the result
-*incrementally* (append mode) to weather_features.
+builds atmospheric + time-series features, and overwrites weather_features
+with a full rebuilt snapshot (mode="overwrite").
 
 Key changes vs the previous version
 -------------------------------------
 - Source collection: raw_weather  (was weather_data)
-- Save mode: append               (was overwrite — data was lost on every run)
+- Save mode: overwrite            (full rebuilt snapshot each run)
 - Atmospheric pressure-level features extracted from upper-air payload
 - Specific humidity computed from relative humidity, temperature, and pressure
 - 6-hour rolling precipitation sum
@@ -270,14 +270,19 @@ def create_rate_of_change_features(df):
 # ---------------------------------------------------------------------------
 
 
-def create_target_variable(df, horizon=1):
+def create_target_variable(df, horizons):
+    """Write ``target_temp_{h}h`` + ``target_will_rain_{h}h`` for every ``h`` in
+    *horizons* in a single pass (one lead per horizon, per city)."""
     window_spec = Window.partitionBy("city").orderBy("timestamp")
 
-    df = df.withColumn(f"target_temp_{horizon}h", F.lead("temperature", horizon).over(window_spec))
-    df = df.withColumn(
-        f"target_will_rain_{horizon}h",
-        F.when(F.lead("rain", horizon).over(window_spec) > 0, 1).otherwise(0),
-    )
+    for horizon in horizons:
+        df = df.withColumn(
+            f"target_temp_{horizon}h", F.lead("temperature", horizon).over(window_spec)
+        )
+        df = df.withColumn(
+            f"target_will_rain_{horizon}h",
+            F.when(F.lead("rain", horizon).over(window_spec) > 0, 1).otherwise(0),
+        )
 
     return df
 
@@ -286,30 +291,35 @@ def create_target_variable(df, horizon=1):
 # Incremental save
 # ---------------------------------------------------------------------------
 
+#: Observation inputs only. The ``save_features_to_mongodb`` dropna subset is
+#: exactly these columns — targets must **never** be in the subset, because a
+#: lead target is null on the newest observation row and dropping it would
+#: discard the freshest data on every rebuild (the ~6 h staleness bug).
+OBSERVATION_INPUT_COLUMNS = ["temperature", "humidity", "pressure", "wind_speed"]
 
-def save_features_to_mongodb(df, collection_name="weather_features", horizon=1):
+
+def save_features_to_mongodb(df, horizons, collection_name="weather_features"):
     """
-    Save the feature DataFrame to MongoDB in *append* mode so that previously
-    processed rows are not overwritten.
+    Save the feature DataFrame to MongoDB in *overwrite* mode so that previously
+    processed rows are not duplicated.
 
     The job is designed to be run periodically (every 6 hours by the scheduler).
     Each run recomputes the whole history from raw_weather and replaces the
     collection. Appending instead left one complete extra copy of the history
     behind per run -- 2689 + 18172 + 18172 documents after two of them -- which
     inflated storage and taught the model from the same hour several times over.
+
+    The ``dropna`` subset is the *observation inputs only* (``temperature``,
+    ``humidity``, ``pressure``, ``wind_speed``). Targets must **not** be in the
+    subset: the old ``target_temp_1h`` drop discarded the newest observation row
+    (whose lead target is always null), so every healthy rebuild landed ~6 h
+    stale. *horizons* is accepted for interface clarity only — it no longer
+    gates the row-keeping decision.
     """
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
     print(f"BEFORE dropna: {df.count()} rows")
-    df_clean = df.dropna(
-        subset=[
-            "temperature",
-            "humidity",
-            "pressure",
-            "wind_speed",
-            f"target_temp_{horizon}h",
-        ]
-    )
+    df_clean = df.dropna(subset=OBSERVATION_INPUT_COLUMNS)
     df_clean = df_clean.dropDuplicates(["city", "timestamp"])
     print(f"AFTER dropna & dropDuplicates: {df_clean.count()} rows")
 
@@ -337,9 +347,9 @@ def main():
         df = create_rolling_features(df, FEATURES_CONFIG["window_sizes"])
         df = create_precipitation_rolling_sum(df)
         df = create_rate_of_change_features(df)
-        df = create_target_variable(df, FEATURES_CONFIG["target_horizon"])
+        df = create_target_variable(df, FEATURES_CONFIG["target_horizons"])
 
-        horizon = FEATURES_CONFIG["target_horizon"]
+        horizons = FEATURES_CONFIG["target_horizons"]
 
         df.select(
             "city",
@@ -350,10 +360,10 @@ def main():
             "temp_change_1h",
             "temperature_mean_6h",
             "precip_sum_6h",
-            f"target_temp_{horizon}h",
+            f"target_temp_{horizons[0]}h",
         ).show(10, truncate=False)
 
-        df_final = save_features_to_mongodb(df, horizon=horizon)
+        df_final = save_features_to_mongodb(df, horizons)
 
         df_final.select(
             F.mean("temperature").alias("avg_temp"),

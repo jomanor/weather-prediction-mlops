@@ -110,6 +110,58 @@ export const benchmarkSummarySchema = z.object({
 })
 export type BenchmarkSummary = z.infer<typeof benchmarkSummarySchema>
 
+/**
+ * Contract 3: one row of a slice diagnostic. Temperature slices fill
+ * `rmse`/`mae`/`bias`; rain slices fill `brier`. The unused keys arrive as
+ * `null`, and a slice with no rows is emitted with `n: 0` and null metrics.
+ */
+export const sliceMetricSchema = z.object({
+  label: z.string(),
+  n: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? 0),
+  rmse: nullableNumber,
+  mae: nullableNumber,
+  bias: nullableNumber,
+  brier: nullableNumber,
+})
+export type SliceMetric = z.infer<typeof sliceMetricSchema>
+
+/**
+ * Contract 3: temporal-test diagnostics. Missing/legacy registry rows send
+ * `null` (or omit the key); every bucket then defaults to empty rather than
+ * inventing a value. `drift_psi` is per numeric feature and nullable.
+ */
+export const modelDiagnosticsSchema = z
+  .object({
+    by_city: z
+      .array(sliceMetricSchema)
+      .nullish()
+      .transform((value) => value ?? []),
+    by_hour_of_day: z
+      .array(sliceMetricSchema)
+      .nullish()
+      .transform((value) => value ?? []),
+    by_rain_bucket: z
+      .array(sliceMetricSchema)
+      .nullish()
+      .transform((value) => value ?? []),
+    drift_psi: z
+      .record(z.string(), nullableNumber)
+      .nullish()
+      .transform((value) => value ?? {}),
+  })
+  .partial()
+  .nullish()
+  .transform((value) => ({
+    by_city: value?.by_city ?? [],
+    by_hour_of_day: value?.by_hour_of_day ?? [],
+    by_rain_bucket: value?.by_rain_bucket ?? [],
+    drift_psi: value?.drift_psi ?? {},
+  }))
+export type ModelDiagnostics = z.infer<typeof modelDiagnosticsSchema>
+
 export const registryModelSchema = z.object({
   name: z.string(),
   version: z.string(),
@@ -157,6 +209,8 @@ export const registryModelSchema = z.object({
     .partial()
     .nullish()
     .transform((value) => value ?? null),
+  /* Contract 3: additive slice diagnostics + train→test drift PSI. */
+  diagnostics: modelDiagnosticsSchema,
   commit: nullableString,
   stage: z
     .string()

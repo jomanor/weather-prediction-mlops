@@ -298,6 +298,18 @@ class TestBuildOutputDf:
         assert row.interval_level == 0.8
         assert row.rain_model_name == "rain_prediction_1h_GradientBoostedTrees"
 
+    def test_build_output_df_horizon_parameter(self, spark, pred_df):
+        out = inference.build_output_df(
+            pred_df,
+            temp_meta={"model_name": "temp_prediction_6h_GBT", "version": "v1"},
+            rain_meta={"model_name": "rain_prediction_6h_GBT", "version": "v1"},
+            horizon=6,
+        )
+        row = out.first()
+        assert row.horizon_hours == 6
+        assert row._id.endswith("_6h")
+        assert row.temp_model_name == "temp_prediction_6h_GBT"
+
 
 class _FakeModel:
     """A pipeline stand-in whose transform adds a ``prediction`` column."""
@@ -335,15 +347,151 @@ class TestRunInferenceInterval:
         rain_meta = {"model_name": "r", "version": "v1"}
 
         with caplog.at_level(logging.WARNING, logger="inference"):
-            with patch.object(DataFrameWriter, "save"):
-                inference.run_inference(
-                    spark,
-                    _FakeModel(1.5),
-                    _FakeModel(0.0),
-                    features,
-                    "mongodb://fake",
-                    temp_meta,
-                    rain_meta,
-                )
+            out = inference.run_inference(
+                spark,
+                _FakeModel(1.5),
+                _FakeModel(0.0),
+                features,
+                "mongodb://fake",
+                temp_meta,
+                rain_meta,
+                horizon=1,
+            )
 
         assert any("no 'interval' block" in r.message for r in caplog.records)
+        row = out.first()
+        assert row.temp_lower is None
+        assert row.temp_upper is None
+        assert row.interval_level is None
+
+    def test_run_inference_horizon_sets_id_and_horizon_hours(self, spark):
+        features = spark.createDataFrame(
+            [
+                Row(
+                    city="Madrid",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=20.0,
+                )
+            ],
+            schema=StructType(
+                [
+                    StructField("city", StringType(), False),
+                    StructField("timestamp", TimestampType(), False),
+                    StructField("temperature", DoubleType(), True),
+                ]
+            ),
+        )
+        out = inference.run_inference(
+            spark,
+            _FakeModel(1.5),
+            _FakeModel(0.0),
+            features,
+            "mongodb://fake",
+            {"model_name": "t", "version": "v1"},
+            {"model_name": "r", "version": "v1"},
+            horizon=6,
+        )
+        row = out.first()
+        assert row.horizon_hours == 6
+        assert row._id.endswith("_6h")
+
+    def test_write_predictions_calls_save(self, spark):
+        out = inference.build_output_df(
+            spark.createDataFrame(
+                [
+                    Row(
+                        city="Madrid",
+                        timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                        temperature=20.0,
+                        predicted_temperature=21.5,
+                        predicted_rain=0.4,
+                    )
+                ],
+                schema=StructType(
+                    [
+                        StructField("city", StringType(), False),
+                        StructField("timestamp", TimestampType(), False),
+                        StructField("temperature", DoubleType(), True),
+                        StructField("predicted_temperature", DoubleType(), True),
+                        StructField("predicted_rain", DoubleType(), True),
+                    ]
+                ),
+            ),
+            {"model_name": "t", "version": "v1"},
+            {"model_name": "r", "version": "v1"},
+            horizon=1,
+        )
+        with patch.object(DataFrameWriter, "save"):
+            inference.write_predictions(out, "mongodb://fake")
+
+
+def _latest_features_df(spark):
+    """Two cities' latest feature rows (the shape ``load_latest_features`` returns)."""
+    schema = StructType(
+        [
+            StructField("city", StringType(), False),
+            StructField("timestamp", TimestampType(), False),
+            StructField("temperature", DoubleType(), True),
+        ]
+    )
+    return spark.createDataFrame(
+        [
+            Row(city="Madrid", timestamp=datetime(2026, 6, 29, 12, 0, 0), temperature=20.0),
+            Row(city="Valencia", timestamp=datetime(2026, 6, 29, 12, 0, 0), temperature=25.0),
+        ],
+        schema=schema,
+    )
+
+
+class TestMainMultiHorizon:
+    """``main()`` loops the configured horizons, unions them into one write, and
+    skips a horizon with no model without dropping the others (Contract 1)."""
+
+    def _run_main(self, monkeypatch, spark, present_horizons):
+        monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+        monkeypatch.setattr(inference, "FEATURES_CONFIG", {"target_horizons": [1, 3]})
+        monkeypatch.setattr(inference, "create_spark_session", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(inference, "MongoClient", lambda url: MagicMock())
+        monkeypatch.setattr(inference, "GridFS", lambda db: MagicMock())
+        features_df = _latest_features_df(spark)
+        monkeypatch.setattr(inference, "load_latest_features", lambda s, m: features_df)
+
+        def fake_load(_db, _fs, prefix, _spark):
+            horizon = int(prefix.split("_")[-1].removesuffix("h"))
+            if horizon not in present_horizons:
+                return None, None
+            kind = "temp" if prefix.startswith("temp") else "rain"
+            meta = {"model_name": f"{kind}_prediction_{horizon}h_GBT", "version": f"v{horizon}"}
+            return _FakeModel(1.0 if kind == "temp" else 0.0), meta
+
+        monkeypatch.setattr(inference, "load_latest_model", fake_load)
+        captured: dict = {}
+        monkeypatch.setattr(
+            inference, "write_predictions", lambda output, url: captured.update(output=output)
+        )
+
+        inference.main()
+        return captured
+
+    def test_unions_all_horizons_with_isolated_rows(self, spark, monkeypatch):
+        captured = self._run_main(monkeypatch, spark, present_horizons={1, 3})
+
+        output = captured["output"]
+        assert output.count() == 4  # 2 cities x 2 horizons, in one write
+        rows = output.orderBy("city", "horizon_hours").collect()
+        assert sorted({row.horizon_hours for row in rows}) == [1, 3]
+        # Every row carries its own horizon: id suffix and model lineage.
+        for row in rows:
+            assert row._id.startswith(f"{row.city}_")
+            assert row._id.endswith(f"_{row.horizon_hours}h")
+            assert row.temp_model_name == f"temp_prediction_{row.horizon_hours}h_GBT"
+            assert row.rain_model_name == f"rain_prediction_{row.horizon_hours}h_GBT"
+            assert row.interval_level is None  # no interval in the fake meta
+        assert len({row._id for row in rows}) == 4
+
+    def test_missing_model_horizon_is_skipped_not_fatal(self, spark, monkeypatch):
+        captured = self._run_main(monkeypatch, spark, present_horizons={1})
+
+        output = captured["output"]
+        assert output.count() == 2  # horizon 3 skipped, horizon 1 still written
+        assert {row.horizon_hours for row in output.collect()} == {1}
