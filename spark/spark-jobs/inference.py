@@ -5,7 +5,7 @@ Spark batch inference job.
 
 Loads the most recent temperature-prediction and rain-prediction models
 from GridFS (as saved by ml_training.py), runs predictions on the latest
-feature row per city, and appends the results to the weather_predictions
+feature row per city, and upserts the results into the weather_predictions
 collection in MongoDB.
 
 Design decisions
@@ -15,9 +15,10 @@ Design decisions
   ``timestamp`` descending.
 - We load *both* models (temp + rain) so we can store both predictions in
   a single document per city per inference run.
-- The job is idempotent at the city level: we upsert on (city, source_timestamp)
-  rather than blindly appending, so re-runs after a failure don't create
-  duplicates.
+- The job is idempotent: every prediction row carries a stable ``_id`` derived
+  from (city, source_timestamp, horizon), and the write uses the connector's
+  replace (upsert) operation, so re-runs after a failure replace the same
+  document instead of appending duplicates.
 - Runs without a Spark master when SPARK_MASTER env-var is not set (useful
   for local testing with master="local[*]").
 """
@@ -214,6 +215,14 @@ def run_inference(
     horizon = FEATURES_CONFIG["target_horizon"]
 
     output = pred_df.select(
+        # Stable string _id so hourly re-runs replace the same document instead
+        # of appending a fresh one (and growing the collection without bound).
+        F.concat_ws(
+            "_",
+            F.col("city"),
+            F.unix_timestamp("timestamp").cast("string"),
+            F.lit(f"{horizon}h"),
+        ).alias("_id"),
         F.col("city"),
         F.col("timestamp").alias("source_timestamp"),
         F.current_timestamp().alias("prediction_timestamp"),
@@ -233,7 +242,18 @@ def run_inference(
 
     output.write.format("mongodb").option("connection.uri", mongo_url).option(
         "database", "weather_db"
-    ).option("collection", "weather_predictions").mode("append").save()
+    ).option("collection", "weather_predictions").option(
+        # Upsert on _id. The 10.x connector calls this operationType/upsertDocument
+        # (both already default to "replace"/true); `replaceDocument` is the old
+        # 3.x option name. `mode("append")` here only means "don't drop the
+        # collection" — operationType=replace makes each _id replace (upsert) its row.
+        "operationType",
+        "replace",
+    ).option(
+        "upsertDocument", "true"
+    ).mode(
+        "append"
+    ).save()
 
     logger.info("Predictions saved successfully.")
     output.show(truncate=False)

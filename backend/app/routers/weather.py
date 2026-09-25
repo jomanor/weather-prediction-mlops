@@ -49,7 +49,9 @@ async def weather_history(
     )
     if not points:
         raise HTTPException(status_code=404, detail=f"No historical data found for city '{city}'")
-    return HistoryResponse(city=city, hours=hours, count=len(points), points=points)
+    # Query newest-first so ``limit`` keeps the most recent window, then flip to
+    # chronological order: charts read left-to-right from oldest to newest.
+    return HistoryResponse(city=city, hours=hours, count=len(points), points=list(reversed(points)))
 
 
 @router.get("/stats/{city}", response_model=WeatherStats)
