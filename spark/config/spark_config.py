@@ -4,7 +4,6 @@ from pyspark.sql import SparkSession
 
 
 def create_spark_session(app_name="WeatherMLOps"):
-
     mongo_uri = os.getenv("MONGO_URI") or os.getenv(
         "MONGO_URL",
         "mongodb://admin:admin123@mongodb:27017/weather_db?authSource=admin",
@@ -35,25 +34,29 @@ FEATURES_CONFIG = {
 ML_CONFIG = {
     "data_split": {"train": 0.6, "validation": 0.2, "test": 0.2, "seed": 42},
     "cross_validation": {"num_folds": 3, "seed": 42},
+    # Grids are deliberately small: a full sweep across three algorithms with
+    # 3-fold CV did not finish inside the 30-min GitHub runner (the nightly
+    # train step was cancelled at the limit). These combinations keep the
+    # candidate algorithms while cutting fits from ~200 to ~55.
     "gradient_boosted_trees": {
-        "maxDepth": [5, 7, 10],
-        "maxIter": [50, 100],
-        "stepSize": [0.1, 0.05],
+        "maxDepth": [5, 7],
+        "maxIter": [50],
+        "stepSize": [0.1],
     },
     "random_forest_regressor": {
-        "numTrees": [50, 100, 150],
-        "maxDepth": [5, 10, 15],
-        "minInstancesPerNode": [1, 5],
+        "numTrees": [50, 100],
+        "maxDepth": [5, 10],
+        "minInstancesPerNode": [1],
     },
     "linear_regression": {"elasticNetParam": [0.0, 0.5, 1.0], "regParam": [0.01, 0.1]},
     "random_forest_classifier": {
-        "numTrees": [50, 100, 150],
-        "maxDepth": [5, 10, 15],
-        "minInstancesPerNode": [1, 5],
+        "numTrees": [50, 100],
+        "maxDepth": [5, 10],
+        "minInstancesPerNode": [1],
     },
     "gradient_boosted_trees_classifier": {
-        "maxDepth": [5, 7, 10],
-        "maxIter": [50, 100],
-        "stepSize": [0.1, 0.05],
+        "maxDepth": [5, 7],
+        "maxIter": [50],
+        "stepSize": [0.1],
     },
 }

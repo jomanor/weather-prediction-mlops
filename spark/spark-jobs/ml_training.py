@@ -476,40 +476,6 @@ def save_model(model, model_name, db_name="weather_db", metadata_collection="mod
             client.close()
 
 
-def create_prediction_batch(spark, model, collection="weather_predictions"):
-    mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
-
-    df = (
-        spark.read.format("mongodb")
-        .option("connection.uri", mongo_url)
-        .option("database", "weather_db")
-        .option("collection", "weather_features")
-        .load()
-    )
-
-    latest_df = (
-        df.groupBy("city")
-        .agg(F.max("timestamp").alias("timestamp"))
-        .join(df, ["city", "timestamp"], "inner")
-    )
-
-    predictions = model.transform(latest_df)
-
-    predictions_to_save = predictions.select(
-        "city",
-        "timestamp",
-        F.current_timestamp().alias("prediction_timestamp"),
-        "prediction",
-        "temperature",
-    )
-
-    predictions_to_save.write.format("mongodb").option("connection.uri", mongo_url).option(
-        "database", "weather_db"
-    ).option("collection", collection).mode("append").save()
-
-    predictions_to_save.show()
-
-
 def main():
     spark = create_spark_session("WeatherMLTraining")
 
@@ -553,8 +519,10 @@ def main():
             horizon=horizon,
         )
 
-        # TODO: Add also the rain model.
-        create_prediction_batch(spark, temp_model)
+        # Scoring is inference.py's job: it writes the ``source_timestamp`` /
+        # ``predicted_temperature`` schema the API reads. ml_training used to
+        # append a second, incompatible document shape here, which the backend
+        # silently ignored.
 
     except Exception as e:
         print(f"Error during ML training: {e}")
