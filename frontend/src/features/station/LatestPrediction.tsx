@@ -6,11 +6,13 @@ import { Badge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/Feedback'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Readout } from '@/components/ui/Readout'
-import { formatDateTime, formatNumber, formatTemperature, isNum } from '@/lib/format'
+import { formatDateTime, formatNumber, formatPercent, formatTemperature, isNum } from '@/lib/format'
 
 export function LatestPrediction({ predictions }: { predictions: Prediction[] }) {
   const { units } = usePreferences()
   const latest = predictions[0]
+  const hasInterval =
+    latest !== undefined && isNum(latest.temp_lower) && isNum(latest.temp_upper)
 
   return (
     <Panel flush>
@@ -72,6 +74,23 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
               <dt className="text-fg-3">Versión</dt>
               <dd className="nums text-fg-2">{latest.temp_model_version ?? '—'}</dd>
             </div>
+            {hasInterval ? (
+              <div className="flex justify-between gap-3">
+                <dt className="text-fg-3">Intervalo</dt>
+                <dd className="nums text-fg-2">
+                  {formatTemperature(latest.temp_lower, units, 1)} –{' '}
+                  {formatTemperature(latest.temp_upper, units, 1)}
+                </dd>
+              </div>
+            ) : null}
+            {isNum(latest.interval_level) ? (
+              <div className="flex justify-between gap-3">
+                <dt className="text-fg-3">Nivel</dt>
+                <dd className="nums text-fg-2">
+                  {formatPercent(latest.interval_level * 100, 0)}
+                </dd>
+              </div>
+            ) : null}
           </dl>
 
           {predictions.length > 1 ? (

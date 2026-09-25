@@ -3,13 +3,14 @@ import { lazy, Suspense, useMemo } from 'react'
 
 import { useBenchmarkSummary, useCities } from '@/api/queries'
 import type { Prediction } from '@/api/schemas'
+import { DataQualityMeter } from '@/components/DataQualityMeter'
 import { Button } from '@/components/ui/Button'
 import { ErrorState, LoadingBlock } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelBody, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { CityManager } from '@/features/overview/CityManager'
-import { useLatestPredictions, useStations } from '@/features/overview/queries'
+import { useLatestPredictions, useMapStations, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
 import { useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
@@ -35,6 +36,7 @@ export function OverviewPage() {
 
   const citiesQuery = useCities()
   const stationsQuery = useStations()
+  const mapStationsQuery = useMapStations()
   const predictionsQuery = useLatestPredictions()
   const summaryQuery = useBenchmarkSummary()
 
@@ -130,7 +132,7 @@ export function OverviewPage() {
         <Panel flush className="overflow-hidden">
           <PanelHeader
             title="Mapa de estaciones"
-            subtitle="Temperatura observada, relieve y radar de precipitación"
+            subtitle="Observación agrupada por proximidad, icono por tiempo y flecha de viento"
             actions={
               <>
                 {refreshedAt ? (
@@ -148,12 +150,18 @@ export function OverviewPage() {
             }
           />
           <div className="h-[400px] sm:h-[480px]">
-            {stationsQuery.isLoading ? (
+            {mapStationsQuery.isLoading ? (
               <LoadingBlock label="Cargando estaciones…" />
+            ) : mapStationsQuery.isError ? (
+              <ErrorState
+                title="No se pudo cargar el mapa"
+                description={mapStationsQuery.error.message}
+                action={<Button onClick={() => mapStationsQuery.refetch()}>Reintentar</Button>}
+              />
             ) : (
               <Suspense fallback={<LoadingBlock label="Cargando mapa…" />}>
                 <StationMap
-                  stations={stations}
+                  collection={mapStationsQuery.data ?? null}
                   selectedCity={selectedCity}
                   onSelect={selectCity}
                 />
@@ -166,6 +174,8 @@ export function OverviewPage() {
             </PanelBody>
           ) : null}
         </Panel>
+
+        <DataQualityMeter />
 
         <Panel flush className="overflow-hidden">
           <PanelHeader
