@@ -12,7 +12,8 @@ import {
 import type { SeriesPoint } from '@/api/schemas'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
-import { convertTemperature, formatDateTime, formatNumber, isNum } from '@/lib/format'
+import { useChartSync } from '@/hooks/useChartSync'
+import { convertTemperature, formatDateTimeMs, formatNumber, isNum } from '@/lib/format'
 import type { ChartPalette } from '@/lib/chart-theme'
 
 interface BenchmarkChartProps {
@@ -24,14 +25,17 @@ interface BenchmarkChartProps {
 /** Observed vs Spark GBT vs AEMET, on one temperature axis. */
 export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChartProps) {
   const { units } = usePreferences()
+  const { domain } = useChartSync()
 
-  const { data, domain } = useMemo(() => {
-    const rows = points.map((point) => ({
-      t: formatDateTime(point.timestamp),
-      observed: isNum(point.observed) ? convertTemperature(point.observed, units) : null,
-      model: isNum(point.model) ? convertTemperature(point.model, units) : null,
-      aemet: isNum(point.aemet) ? convertTemperature(point.aemet, units) : null,
-    }))
+  const { data, domain: valueDomain } = useMemo(() => {
+    const rows = points
+      .map((point) => ({
+        ts: new Date(point.timestamp).getTime(),
+        observed: isNum(point.observed) ? convertTemperature(point.observed, units) : null,
+        model: isNum(point.model) ? convertTemperature(point.model, units) : null,
+        aemet: isNum(point.aemet) ? convertTemperature(point.aemet, units) : null,
+      }))
+      .filter((row) => Number.isFinite(row.ts))
 
     const values = rows.flatMap((row) =>
       [row.observed, row.model, row.aemet].filter((value): value is number => value !== null),
@@ -44,6 +48,8 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
     return { data: rows, domain: [Math.floor(min - pad), Math.ceil(max + pad)] as [number, number] }
   }, [points, units])
 
+  const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
+
   const axisProps = {
     stroke: palette.axis,
     tick: { fill: palette.textMuted, fontSize: 10, fontFamily: 'JetBrains Mono Variable, monospace' },
@@ -54,9 +60,17 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
         <CartesianGrid stroke={palette.grid} strokeDasharray="2 4" vertical={false} />
-        <XAxis dataKey="t" minTickGap={40} {...axisProps} />
+        <XAxis
+          dataKey="ts"
+          type="number"
+          scale="time"
+          domain={xDomain}
+          minTickGap={40}
+          tickFormatter={(value: number) => formatDateTimeMs(value)}
+          {...axisProps}
+        />
         <YAxis
-          domain={domain}
+          domain={valueDomain}
           width={44}
           tickFormatter={(value: number) => `${formatNumber(value, 0)}°`}
           {...axisProps}
@@ -64,6 +78,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
         <Tooltip
           content={
             <ChartTooltip
+              title={(label) => formatDateTimeMs(Number(label))}
               format={(entry) => (entry.value === null ? '—' : `${formatNumber(entry.value as number)}°`)}
             />
           }

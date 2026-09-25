@@ -1,11 +1,11 @@
 import { Boxes, RefreshCw } from 'lucide-react'
 
-import { useModels } from '@/api/queries'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
+import { useModels } from '@/features/models/queries'
 import { cn } from '@/lib/cn'
 import { formatDateTime, formatNumber } from '@/lib/format'
 

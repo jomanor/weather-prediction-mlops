@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 
-import { NAV_ITEMS } from '@/app/nav'
+import { NAV_ITEMS } from '@/app/registry'
 import { StationSearch } from '@/components/shell/StationSearch'
 import { ThemeToggle } from '@/components/shell/ThemeToggle'
 import { UnitToggle } from '@/components/shell/UnitToggle'
@@ -63,28 +63,42 @@ export function AppShell() {
 
       <nav
         aria-label="Secciones"
-        className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t border-line bg-panel md:hidden"
+        className="fixed inset-x-0 bottom-0 z-40 grid border-t border-line bg-panel md:hidden"
+        style={{ gridTemplateColumns: `repeat(${NAV_ITEMS.length}, minmax(0, 1fr))` }}
       >
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.to === '/'}
-            className={({ isActive }) =>
-              cn(
-                'flex flex-col items-center gap-0.5 py-2 text-[10px]',
-                isActive ? 'text-fg' : 'text-fg-3',
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <span className={cn('h-0.5 w-4 rounded-full', isActive ? 'bg-fg' : 'bg-transparent')} />
-                {item.label}
-              </>
-            )}
-          </NavLink>
-        ))}
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) =>
+                cn(
+                  'flex flex-col items-center gap-1 py-2 text-[10px]',
+                  isActive ? 'text-fg' : 'text-fg-3',
+                )
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  {Icon ? (
+                    <Icon
+                      aria-hidden
+                      className={cn('h-3.5 w-3.5', isActive ? 'text-fg' : 'text-fg-3')}
+                    />
+                  ) : (
+                    <span
+                      aria-hidden
+                      className={cn('h-0.5 w-4 rounded-full', isActive ? 'bg-fg' : 'bg-transparent')}
+                    />
+                  )}
+                  {item.label}
+                </>
+              )}
+            </NavLink>
+          )
+        })}
       </nav>
     </div>
   )
