@@ -113,18 +113,20 @@ class WeatherRepository:
         # Sort by (city, timestamp) so the ``{city: 1, timestamp: -1}`` index
         # feeds the group directly. Sorting on ``timestamp`` alone is a blocking
         # sort across the whole collection, which exceeds the 32 MB in-memory
-        # limit on Atlas once the backfill fills it in.
+        # limit on Atlas once the backfill fills it in. ``allowDiskUse`` keeps
+        # the query from failing with code 292 even when the planner cannot use
+        # an index (e.g. an index that has not been built yet).
         pipeline = [
             {"$sort": {"city": 1, "timestamp": -1}},
             {"$group": {"_id": "$city", "latest": {"$first": "$$ROOT"}}},
             {"$replaceRoot": {"newRoot": "$latest"}},
             {"$sort": {"city": 1}},
         ]
-        docs = [doc async for doc in self._current.aggregate(pipeline)]
+        docs = [doc async for doc in self._current.aggregate(pipeline, allowDiskUse=True)]
         if docs:
             return _map_all(docs, _from_weather_data)
 
-        docs = [doc async for doc in self._raw.aggregate(pipeline)]
+        docs = [doc async for doc in self._raw.aggregate(pipeline, allowDiskUse=True)]
         return _map_all(docs, _from_raw_weather)
 
     async def find_range(
