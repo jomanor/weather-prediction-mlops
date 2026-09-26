@@ -7,6 +7,8 @@ from app.repositories.weather_repo import (
     _CURRENT_IDENTITY,
     _RAW_IDENTITY,
     MS_TO_KMH,
+    QUALITY_OK_AGE_HOURS,
+    QUALITY_WARN_AGE_HOURS,
     WeatherRepository,
     _downsample_by_step,
     _from_raw_weather,
@@ -384,14 +386,21 @@ async def test_quality_report_completeness_is_clamped_to_one():
 def test_quality_status_worst_metric_wins():
     assert _quality_status(0.99, 1.0) == "ok"
     assert _quality_status(0.90, 1.0) == "warn"  # completeness-only downgrade
-    assert _quality_status(0.99, 5.0) == "warn"  # age-only downgrade
+    assert _quality_status(0.99, 13.0) == "warn"  # age-only downgrade
     assert _quality_status(0.50, 1.0) == "bad"
     assert _quality_status(0.99, None) == "bad"  # never observed
 
 
+def test_quality_age_thresholds_match_the_rebuild_cycle():
+    # Batch 4, Contract 5: ~2x / ~3x the ~6 h feature-rebuild cycle. The
+    # completeness gates are unchanged (the 0.98 completeness comes from the
+    # one-shot backfill, so they must keep flagging a broken cadence).
+    assert (QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS) == (12.0, 18.0)
+
+
 def test_quality_status_grades_at_exact_thresholds():
-    assert _quality_status(0.95, 2.0) == "ok"
-    assert _quality_status(0.80, 6.0) == "warn"
-    assert _quality_status(0.7999, 2.0) == "bad"
-    assert _quality_status(0.95, 2.0001) == "warn"
+    assert _quality_status(0.95, 12.0) == "ok"
+    assert _quality_status(0.80, 18.0) == "warn"
+    assert _quality_status(0.7999, 12.0) == "bad"
+    assert _quality_status(0.95, 12.0001) == "warn"
     assert _quality_status(0.95, None) == "bad"  # missing last observation

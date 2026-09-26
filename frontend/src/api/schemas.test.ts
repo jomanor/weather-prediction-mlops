@@ -296,3 +296,69 @@ describe('registry honest metrics (Contract 3)', () => {
     expect(parsed.metrics.skill_score).toBeUndefined()
   })
 })
+
+describe('registry diagnostics (Contract 3, WS-D1)', () => {
+  it('parses the frozen slice + drift shapes', () => {
+    const parsed = registryModelSchema.parse({
+      name: 'temp_prediction_1h_GradientBoostedTrees',
+      version: '20260925_020000',
+      target: 'temperature',
+      horizon_hours: 1,
+      diagnostics: {
+        by_city: [{ label: 'Madrid', n: 24, rmse: 1.2, mae: 1.0, bias: -0.1, brier: null }],
+        by_hour_of_day: [{ label: '0', n: 10, rmse: 1.3, mae: 1.1, bias: 0, brier: null }],
+        by_rain_bucket: [
+          { label: 'dry', n: 40, rmse: null, mae: null, bias: null, brier: 0.08 },
+          { label: 'heavy', n: 0, rmse: null, mae: null, bias: null, brier: null },
+        ],
+        drift_psi: { temperature: 0.08, humidity: 0.31, pressure: null },
+      },
+    })
+    expect(parsed.diagnostics.by_city[0].label).toBe('Madrid')
+    expect(parsed.diagnostics.by_rain_bucket[1].n).toBe(0)
+    expect(parsed.diagnostics.drift_psi.humidity).toBe(0.31)
+    expect(parsed.diagnostics.drift_psi.pressure).toBeNull()
+  })
+
+  it('tolerates a legacy row with diagnostics absent or explicitly null', () => {
+    const base = {
+      name: 'temp_prediction_1h_GradientBoostedTrees',
+      version: '20260923_020000',
+      target: 'temperature',
+      horizon_hours: 1,
+    }
+    for (const diagnostics of [undefined, null]) {
+      const parsed = registryModelSchema.parse({ ...base, diagnostics })
+      expect(parsed.diagnostics).toEqual({
+        by_city: [],
+        by_hour_of_day: [],
+        by_rain_bucket: [],
+        drift_psi: {},
+      })
+    }
+  })
+
+  it('defaults missing buckets, slice counts and nullable metrics', () => {
+    const parsed = registryModelSchema.parse({
+      name: 'rain_prediction_6h_GradientBoostedTrees',
+      version: '20260925_020000',
+      target: 'rain',
+      horizon_hours: 6,
+      diagnostics: {
+        drift_psi: { temperature: 0.12 },
+        by_city: [{ label: 'Vigo' }],
+      },
+    })
+    expect(parsed.diagnostics.by_hour_of_day).toEqual([])
+    expect(parsed.diagnostics.by_rain_bucket).toEqual([])
+    expect(parsed.diagnostics.by_city[0]).toEqual({
+      label: 'Vigo',
+      n: 0,
+      rmse: null,
+      mae: null,
+      bias: null,
+      brier: null,
+    })
+    expect(parsed.diagnostics.drift_psi).toEqual({ temperature: 0.12 })
+  })
+})

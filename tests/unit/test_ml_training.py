@@ -12,15 +12,17 @@ with a local master. No MongoDB, no MLflow, no cluster.
 import importlib.util
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, mock_open, patch
 
 import numpy as np
 import pytest
+from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DoubleType,
+    IntegerType,
     StringType,
     StructField,
     StructType,
@@ -301,6 +303,261 @@ class TestIntervalOffsets:
         assert result["coverage"] == pytest.approx(0.9)
 
 
+class TestReducedGrid:
+    def test_long_horizon_uses_first_value_of_each_param(self, ml_config):
+        # horizon < long_horizon_from (12) -> full grid.
+        assert ml_training._grid_config("gradient_boosted_trees", 1)["maxDepth"] == [5, 7]
+        assert ml_training._grid_config("random_forest_regressor", 6)["numTrees"] == [40, 80]
+        assert ml_training._grid_config("linear_regression", 6)["regParam"] == [0.01, 0.1]
+
+        # horizon >= long_horizon_from -> one value per parameter.
+        assert ml_training._grid_config("gradient_boosted_trees", 12)["maxDepth"] == [5]
+        assert ml_training._grid_config("gradient_boosted_trees", 24)["maxIter"] == [50]
+        assert ml_training._grid_config("random_forest_regressor", 12)["numTrees"] == [40]
+        assert ml_training._grid_config("gradient_boosted_trees_classifier", 24)["stepSize"] == [
+            0.1
+        ]
+
+
+class TestDriftPsi:
+    def test_identical_distributions_yield_zero_psi(self, spark):
+        vals = [float(i) for i in range(20)]
+        schema = StructType([StructField("temperature", DoubleType(), True)])
+        df = spark.createDataFrame([Row(temperature=v) for v in vals], schema=schema)
+
+        psi = ml_training.compute_drift_psi(df, df, features=["temperature"])
+        assert psi["temperature"] == pytest.approx(0.0)
+
+    def test_missing_and_few_rows_are_null(self, spark):
+        schema = StructType([StructField("temperature", DoubleType(), True)])
+        train = spark.createDataFrame([Row(temperature=float(i)) for i in range(20)], schema=schema)
+        test_few = spark.createDataFrame([Row(temperature=1.0)], schema=schema)
+
+        psi = ml_training.compute_drift_psi(train, test_few, features=["temperature", "humidity"])
+        # too few test rows -> null; absent column -> null.
+        assert psi["temperature"] is None
+        assert psi["humidity"] is None
+
+    def test_shifted_distribution_yields_positive_psi(self, spark):
+        schema = StructType([StructField("temperature", DoubleType(), True)])
+        train = spark.createDataFrame([Row(temperature=float(i)) for i in range(20)], schema=schema)
+        test = spark.createDataFrame(
+            [Row(temperature=float(i + 50)) for i in range(20)], schema=schema
+        )
+
+        psi = ml_training.compute_drift_psi(train, test, features=["temperature"])
+        assert psi["temperature"] > 0.0
+
+    def test_bin_index_clamps_below_train_min_to_zero(self):
+        # v < lo must land in bin 0, not wrap to the last bin via negative index.
+        assert ml_training._psi_bin_index(5.0, 10.0, 2.0, 10) == 0
+        assert ml_training._psi_bin_index(10.0, 10.0, 2.0, 10) == 0  # exactly lo
+        assert ml_training._psi_bin_index(11.9, 10.0, 2.0, 10) == 0
+        assert ml_training._psi_bin_index(20.0, 10.0, 2.0, 10) == 5
+        assert ml_training._psi_bin_index(100.0, 10.0, 2.0, 10) == 9  # above last edge
+
+
+def _multi_horizon_frame(spark, null_newest_targets=False):
+    """A frame carrying all five horizons' target columns plus observation
+    inputs. With ``null_newest_targets`` the newest row (max timestamp) has
+    every ``target_*`` column null — exactly the latest-features shape at
+    inference time."""
+    horizons = (1, 3, 6, 12, 24)
+    fields = [
+        StructField("city", StringType(), True),
+        StructField("timestamp", TimestampType(), True),
+        StructField("temperature", DoubleType(), True),
+        StructField("humidity", DoubleType(), True),
+        StructField("pressure", DoubleType(), True),
+        StructField("wind_speed", DoubleType(), True),
+    ]
+    for h in horizons:
+        fields.append(StructField(f"target_temp_{h}h", DoubleType(), True))
+        fields.append(StructField(f"target_will_rain_{h}h", DoubleType(), True))
+    schema = StructType(fields)
+
+    n = 15
+    rows = []
+    for i in range(n):
+        newest = i == n - 1
+        row = {
+            "city": "Madrid",
+            "timestamp": datetime(2026, 1, 1, i, 0, 0),
+            "temperature": float(i),
+            "humidity": 50.0,
+            "pressure": 1013.0,
+            "wind_speed": 5.0,
+        }
+        for h in horizons:
+            temp = None if (null_newest_targets and newest) else float(i + h)
+            rain = None if temp is None else (1.0 if (i + h) % 2 else 0.0)
+            row[f"target_temp_{h}h"] = temp
+            row[f"target_will_rain_{h}h"] = rain
+        rows.append(Row(**row))
+    return spark.createDataFrame(rows, schema=schema)
+
+
+class TestFeatureExclusionLeakage:
+    def test_no_target_column_becomes_a_feature(self, spark):
+        """Every horizon's ``target_*`` column must be excluded, not just the
+        current one — a future-horizon label would leak the true future."""
+        df = _multi_horizon_frame(spark, null_newest_targets=True)
+        for h in (1, 3, 6, 12, 24):
+            _, _, feature_cols = ml_training.prepare_features_for_ml(df, f"target_temp_{h}h", h)
+            assert feature_cols, "expected at least one usable feature column"
+            assert not any(
+                c.startswith("target_") for c in feature_cols
+            ), f"horizon {h}h leaked a target column into features: {feature_cols}"
+
+    def test_newest_row_with_null_targets_still_assembles(self, spark):
+        """The newest feature row has every ``target_*`` null; once targets are
+        excluded the assembler must not drop it (inference would upsert zero
+        rows otherwise)."""
+        df = _multi_horizon_frame(spark, null_newest_targets=True)
+        assembler, scaler, feature_cols = ml_training.prepare_features_for_ml(
+            df, "target_temp_1h", 1
+        )
+        assert not any(c.startswith("target_") for c in feature_cols)
+
+        assembled = assembler.transform(df)
+        scaler_model = scaler.fit(assembled)
+        scaled = scaler_model.transform(assembled)
+
+        newest = scaled.orderBy(F.col("timestamp").desc()).first()
+        assert newest["features_raw"] is not None
+        assert newest["features_raw"].size == len(feature_cols)
+        assert newest["features"] is not None
+
+
+def _diag_temp_frame(spark):
+    schema = StructType(
+        [
+            StructField("city", StringType(), True),
+            StructField("hour", IntegerType(), True),
+            StructField("precipitation", DoubleType(), True),
+            StructField("target_temp_1h", DoubleType(), True),
+            StructField("prediction", DoubleType(), True),
+            StructField("temperature", DoubleType(), True),
+            StructField("humidity", DoubleType(), True),
+            StructField("pressure", DoubleType(), True),
+            StructField("wind_speed", DoubleType(), True),
+            StructField("specific_humidity", DoubleType(), True),
+        ]
+    )
+    rows = []
+    for i in range(20):
+        # i % 4 == 0 -> precipitation 5.0 (moderate), else dry. Hours 0..19 only,
+        # so hours 20..23 are empty slices.
+        rows.append(
+            Row(
+                city="Madrid" if i < 10 else "Valencia",
+                hour=i % 24,
+                precipitation=5.0 if i % 4 == 0 else 0.0,
+                target_temp_1h=20.0 + i * 0.5,
+                prediction=21.0 + i * 0.5,  # constant +1.0 over-forecast
+                temperature=float(i),
+                humidity=float(50 + i % 10),
+                pressure=float(1013 + i % 5),
+                wind_speed=5.0,
+                specific_humidity=0.01,
+            )
+        )
+    return spark.createDataFrame(rows, schema=schema)
+
+
+class TestBuildDiagnostics:
+    def test_temperature_diagnostics_shape(self, spark):
+        frame = _diag_temp_frame(spark)
+        diag = ml_training.build_diagnostics(frame, frame, "target_temp_1h", "temperature")
+
+        assert set(diag) == {"by_city", "by_hour_of_day", "by_rain_bucket", "drift_psi"}
+        assert len(diag["by_hour_of_day"]) == 24
+        assert [s["label"] for s in diag["by_hour_of_day"]] == [str(h) for h in range(24)]
+        assert [s["label"] for s in diag["by_rain_bucket"]] == ["dry", "light", "moderate", "heavy"]
+
+        # Every slice carries the SliceMetric keys.
+        for slices in (diag["by_city"], diag["by_hour_of_day"], diag["by_rain_bucket"]):
+            for s in slices:
+                assert set(s) == {"label", "n", "rmse", "mae", "bias", "brier"}
+
+        # Temperature slices fill rmse/mae/bias (constant +1.0 error), brier null.
+        madrid = next(s for s in diag["by_city"] if s["label"] == "Madrid")
+        assert madrid["n"] == 10
+        assert madrid["rmse"] == pytest.approx(1.0)
+        assert madrid["mae"] == pytest.approx(1.0)
+        assert madrid["bias"] == pytest.approx(1.0)
+        assert madrid["brier"] is None
+
+        # Empty slices are emitted with n:0 and nulls.
+        empty_hour = next(s for s in diag["by_hour_of_day"] if s["label"] == "23")
+        assert empty_hour == {
+            "label": "23",
+            "n": 0,
+            "rmse": None,
+            "mae": None,
+            "bias": None,
+            "brier": None,
+        }
+        heavy = next(s for s in diag["by_rain_bucket"] if s["label"] == "heavy")
+        assert heavy == {
+            "label": "heavy",
+            "n": 0,
+            "rmse": None,
+            "mae": None,
+            "bias": None,
+            "brier": None,
+        }
+
+        # drift_psi covers the core numeric features.
+        assert set(diag["drift_psi"]) == set(ml_training.DRIFT_FEATURES)
+
+    def test_rain_diagnostics_fill_brier_only(self, spark):
+        schema = StructType(
+            [
+                StructField("city", StringType(), True),
+                StructField("hour", IntegerType(), True),
+                StructField("precipitation", DoubleType(), True),
+                StructField("target_will_rain_1h", DoubleType(), True),
+                StructField("probability", VectorUDT(), True),
+                StructField("temperature", DoubleType(), True),
+                StructField("humidity", DoubleType(), True),
+                StructField("pressure", DoubleType(), True),
+                StructField("wind_speed", DoubleType(), True),
+                StructField("specific_humidity", DoubleType(), True),
+            ]
+        )
+        rows = [
+            Row(
+                city="Madrid",
+                hour=6,
+                precipitation=0.0,
+                target_will_rain_1h=1.0,
+                probability=Vectors.dense([0.1, 0.9]),  # p=0.9 -> brier (0.9-1)^2 = 0.01
+                temperature=float(i),
+                humidity=50.0,
+                pressure=1013.0,
+                wind_speed=5.0,
+                specific_humidity=0.01,
+            )
+            for i in range(12)
+        ]
+        frame = spark.createDataFrame(rows, schema=schema)
+
+        diag = ml_training.build_diagnostics(frame, frame, "target_will_rain_1h", "rain")
+
+        madrid = next(s for s in diag["by_city"] if s["label"] == "Madrid")
+        assert madrid["n"] == 12
+        assert madrid["brier"] == pytest.approx(0.01)
+        assert madrid["rmse"] is None
+        assert madrid["mae"] is None
+        assert madrid["bias"] is None
+
+    def test_unknown_kind_rejected(self, spark):
+        frame = _diag_temp_frame(spark)
+        with pytest.raises(ValueError):
+            ml_training.build_diagnostics(frame, frame, "target_temp_1h", "bogus")
+
+
 class TestJsonSafe:
     def test_numpy_float_int_bool(self):
         assert ml_training._json_safe(np.float64(1.5)) == 1.5
@@ -408,3 +665,205 @@ class TestSaveModel:
     def test_save_model_commit_falls_back_to_unknown(self, monkeypatch, tmp_path):
         inserted = _save_and_capture(monkeypatch, tmp_path, "")
         assert inserted["commit"] == "unknown"
+
+    def test_save_model_persists_diagnostics(self, monkeypatch, tmp_path):
+        diagnostics = {
+            "by_city": [
+                {"label": "Madrid", "n": 10, "rmse": 1.0, "mae": 1.0, "bias": 1.0, "brier": None}
+            ],
+            "by_hour_of_day": [
+                {"label": "0", "n": 0, "rmse": None, "mae": None, "bias": None, "brier": None}
+            ],
+            "by_rain_bucket": [
+                {"label": "dry", "n": 4, "rmse": 1.0, "mae": 1.0, "bias": 1.0, "brier": None}
+            ],
+            "drift_psi": {"temperature": 0.08, "humidity": None},
+        }
+        inserted = _save_and_capture(monkeypatch, tmp_path, "abc123", diagnostics=diagnostics)
+        assert inserted["diagnostics"] == diagnostics
+
+
+class _FakeReader:
+    """Chains the mongodb reader options and returns a fixed DataFrame."""
+
+    def __init__(self, df):
+        self._df = df
+
+    def format(self, *_args, **_kwargs):
+        return self
+
+    def option(self, *_args, **_kwargs):
+        return self
+
+    def load(self):
+        return self._df
+
+
+class _FakeSpark:
+    def __init__(self, df):
+        self.read = _FakeReader(df)
+
+
+class TestLoadFeatures:
+    """``load_features`` drops on the observation inputs only, so the newest
+    feature row (all horizon targets null) survives — the freshness regression."""
+
+    def test_drops_incomplete_observations_and_dedupes_but_keeps_null_targets(self, spark):
+        schema = StructType(
+            [
+                StructField("_id", StringType(), True),
+                StructField("city", StringType(), True),
+                StructField("timestamp", TimestampType(), True),
+                StructField("temperature", DoubleType(), True),
+                StructField("target_temp_1h", DoubleType(), True),
+                StructField("target_temp_3h", DoubleType(), True),
+            ]
+        )
+        base = datetime(2026, 1, 1, 1, 0, 0)
+        rows = [
+            # Duplicate (city, timestamp): an overlapping run wrote it twice.
+            Row(
+                _id="a",
+                city="Madrid",
+                timestamp=base,
+                temperature=10.0,
+                target_temp_1h=11.0,
+                target_temp_3h=13.0,
+            ),
+            Row(
+                _id="b",
+                city="Madrid",
+                timestamp=base,
+                temperature=10.0,
+                target_temp_1h=11.0,
+                target_temp_3h=13.0,
+            ),
+            # No observation -> dropped regardless of targets.
+            Row(
+                _id="c",
+                city="Madrid",
+                timestamp=base + timedelta(hours=1),
+                temperature=None,
+                target_temp_1h=12.0,
+                target_temp_3h=14.0,
+            ),
+            # Newest row: observation present, every target null -> must be kept.
+            Row(
+                _id="d",
+                city="Valencia",
+                timestamp=base + timedelta(hours=2),
+                temperature=30.0,
+                target_temp_1h=None,
+                target_temp_3h=None,
+            ),
+        ]
+        df = spark.createDataFrame(rows, schema=schema)
+
+        out = ml_training.load_features(_FakeSpark(df)).orderBy("timestamp").collect()
+
+        assert len(out) == 2
+        # The connector's `_id` is dropped before training/registry use.
+        assert "_id" not in out[0].asDict()
+        # Deduped to one row per (city, timestamp) ...
+        assert out[0].city == "Madrid" and out[0].temperature == 10.0
+        # ... and the newest all-null-target row is retained.
+        assert out[1].timestamp == base + timedelta(hours=2)
+        assert out[1].target_temp_1h is None and out[1].target_temp_3h is None
+
+
+def _horizon_isolation_frame(spark):
+    """Each horizon has a different block of missing labels: 1h labels are null
+    on the first 3 rows, 3h labels on the last 3. A per-horizon dropna must
+    discard exactly those rows, so the two horizons train on different windows."""
+    schema = StructType(
+        [
+            StructField("city", StringType(), True),
+            StructField("timestamp", TimestampType(), True),
+            StructField("temperature", DoubleType(), True),
+            StructField("target_temp_1h", DoubleType(), True),
+            StructField("target_will_rain_1h", DoubleType(), True),
+            StructField("target_temp_3h", DoubleType(), True),
+            StructField("target_will_rain_3h", DoubleType(), True),
+        ]
+    )
+    base = datetime(2026, 1, 1, 0, 0, 0)
+    rows = []
+    for i in range(10):
+        one_missing = i < 3
+        three_missing = i >= 7
+        rows.append(
+            Row(
+                city="Madrid",
+                timestamp=base + timedelta(hours=i),
+                temperature=float(i),
+                target_temp_1h=None if one_missing else float(i + 1),
+                target_will_rain_1h=None if one_missing else float(i % 2),
+                target_temp_3h=None if three_missing else float(i + 3),
+                target_will_rain_3h=None if three_missing else float(i % 2),
+            )
+        )
+    return spark.createDataFrame(rows, schema=schema)
+
+
+class TestMainPerHorizonIsolation:
+    """``main()`` drops only the current horizon's labels before training and
+    saves that horizon's models — a blanket dropna would wipe the newest rows."""
+
+    def test_each_horizon_drops_only_its_own_labels(self, spark, monkeypatch):
+        frame = _horizon_isolation_frame(spark)
+        trained: dict[int, list] = {}
+        saved: list[tuple] = []
+
+        monkeypatch.setattr(ml_training, "FEATURES_CONFIG", {"target_horizons": [1, 3]})
+        monkeypatch.setattr(ml_training, "create_spark_session", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(ml_training, "load_features", lambda _spark: frame)
+
+        def fake_split(horizon_df):
+            return horizon_df, horizon_df, horizon_df, {"kind": "temporal"}
+
+        monkeypatch.setattr(ml_training, "temporal_split", fake_split)
+
+        def fake_temp_train(horizon_df, _train, _val, _test, horizon):
+            trained.setdefault(horizon, []).append(horizon_df)
+            return (
+                MagicMock(),
+                "GBT",
+                [],
+                {"rmse": 1.0},
+                {},
+                {},
+                ["temperature"],
+                {"drift_psi": {}},
+            )
+
+        def fake_rain_train(_df, _train, _val, _test, horizon):
+            return (MagicMock(), "GBT", [], {"brier": 0.1}, {}, None, ["temperature"], None)
+
+        monkeypatch.setattr(ml_training, "train_temperature_prediction_model", fake_temp_train)
+        monkeypatch.setattr(ml_training, "train_rain_prediction_model", fake_rain_train)
+
+        def fake_save(_model, name, **kwargs):
+            saved.append((name, kwargs["horizon"]))
+
+        monkeypatch.setattr(ml_training, "save_model", fake_save)
+        monkeypatch.setattr(ml_training, "_log_to_mlflow", lambda **kwargs: None)
+
+        ml_training.main()
+
+        # Per-horizon frame: 1h keeps rows 3..9, 3h keeps rows 0..6.
+        h1_df, h3_df = trained[1][0], trained[3][0]
+        assert h1_df.count() == 7
+        assert h3_df.count() == 7
+        assert h1_df.agg(F.min("timestamp")).first()[0] == datetime(2026, 1, 1, 3, 0, 0)
+        assert h3_df.agg(F.min("timestamp")).first()[0] == datetime(2026, 1, 1, 0, 0, 0)
+        # No label of the horizon being trained is null (dropna took effect).
+        assert h1_df.filter(F.col("target_temp_1h").isNull()).count() == 0
+        assert h1_df.filter(F.col("target_will_rain_1h").isNull()).count() == 0
+        assert h3_df.filter(F.col("target_temp_3h").isNull()).count() == 0
+        # Both horizons saved a temp and a rain model, tagged with their horizon.
+        assert sorted(saved) == [
+            ("rain_prediction_1h_GBT", 1),
+            ("rain_prediction_3h_GBT", 3),
+            ("temp_prediction_1h_GBT", 1),
+            ("temp_prediction_3h_GBT", 3),
+        ]

@@ -3,12 +3,14 @@ import { useState, type ReactNode } from 'react'
 
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
-import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
+import { EmptyState, ErrorState, TableSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useModels } from '@/features/models/queries'
+import { driftLabel, driftTone, maxDriftPsi } from '@/features/models/diagnostics'
 import { cn } from '@/lib/cn'
 import { formatDateTime, formatNumber, formatPercent, formatSigned, isNum } from '@/lib/format'
+import type { ModelDiagnostics } from '@/api/schemas'
 
 type SkillTone = 'ok' | 'warn' | 'bad' | 'neutral'
 
@@ -18,6 +20,24 @@ export function skillTone(skill: number | null | undefined): SkillTone {
   if (skill >= 0.3) return 'ok'
   if (skill >= 0) return 'warn'
   return 'bad'
+}
+
+/** Contract 3 drift badge: an absent state (`—`) when the registry has no PSI. */
+function DriftBadge({ diagnostics }: { diagnostics: ModelDiagnostics }) {
+  const psi = maxDriftPsi(diagnostics)
+  const label = driftLabel(psi)
+  if (psi === null || label === null) {
+    return (
+      <span className="nums text-fg-3" title="Sin diagnóstico de deriva en el registro">
+        —
+      </span>
+    )
+  }
+  return (
+    <Badge tone={driftTone(psi)} title={`PSI máx. ${formatNumber(psi, 2)}`}>
+      {label}
+    </Badge>
+  )
 }
 
 export function ModelsPage() {
@@ -49,7 +69,7 @@ export function ModelsPage() {
             }
           />
           {models.isLoading ? (
-            <LoadingBlock />
+            <TableSkeleton rows={5} />
           ) : models.isError ? (
             <ErrorState
               title="No se pudo consultar el registro"
@@ -79,6 +99,12 @@ export function ModelsPage() {
                     </th>
                     <th className="label px-4 py-2 text-right font-normal" title="Fracción de residuos de test dentro del intervalo">
                       Cobertura
+                    </th>
+                    <th
+                      className="label px-4 py-2 text-left font-normal"
+                      title="PSI de deriva train→test por feature (máximo); <0,1 estable, ≤0,25 aviso, >0,25 deriva"
+                    >
+                      Deriva
                     </th>
                     <th className="label px-4 py-2 text-left font-normal">Entrenado</th>
                     <th className="label px-4 py-2 text-left font-normal">Estado</th>
@@ -128,6 +154,9 @@ export function ModelsPage() {
                                   n{formatPercent((model.interval?.level ?? 0) * 100, 0)}
                                 </span>
                               ) : null}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <DriftBadge diagnostics={model.diagnostics} />
                             </td>
                             <td className="nums px-4 py-2.5 text-fg-3">
                               {formatDateTime(model.created_at)}
@@ -203,7 +232,7 @@ function FragmentRow({
       {open ? (
         <tr className="border-b border-line/60 bg-panel-2/40 last:border-0">
           <td />
-          <td colSpan={10} className="px-4 py-3">
+          <td colSpan={11} className="px-4 py-3">
             {detail}
           </td>
         </tr>

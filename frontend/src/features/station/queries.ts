@@ -34,10 +34,14 @@ export const useStats = (city: string, hours = 24) =>
     { enabled: Boolean(city), allowNotFound: true },
   )
 
-export const usePredictions = (city: string, limit = 48) =>
+/** Contract 2: M2 prediction horizons, mirrored by the backend config. */
+export const PREDICTION_HORIZONS = [1, 3, 6, 12, 24] as const
+export type PredictionHorizon = (typeof PREDICTION_HORIZONS)[number]
+
+export const usePredictions = (city: string, limit = 48, horizon: number = 1) =>
   useApiQuery(
-    queryKeys.predictions(city, limit),
-    `/predictions/${encodeURIComponent(city)}?limit=${limit}`,
+    queryKeys.predictions(city, limit, horizon),
+    `/predictions/${encodeURIComponent(city)}?limit=${limit}&horizon=${horizon}`,
     z.array(predictionSchema),
     { enabled: Boolean(city), allowNotFound: true },
   )

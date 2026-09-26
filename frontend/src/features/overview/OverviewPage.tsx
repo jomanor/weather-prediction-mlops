@@ -1,17 +1,21 @@
 import { CloudOff, RefreshCw } from 'lucide-react'
 import { lazy, Suspense, useMemo } from 'react'
 
-import { useBenchmarkSummary, useCities } from '@/api/queries'
+import { useBenchmarkSummary, useCities, useLatestPredictions } from '@/api/queries'
 import type { Prediction } from '@/api/schemas'
 import { DataQualityMeter } from '@/components/DataQualityMeter'
+import { StatusDot } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
-import { ErrorState, LoadingBlock } from '@/components/ui/Feedback'
+import { ErrorState, LoadingBlock, MapSkeleton, TableSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelBody, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { CityManager } from '@/features/overview/CityManager'
-import { useLatestPredictions, useMapStations, useStations } from '@/features/overview/queries'
+import { useMapStations, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
+import { StationSheet } from '@/features/overview/StationSheet'
+import { useFreshness } from '@/hooks/useFreshness'
+import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { formatNumber, formatPercent, formatTemperature, formatWind, isNum } from '@/lib/format'
@@ -37,7 +41,8 @@ export function OverviewPage() {
   const citiesQuery = useCities()
   const stationsQuery = useStations()
   const mapStationsQuery = useMapStations()
-  const predictionsQuery = useLatestPredictions()
+  /* One row per city: the overview table compares the +1 h forecast. */
+  const predictionsQuery = useLatestPredictions(1)
   const summaryQuery = useBenchmarkSummary()
 
   const cities = citiesQuery.data ?? []
@@ -54,6 +59,13 @@ export function OverviewPage() {
     }
     return index
   }, [predictionsQuery.data])
+
+  /* U6 mobile sheet: position within the registry, and wrap-around stepping. */
+  const selectedIndex = selectedCity ? cities.findIndex((city) => city.name === selectedCity) : -1
+  const stepSelection = (delta: number) => {
+    if (selectedIndex < 0 || cities.length < 2) return
+    selectCity(cities[(selectedIndex + delta + cities.length) % cities.length].name)
+  }
 
   const stats = useMemo(() => {
     const temperatures = stations.map((s) => s.temperature).filter(isNum)
@@ -77,6 +89,11 @@ export function OverviewPage() {
   }, [cities, stations, summaryQuery.data])
 
   const refreshedAt = predictionsQuery.data?.generated_at ?? stationsQuery.dataUpdatedAt
+  /* U7: pulse keyed on the data's own age (newest observation / prediction run). */
+  const freshnessAt =
+    predictionsQuery.data?.generated_at ?? stations[0]?.observed_at ?? null
+  const { isFresh } = useFreshness(freshnessAt)
+  const reducedMotion = usePrefersReducedMotion()
 
   if (stationsQuery.isError || citiesQuery.isError) {
     return (
@@ -136,7 +153,11 @@ export function OverviewPage() {
             actions={
               <>
                 {refreshedAt ? (
-                  <span className="nums mr-2 text-[10px] text-fg-3">
+                  <span className="nums mr-2 inline-flex items-center gap-1.5 text-[10px] text-fg-3">
+                    <StatusDot
+                      tone={isFresh ? 'ok' : 'neutral'}
+                      pulse={isFresh && !reducedMotion}
+                    />
                     Act. {new Date(refreshedAt).toLocaleTimeString('es-ES')}
                   </span>
                 ) : null}
@@ -151,7 +172,7 @@ export function OverviewPage() {
           />
           <div className="h-[400px] sm:h-[480px]">
             {mapStationsQuery.isLoading ? (
-              <LoadingBlock label="Cargando estaciones…" />
+              <MapSkeleton />
             ) : mapStationsQuery.isError ? (
               <ErrorState
                 title="No se pudo cargar el mapa"
@@ -184,7 +205,7 @@ export function OverviewPage() {
           />
           <PanelBody className="p-0">
             {stationsQuery.isLoading ? (
-              <LoadingBlock />
+              <TableSkeleton />
             ) : stations.length === 0 ? (
               <div className="flex flex-col items-center py-12 text-fg-3">
                 <CloudOff className="h-5 w-5" />
@@ -202,6 +223,16 @@ export function OverviewPage() {
           </PanelBody>
         </Panel>
       </div>
+
+      <StationSheet
+        city={selectedCity}
+        station={selectedCity ? stationIndex.get(selectedCity) : undefined}
+        prediction={selectedCity ? predictionIndex.get(selectedCity) : undefined}
+        position={selectedIndex >= 0 ? { index: selectedIndex + 1, total: cities.length } : null}
+        onPrev={() => stepSelection(-1)}
+        onNext={() => stepSelection(1)}
+        onClose={() => selectCity(null)}
+      />
     </div>
   )
 }
