@@ -11,6 +11,7 @@ vi.mock('@/api/queries', () => ({
 }))
 
 vi.mock('@/features/station/queries', () => ({
+  PREDICTION_HORIZONS: [1, 3, 6, 12, 24],
   useCurrentWeather: () => ({
     isError: false,
     isLoading: true,

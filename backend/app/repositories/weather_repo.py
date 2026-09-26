@@ -171,12 +171,16 @@ def _downsample_by_step(points: list[CurrentWeather], step_hours: int) -> list[C
     return kept
 
 
-#: Data-quality thresholds from ``docs/batch3-contract.md`` (Contract 1).
+#: Data-quality thresholds from ``docs/batch4-contract.md`` (Contract 5).
 #: Completeness and age are graded independently, then the worse of the two wins.
+#: Age is calibrated to the ~6 h feature-rebuild cycle (``ml-pipeline.yml``
+#: features ``20 */6``): ok up to ~2x the cycle, warn up to ~3x (one missed
+#: rebuild). The Contract-1 target-drop that forced a healthy pipeline to land
+#: ~6 h stale is fixed in WS-A, so a fresh rebuild lands within this window.
 QUALITY_OK_COMPLETENESS = 0.95
 QUALITY_WARN_COMPLETENESS = 0.80
-QUALITY_OK_AGE_HOURS = 2.0
-QUALITY_WARN_AGE_HOURS = 6.0
+QUALITY_OK_AGE_HOURS = 12.0
+QUALITY_WARN_AGE_HOURS = 18.0
 
 _STATUS_RANK: dict[str, int] = {"ok": 0, "warn": 1, "bad": 2}
 

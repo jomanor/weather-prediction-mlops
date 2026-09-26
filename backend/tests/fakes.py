@@ -102,6 +102,42 @@ def _matches(document: dict, query: dict) -> bool:
     return True
 
 
+def _group_key(spec, document: dict):
+    """Resolve a ``$group`` ``_id`` (``"$field"`` or ``{"f": "$path"}``)."""
+    if isinstance(spec, str) and spec.startswith("$"):
+        return document.get(spec[1:])
+    if isinstance(spec, dict):
+        return tuple(
+            (
+                key,
+                (
+                    document.get(value[1:])
+                    if isinstance(value, str) and value.startswith("$")
+                    else value
+                ),
+            )
+            for key, value in spec.items()
+        )
+    return spec
+
+
+def _group(documents: list[dict], spec: dict) -> list[dict]:
+    """Minimal ``$group`` supporting ``$first`` (enough for the repo pipelines)."""
+    groups: dict = {}
+    order: list = []
+    for document in documents:
+        key = _group_key(spec.get("_id"), document)
+        if key not in groups:
+            groups[key] = {"_id": key}
+            order.append(key)
+        for name, accumulator in spec.items():
+            if name == "_id":
+                continue
+            if isinstance(accumulator, dict) and "$first" in accumulator:
+                groups[key].setdefault(name, document)
+    return [groups[key] for key in order]
+
+
 class FakeMongoCollection:
     """Collection double: filters, then hands a cursor that sorts/projects."""
 
@@ -109,6 +145,9 @@ class FakeMongoCollection:
         self.documents = list(documents or [])
         self.find_calls: list[tuple[dict, dict | None]] = []
         self.cursors: list[FakeMongoCursor] = []
+        #: Recorded aggregate requests so tests can pin the pipeline shape
+        #: (index-backed sort, ``allowDiskUse``).
+        self.aggregate_calls: list[dict] = []
 
     def find(self, query, projection=None):
         self.find_calls.append((query, projection))
@@ -117,6 +156,24 @@ class FakeMongoCollection:
         )
         self.cursors.append(cursor)
         return cursor
+
+    def aggregate(self, pipeline, allowDiskUse=False, **kwargs):
+        self.aggregate_calls.append(
+            {"pipeline": list(pipeline), "allowDiskUse": allowDiskUse, **kwargs}
+        )
+        documents = list(self.documents)
+        for stage in pipeline:
+            if "$match" in stage:
+                documents = [doc for doc in documents if _matches(doc, stage["$match"])]
+            elif "$sort" in stage:
+                for key, direction in reversed(list(stage["$sort"].items())):
+                    documents.sort(key=lambda doc, k=key: doc.get(k), reverse=direction < 0)
+            elif "$group" in stage:
+                documents = _group(documents, stage["$group"])
+            elif "$replaceRoot" in stage:
+                path = stage["$replaceRoot"]["newRoot"].lstrip("$")
+                documents = [doc.get(path) for doc in documents]
+        return FakeMongoCursor(documents)
 
     async def distinct(self, key):
         seen: list = []
@@ -136,6 +193,7 @@ class FakeMongoDb:
         raw_weather: FakeMongoCollection | None = None,
         weather_features: FakeMongoCollection | None = None,
         model_registry: FakeMongoCollection | None = None,
+        weather_predictions: FakeMongoCollection | None = None,
     ) -> None:
         self._collections = {
             "weather_data": weather_data or FakeMongoCollection(),
@@ -144,6 +202,8 @@ class FakeMongoDb:
         }
         if model_registry is not None:
             self._collections["model_registry"] = model_registry
+        if weather_predictions is not None:
+            self._collections["weather_predictions"] = weather_predictions
 
     def __getitem__(self, name):
         return self._collections[name]
@@ -231,16 +291,25 @@ class FakePredictionRepository:
     def __init__(self, predictions: list[Prediction] | None = None) -> None:
         self.predictions = list(predictions or [])
 
-    async def latest_per_city(self) -> list[Prediction]:
-        latest: dict[str, Prediction] = {}
+    async def latest_per_city(self, horizon: int | None = None) -> list[Prediction]:
+        latest: dict[tuple[str, int], Prediction] = {}
         for prediction in self.predictions:
-            current = latest.get(prediction.city)
+            if horizon is not None and prediction.horizon_hours != horizon:
+                continue
+            key = (prediction.city, prediction.horizon_hours)
+            current = latest.get(key)
             if current is None or prediction.prediction_timestamp > current.prediction_timestamp:
-                latest[prediction.city] = prediction
-        return [latest[city] for city in sorted(latest)]
+                latest[key] = prediction
+        return [latest[key] for key in sorted(latest)]
 
-    async def for_city(self, city: str, limit: int = 48) -> list[Prediction]:
-        matches = [p for p in self.predictions if p.city == city]
+    async def for_city(
+        self, city: str, limit: int = 48, horizon: int | None = None
+    ) -> list[Prediction]:
+        matches = [
+            p
+            for p in self.predictions
+            if p.city == city and (horizon is None or p.horizon_hours == horizon)
+        ]
         matches.sort(key=lambda p: p.prediction_timestamp, reverse=True)
         return matches[:limit]
 

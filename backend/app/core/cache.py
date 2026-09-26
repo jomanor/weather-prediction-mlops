@@ -7,12 +7,18 @@ absence of thread-safety is deliberate, not an oversight. FastAPI executes all
 handlers for a given app on a single event loop, so no lock is needed; if the
 deployment ever grows a second worker or a thread pool, this has to change.
 
+Cold misses are single-flighted per key: concurrent callers of ``cached()`` for
+the same key share one loader task instead of each hitting Mongo. The in-flight
+map lives on the ``TTLCache`` instance (not the module) so separate apps/tests
+cannot leak work into each other.
+
 ETags are derived from the serialized payload. A cache hit therefore never
 touches Mongo to recompute its validator.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -38,6 +44,8 @@ class TTLCache:
 
     def __init__(self) -> None:
         self._entries: dict[str, _Entry] = {}
+        #: key -> running cold-miss loader task, so concurrent callers coalesce.
+        self._inflight: dict[str, asyncio.Task[Any]] = {}
 
     def get(self, key: str) -> tuple[Any, str] | None:
         """Return ``(value, etag)`` when fresh, else None (expired entries are dropped)."""
@@ -99,6 +107,49 @@ def cache_headers(ttl_seconds: int, etag: str) -> dict[str, str]:
     }
 
 
+def _consume_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve an otherwise-unobserved loader exception (no asyncio warning)."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _run_loader(
+    cache: TTLCache,
+    key: str,
+    ttl_seconds: int,
+    loader: Callable[[], Awaitable[T]],
+) -> tuple[T, str]:
+    """The single runner for a cold miss: run, store in the TTL cache, unregister."""
+    try:
+        value = await loader()
+        etag = etag_for(value)
+        cache.set(key, value, etag, ttl_seconds)
+        return value, etag
+    finally:
+        # Always unregister, success or failure: a raising loader must not
+        # poison the key for later callers.
+        cache._inflight.pop(key, None)
+
+
+async def _load_once(
+    cache: TTLCache,
+    key: str,
+    ttl_seconds: int,
+    loader: Callable[[], Awaitable[T]],
+) -> tuple[T, str]:
+    """Return the in-flight cold-miss loader for ``key``, or start one.
+
+    Callers await a ``shield``ed task, so a waiter being cancelled never cancels
+    the shared computation for the others.
+    """
+    task = cache._inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_run_loader(cache, key, ttl_seconds, loader))
+        task.add_done_callback(_consume_result)
+        cache._inflight[key] = task
+    return await asyncio.shield(task)
+
+
 async def cached(
     request: Request,
     response: Response,
@@ -110,14 +161,14 @@ async def cached(
     """Serve ``loader`` through ``cache`` with ETag/Cache-Control and If-None-Match -> 304.
 
     On a hit the loader (and therefore Mongo) is not called: the ETag comes from
-    the cached payload. Returns a bare ``Response(304)`` on a validator match,
-    otherwise the value, with headers written onto the injected ``response``.
+    the cached payload. A cold miss is single-flighted per key: concurrent
+    callers share one loader execution and all get its value. Returns a bare
+    ``Response(304)`` on a validator match, otherwise the value, with headers
+    written onto the injected ``response``.
     """
     hit = cache.get(key)
     if hit is None:
-        value = await loader()
-        etag = etag_for(value)
-        cache.set(key, value, etag, ttl_seconds)
+        value, etag = await _load_once(cache, key, ttl_seconds, loader)
     else:
         value, etag = hit
 

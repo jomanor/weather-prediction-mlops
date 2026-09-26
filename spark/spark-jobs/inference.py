@@ -217,14 +217,19 @@ def output_schema_columns() -> list[str]:
     ]
 
 
-def build_output_df(pred_df, temp_meta: dict | None = None, rain_meta: dict | None = None):
+def build_output_df(
+    pred_df, temp_meta: dict | None = None, rain_meta: dict | None = None, horizon=None
+):
     """Add the additive interval columns and project the final write schema.
 
     ``temp_lower`` / ``temp_upper`` / ``interval_level`` come from the loaded
     temperature model's ``interval`` registry block; all three are null when the
     model carries no interval (legacy document) or no temperature model loaded.
+    ``horizon`` drives ``horizon_hours`` and the ``_id`` suffix; it defaults to
+    the first configured horizon for callers that build a single horizon.
     """
-    horizon = FEATURES_CONFIG["target_horizon"]
+    if horizon is None:
+        horizon = FEATURES_CONFIG["target_horizons"][0]
     temp_meta = temp_meta or {}
     rain_meta = rain_meta or {}
 
@@ -279,9 +284,11 @@ def run_inference(
     mongo_url: str,
     temp_meta: dict,
     rain_meta: dict,
+    horizon: int,
 ):
-    """Apply both models to *df_features* and upsert predictions into
-    weather_predictions."""
+    """Apply both models to *df_features* for one *horizon* and return that
+    horizon's output rows (not yet written). The caller unions every horizon's
+    rows into a single upsert write."""
 
     pred_df = df_features
 
@@ -309,7 +316,11 @@ def run_inference(
             "temp_lower/temp_upper/interval_level will be null."
         )
 
-    output = build_output_df(pred_df, temp_meta, rain_meta)
+    return build_output_df(pred_df, temp_meta, rain_meta, horizon)
+
+
+def write_predictions(output, mongo_url: str):
+    """Upsert the unioned prediction rows into ``weather_predictions``."""
 
     row_count = output.count()
     logger.info("Writing %d prediction rows to weather_predictions…", row_count)
@@ -350,18 +361,7 @@ def main():
         db = client["weather_db"]
         fs = GridFS(db)
 
-        horizon = FEATURES_CONFIG["target_horizon"]
-        temp_prefix = f"temp_prediction_{horizon}h"
-        rain_prefix = f"rain_prediction_{horizon}h"
-
-        temp_model, temp_meta = load_latest_model(db, fs, temp_prefix, spark)
-        rain_model, rain_meta = load_latest_model(db, fs, rain_prefix, spark)
-
-        if temp_model is None and rain_model is None:
-            logger.warning(
-                "No trained models found. Run ml_training.py at least once before inference."
-            )
-            return
+        horizons = FEATURES_CONFIG["target_horizons"]
 
         df_features = load_latest_features(spark, mongo_url)
 
@@ -369,15 +369,40 @@ def main():
             logger.warning("No feature rows found in weather_features. Nothing to predict.")
             return
 
-        run_inference(
-            spark,
-            temp_model,
-            rain_model,
-            df_features,
-            mongo_url,
-            temp_meta or {},
-            rain_meta or {},
-        )
+        output = None
+        for horizon in horizons:
+            temp_prefix = f"temp_prediction_{horizon}h"
+            rain_prefix = f"rain_prediction_{horizon}h"
+
+            temp_model, temp_meta = load_latest_model(db, fs, temp_prefix, spark)
+            rain_model, rain_meta = load_latest_model(db, fs, rain_prefix, spark)
+
+            if temp_model is None and rain_model is None:
+                # A missing horizon is skipped, never fatal: the remaining
+                # horizons still produce predictions.
+                logger.warning(
+                    "No trained models found for horizon %sh. Skipping this horizon.",
+                    horizon,
+                )
+                continue
+
+            horizon_output = run_inference(
+                spark,
+                temp_model,
+                rain_model,
+                df_features,
+                mongo_url,
+                temp_meta or {},
+                rain_meta or {},
+                horizon,
+            )
+            output = horizon_output if output is None else output.unionByName(horizon_output)
+
+        if output is None:
+            logger.warning("No horizon produced predictions. Run ml_training.py first.")
+            return
+
+        write_predictions(output, mongo_url)
 
     except Exception as exc:
         logger.error("Inference job failed: %s", exc)

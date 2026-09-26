@@ -34,11 +34,14 @@ def create_spark_session(app_name="WeatherMLOps"):
 FEATURES_CONFIG = {
     "window_sizes": [6, 12, 24],  # Hours rolling windows
     "lag_periods": [1, 2, 3, 6, 12],  # Hours lag features
-    "target_horizon": 1,  # Hours prediction
+    "target_horizons": [1, 3, 6, 12, 24],  # Hours prediction (one model per horizon)
 }
 
 
 ML_CONFIG = {
+    #: Horizons >= this use a reduced training grid (first value of each param
+    #: list) to keep the nightly train job inside the runner time budget.
+    "long_horizon_from": 12,
     "data_split": {
         "kind": "temporal",
         "train": 0.6,

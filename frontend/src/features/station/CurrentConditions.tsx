@@ -1,7 +1,10 @@
 import type { CurrentWeather } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
+import { StatusDot } from '@/components/ui/Badge'
 import { Readout } from '@/components/ui/Readout'
 import { Panel } from '@/components/ui/Panel'
+import { useFreshness } from '@/hooks/useFreshness'
+import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { cn } from '@/lib/cn'
 import {
   compassPoint,
@@ -18,6 +21,8 @@ import { describeWeather, toneClass } from '@/lib/weather'
 
 export function CurrentConditions({ station }: { station: CurrentWeather }) {
   const { units } = usePreferences()
+  const { isFresh } = useFreshness(station.observed_at)
+  const reducedMotion = usePrefersReducedMotion()
   const weather = describeWeather(station.weather_code)
   const WeatherIcon = weather.icon
 
@@ -35,7 +40,10 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
         <div className="text-right">
           <div className="label">Registrado</div>
           <div className="nums mt-1.5 text-xs text-fg-2">{formatDateTime(station.observed_at)}</div>
-          <div className="mt-0.5 text-[11px] text-fg-3">{formatRelative(station.observed_at)}</div>
+          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[11px] text-fg-3">
+            <StatusDot tone={isFresh ? 'ok' : 'neutral'} pulse={isFresh && !reducedMotion} />
+            {formatRelative(station.observed_at)}
+          </div>
         </div>
       </div>
 
