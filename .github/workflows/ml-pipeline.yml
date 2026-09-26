@@ -81,8 +81,12 @@ jobs:
     # Training fits three algorithms under cross-validation; 30 min was not
     # enough and the nightly job was cancelled at the limit, then again at 60.
     # The trainers now cache the split frames and fit candidates in parallel,
-    # and the grids are smaller; 90 leaves headroom for a cold Spark start.
-    timeout-minutes: 90
+    # and the grids are smaller. M2 trains 5 horizons x 2 targets and the
+    # feature step alone is ~60 min, so the old 90-min cap cut training
+    # mid-horizon (h=1..3 only) and skipped inference.
+    # Manual job=all needs ~145 min (62 features + ~80 train + inference) -> 300.
+    # Scheduled single-stage runs stay tight at 120 (slowest is ~80 min nightly train).
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 120 }}
     env:
       MONGO_URI: ${{ secrets.MONGO_URI }}
       # There is no MLflow server on a runner, and ml_training falls back to
