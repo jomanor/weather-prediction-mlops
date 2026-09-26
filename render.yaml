@@ -6,6 +6,11 @@
 #
 # Free instance type sleeps after ~15 min idle (~30-60 s cold start) and
 # shares one 750 h/month pool across all free services on the account.
+#
+# Deploys: Render auto-deploys on every commit to `main` once the branch's
+# CI checks are green (autoDeployTrigger: checksPass). `autoDeploy` is
+# deprecated in the Blueprint spec and is no longer the supported field.
+# buildFilter keeps docs/frontend/spark-only commits from rebuilding the API.
 
 services:
   - type: web
@@ -14,8 +19,15 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: free
+    branch: main
     healthCheckPath: /api/health
-    autoDeploy: true
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+      ignoredPaths:
+        - backend/tests/**
     envVars:
       # Paste the SRV URI of your Atlas cluster here on import.
       - key: MONGO_URI
