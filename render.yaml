@@ -7,9 +7,15 @@
 # Free instance type sleeps after ~15 min idle (~30-60 s cold start) and
 # shares one 750 h/month pool across all free services on the account.
 #
-# Deploys: Render auto-deploys on every commit to `main` once the branch's
-# CI checks are green (autoDeployTrigger: checksPass). `autoDeploy` is
-# deprecated in the Blueprint spec and is no longer the supported field.
+# Deploys: Render auto-deploys on every commit pushed to `main`
+# (autoDeployTrigger: commit). We deliberately do NOT use `checksPass`:
+# with that mode Render skips the deploy when it detects zero checks for
+# the commit (the merge commit's legacy combined status is `pending` with
+# 0 statuses, so the service never deployed). `commit` is independent of
+# check detection; the CI `deploy` job additionally POSTs the deploy hook
+# once the tests are green (idempotent — Render ignores a request for an
+# already-deployed commit). `autoDeploy` is deprecated in the Blueprint
+# spec and is no longer the supported field.
 # buildFilter keeps docs/frontend/spark-only commits from rebuilding the API.
 
 services:
@@ -21,7 +27,7 @@ services:
     plan: free
     branch: main
     healthCheckPath: /api/health
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: commit
     buildFilter:
       paths:
         - backend/**
