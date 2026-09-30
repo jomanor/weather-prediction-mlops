@@ -9,7 +9,8 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from functools import partial
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pyspark.sql import DataFrameWriter, Row
@@ -495,3 +496,204 @@ class TestMainMultiHorizon:
         output = captured["output"]
         assert output.count() == 2  # horizon 3 skipped, horizon 1 still written
         assert {row.horizon_hours for row in output.collect()} == {1}
+
+
+class TestLoadLatestFeaturesCache:
+    """``load_latest_features`` materialises the joined frame into the cache so
+    the horizon transforms and the write don't re-scan ``weather_features``."""
+
+    def test_caches_before_count(self, spark):
+        # ``spark`` is the session-scoped fixture: the real ``F.max("timestamp")``
+        # in ``load_latest_features`` needs an active session, so this test must
+        # not run on a bare MagicMock (self-contained under ``-k``/``--lf``).
+        mock_spark = MagicMock()
+        reader = MagicMock()
+        reader.option.return_value = reader
+        raw = MagicMock()
+        raw.columns = []
+        reader.load.return_value = raw
+        mock_spark.read.format.return_value = reader
+
+        latest = MagicMock()
+        raw.groupBy.return_value.agg.return_value = latest
+
+        frame = MagicMock()
+        cached = MagicMock()
+        frame.attach_mock(cached, "cached")
+        latest.join.return_value = frame
+        frame.cache.return_value = cached
+        cached.count.return_value = 7
+
+        result = inference.load_latest_features(mock_spark, "mongodb://fake")
+
+        # ``.cache()`` returns a *distinct* frame, and ``load_latest_features``
+        # must hand that exact object back — discarding the cached frame (and
+        # silently re-scanning Atlas) would return ``frame`` instead.
+        assert result is cached
+        # ``.cache()`` must be called before ``.count()`` so the count itself
+        # performs the materialisation that populates the cache.
+        assert frame.method_calls == [call.cache(), call.cached.count()]
+
+
+class Py4JJavaError(Exception):
+    """Fake ``pyspark.errors.Py4JJavaError`` wrapping a Java Mongo socket fault.
+
+    ``is_transient_mongo_error`` classifies on ``str(exc)`` text, not the class
+    name, so this only needs to carry the transient driver message.
+    """
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+class TestMainMongoRetry:
+    """``main()`` retries transient Mongo faults on the load/write boundaries and
+    unpersists the feature cache in ``finally``."""
+
+    def _setup_main(self, monkeypatch, spark, features_df=None):
+        monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+        monkeypatch.setattr(inference, "FEATURES_CONFIG", {"target_horizons": [1]})
+        monkeypatch.setattr(inference, "create_spark_session", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(inference, "MongoClient", lambda url: MagicMock())
+        monkeypatch.setattr(inference, "GridFS", lambda db: MagicMock())
+
+        if features_df is None:
+            features_df = _latest_features_df(spark)
+        monkeypatch.setattr(inference, "load_latest_features", lambda s, m: features_df)
+        monkeypatch.setattr(
+            inference,
+            "load_latest_model",
+            lambda _db, _fs, _prefix, _spark: (
+                _FakeModel(1.0),
+                {"model_name": "temp_prediction_1h_GBT", "version": "v1"},
+            ),
+        )
+        return features_df
+
+    def _inject_sleep(self, monkeypatch, sleeps):
+        # ``run_with_mongo_retries`` captures ``time.sleep`` as a *default
+        # argument*, so patching ``time.sleep`` would leave that default pointing
+        # at the real sleep. Inject the recorder through the ``sleep`` parameter
+        # instead, keeping the real retry/classification logic exercised.
+        real_run = inference.run_with_mongo_retries
+        monkeypatch.setattr(
+            inference,
+            "run_with_mongo_retries",
+            partial(real_run, sleep=sleeps.append),
+        )
+
+    def test_write_predictions_retried_on_transient_save_error(self, spark, monkeypatch):
+        self._setup_main(monkeypatch, spark)
+        sleeps = []
+        self._inject_sleep(monkeypatch, sleeps)
+
+        save_calls = {"n": 0}
+
+        def flaky_save(self):
+            save_calls["n"] += 1
+            if save_calls["n"] == 1:
+                raise Py4JJavaError(
+                    "com.mongodb.MongoSocketReadException: Prematurely reached end of stream"
+                )
+            return None
+
+        with patch.object(DataFrameWriter, "save", flaky_save):
+            inference.main()
+
+        assert save_calls["n"] == 2  # first save failed, retry succeeded
+        assert sleeps == [5.0]  # one backoff, no real delay
+
+    def test_write_predictions_non_transient_not_retried(self, spark, monkeypatch):
+        self._setup_main(monkeypatch, spark)
+        sleeps = []
+        self._inject_sleep(monkeypatch, sleeps)
+
+        save_calls = {"n": 0}
+
+        def failing_save(self):
+            save_calls["n"] += 1
+            raise Py4JJavaError(
+                "org.apache.spark.SparkException: AnalysisException: cannot resolve column 'city'"
+            )
+
+        with patch.object(DataFrameWriter, "save", failing_save):
+            with pytest.raises(Py4JJavaError):
+                inference.main()
+
+        assert save_calls["n"] == 1  # non-transient -> fail fast, no retry
+        assert sleeps == []
+
+    def test_main_unpersists_features_on_completion(self, spark, monkeypatch):
+        features_df = MagicMock()
+        features_df.count.return_value = 2
+        self._setup_main(monkeypatch, spark, features_df=features_df)
+        monkeypatch.setattr(inference, "write_predictions", lambda output, url: None)
+
+        inference.main()
+
+        features_df.unpersist.assert_called_once_with()
+
+    def test_load_latest_features_retried_on_transient_error(self, spark, monkeypatch):
+        self._setup_main(monkeypatch, spark)
+        sleeps = []
+        self._inject_sleep(monkeypatch, sleeps)
+
+        load_calls = {"n": 0}
+        features_df = _latest_features_df(spark)
+
+        def flaky_load(_spark, _url):
+            load_calls["n"] += 1
+            if load_calls["n"] == 1:
+                raise Py4JJavaError(
+                    "com.mongodb.MongoSocketReadException: Prematurely reached end of stream"
+                )
+            return features_df
+
+        monkeypatch.setattr(inference, "load_latest_features", flaky_load)
+        monkeypatch.setattr(inference, "write_predictions", lambda output, url: None)
+
+        inference.main()
+
+        assert load_calls["n"] == 2  # transient error, then success
+        assert sleeps == [5.0]  # one backoff, no real delay
+
+    def test_load_latest_model_retried_on_transient_error(self, spark, monkeypatch):
+        self._setup_main(monkeypatch, spark)
+        sleeps = []
+        self._inject_sleep(monkeypatch, sleeps)
+
+        temp_loads = {"n": 0}
+
+        def flaky_load(_db, _fs, prefix, _spark):
+            kind = "temp" if prefix.startswith("temp") else "rain"
+            if kind == "temp":
+                temp_loads["n"] += 1
+                if temp_loads["n"] == 1:
+                    raise Py4JJavaError(
+                        "com.mongodb.MongoSocketReadException: Prematurely reached end of stream"
+                    )
+            meta = {"model_name": f"{kind}_prediction_1h_GBT", "version": "v1"}
+            return _FakeModel(1.0 if kind == "temp" else 0.0), meta
+
+        monkeypatch.setattr(inference, "load_latest_model", flaky_load)
+        captured = {}
+        monkeypatch.setattr(
+            inference, "write_predictions", lambda output, url: captured.update(output=output)
+        )
+
+        inference.main()
+
+        assert temp_loads["n"] == 2  # temp model retried once, rain untouched
+        assert sleeps == [5.0]
+        assert captured["output"].count() == 2  # horizon loop still wrote its 2 rows
+
+    def test_main_unpersists_features_when_no_rows(self, spark, monkeypatch):
+        features_df = MagicMock()
+        features_df.count.return_value = 0
+        self._setup_main(monkeypatch, spark, features_df=features_df)
+
+        inference.main()
+
+        # Early return on an empty feature frame still unpersists in ``finally``.
+        features_df.unpersist.assert_called_once_with()

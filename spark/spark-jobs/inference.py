@@ -30,6 +30,7 @@ import sys
 import zipfile
 
 from gridfs import GridFS
+from mongo_retry import run_with_mongo_retries
 from pymongo import MongoClient
 from pyspark.ml import PipelineModel
 from pyspark.sql import functions as F
@@ -163,6 +164,10 @@ def load_latest_features(spark, mongo_url: str):
     # Keep latest record per city
     latest = df.groupBy("city").agg(F.max("timestamp").alias("timestamp"))
     df_latest = latest.join(df, on=["city", "timestamp"], how="inner")
+
+    # Materialise once: every horizon's transform and the final write reuse this
+    # frame, so caching removes ~10 full re-scans of weather_features per run.
+    df_latest = df_latest.cache()
 
     city_count = df_latest.count()
     logger.info("Loaded latest features for %d cities.", city_count)
@@ -355,6 +360,7 @@ def main():
         raise RuntimeError("MONGO_URI environment variable is not set.")
 
     spark = create_spark_session("WeatherInference")
+    df_features = None
 
     try:
         client = MongoClient(mongo_url)
@@ -363,7 +369,10 @@ def main():
 
         horizons = FEATURES_CONFIG["target_horizons"]
 
-        df_features = load_latest_features(spark, mongo_url)
+        df_features = run_with_mongo_retries(
+            lambda: load_latest_features(spark, mongo_url),
+            label="load latest features",
+        )
 
         if df_features.count() == 0:
             logger.warning("No feature rows found in weather_features. Nothing to predict.")
@@ -374,8 +383,14 @@ def main():
             temp_prefix = f"temp_prediction_{horizon}h"
             rain_prefix = f"rain_prediction_{horizon}h"
 
-            temp_model, temp_meta = load_latest_model(db, fs, temp_prefix, spark)
-            rain_model, rain_meta = load_latest_model(db, fs, rain_prefix, spark)
+            temp_model, temp_meta = run_with_mongo_retries(
+                lambda: load_latest_model(db, fs, temp_prefix, spark),
+                label=f"load {temp_prefix} model",
+            )
+            rain_model, rain_meta = run_with_mongo_retries(
+                lambda: load_latest_model(db, fs, rain_prefix, spark),
+                label=f"load {rain_prefix} model",
+            )
 
             if temp_model is None and rain_model is None:
                 # A missing horizon is skipped, never fatal: the remaining
@@ -402,12 +417,20 @@ def main():
             logger.warning("No horizon produced predictions. Run ml_training.py first.")
             return
 
-        write_predictions(output, mongo_url)
+        # Retrying this write cannot duplicate rows: it is an idempotent upsert
+        # keyed on _id (operationType=replace + upsertDocument=true), so a re-run
+        # replaces the same documents instead of appending.
+        run_with_mongo_retries(
+            lambda: write_predictions(output, mongo_url),
+            label="write predictions",
+        )
 
     except Exception as exc:
         logger.error("Inference job failed: %s", exc)
         raise
     finally:
+        if df_features is not None:
+            df_features.unpersist()
         client.close()
         spark.stop()
 

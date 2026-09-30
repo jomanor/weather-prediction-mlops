@@ -19,8 +19,11 @@ from datetime import datetime
 
 import mlflow
 import mlflow.spark
+from bson import ObjectId
 from gridfs import GridFS
+from mongo_retry import run_with_mongo_retries
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 from spark_config import FEATURES_CONFIG, ML_CONFIG, create_spark_session
 
 
@@ -51,6 +54,19 @@ def load_features(spark):
     # one observation, so keep a single sample per hour rather than one per time
     # the job happened to run.
     return df_clean.dropDuplicates(["city", "timestamp"])
+
+
+def _load_features_cached(spark):
+    """Read + materialise the feature table once, as a single retryable unit.
+
+    ``cache()`` + ``count()`` force the read to happen exactly once here; every
+    later action (column-presence counts, per-horizon splits) reads from cache
+    instead of re-scanning Atlas. On a transient failure the caller re-runs this
+    function, which rebuilds the read with a fresh plan.
+    """
+    frame = load_features(spark).cache()
+    frame.count()  # materialise once; later actions read from cache
+    return frame
 
 
 def prepare_features_for_ml(df, target_col, horizon=1):
@@ -915,8 +931,32 @@ def save_model(
         db = client[db_name]
         fs = GridFS(db)
 
+        file_id = ObjectId()
+
         with open(model_zip_path, "rb") as model_zip_file:
-            file_id = fs.put(model_zip_file, filename=model_zip_path.split("/")[-1])
+
+            def _upload_model_file():
+                # A failed put() can consume the file handle, so rewind before
+                # every attempt.
+                model_zip_file.seek(0)
+                try:
+                    fs.put(model_zip_file, _id=file_id, filename=model_zip_path.split("/")[-1])
+                except DuplicateKeyError:
+                    # The files document is written last, so a duplicate _id means an
+                    # earlier attempt completed the upload before its ack was lost.
+                    if fs.exists(file_id):
+                        return
+                    raise
+                except Exception:
+                    # Best-effort: drop a half-written file so a retry cannot leave an
+                    # orphan/duplicate under the same _id.
+                    try:
+                        fs.delete(file_id)
+                    except Exception:
+                        pass
+                    raise
+
+            run_with_mongo_retries(_upload_model_file, label="upload model to GridFS")
 
         print(f"Successfully uploaded model zip to GridFS with file_id: {file_id}")
 
@@ -953,7 +993,12 @@ def save_model(
             metadata["diagnostics"] = _json_safe(diagnostics)
         metadata["commit"] = os.getenv("GITHUB_SHA") or "unknown"
 
-        db[metadata_collection].insert_one(metadata)
+        doc_id = ObjectId()
+        metadata["_id"] = doc_id
+        run_with_mongo_retries(
+            lambda: db[metadata_collection].replace_one({"_id": doc_id}, metadata, upsert=True),
+            label="insert model metadata",
+        )
 
     except Exception as e:
         print(f"Error during model and metadata save: {e}")
@@ -977,8 +1022,9 @@ def main():
         # Both trainers read the whole feature table (column-presence counts and
         # then the split), so cache it once: without this the run reads Atlas
         # once per horizon, which is a large part of the CI runtime.
-        df = load_features(spark).cache()
-        df.count()
+        df = run_with_mongo_retries(
+            lambda: _load_features_cached(spark), label="load training features"
+        )
 
         horizons = FEATURES_CONFIG["target_horizons"]
 
