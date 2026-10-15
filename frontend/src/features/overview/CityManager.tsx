@@ -1,7 +1,8 @@
 import { MapPinPlus, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { useCities } from '@/api/queries'
+import { Button } from '@/components/ui/Button'
 import { useAddCity, useGeoSearch, useRemoveCity } from '@/features/overview/queries'
 import { cn } from '@/lib/cn'
 import { formatLatitude, formatLongitude } from '@/lib/format'
@@ -10,6 +11,10 @@ import { formatLatitude, formatLongitude } from '@/lib/format'
  * Station registry editor: pick a location through the geocoding proxy and
  * remove stations from monitoring. Historical observations are never deleted
  * upstream; removal only stops future ingestion.
+ *
+ * Removal is destructive (it drops the city from the registry ingestion reads),
+ * so it goes through an inline confirmation that names the city and the
+ * consequence. Cancel is focused by default and Escape also cancels.
  */
 export function CityManager({ className }: { className?: string }) {
   const citiesQuery = useCities()
@@ -19,11 +24,21 @@ export function CityManager({ className }: { className?: string }) {
   const [term, setTerm] = useState('')
   const [debounced, setDebounced] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null)
+  const [restoreFocusTo, setRestoreFocusTo] = useState<string | null>(null)
+  const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>())
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebounced(term.trim()), 350)
     return () => window.clearTimeout(timer)
   }, [term])
+
+  /* Return focus to the row's remove button once the confirmation closes. */
+  useEffect(() => {
+    if (pendingRemoval !== null || !restoreFocusTo) return
+    removeButtonRefs.current.get(restoreFocusTo)?.focus()
+    setRestoreFocusTo(null)
+  }, [pendingRemoval, restoreFocusTo])
 
   const geoQuery = useGeoSearch(debounced)
 
@@ -42,6 +57,22 @@ export function CityManager({ className }: { className?: string }) {
   const remove = (name: string) => {
     setError(null)
     removeCity.mutate(name, { onError: (cause) => setError(cause.message) })
+  }
+
+  /** Opens the confirmation only; no request is issued until it is confirmed. */
+  const requestRemoval = (name: string) => {
+    setError(null)
+    setPendingRemoval(name)
+  }
+
+  const cancelRemoval = (name: string) => {
+    setPendingRemoval(null)
+    setRestoreFocusTo(name)
+  }
+
+  const confirmRemoval = (name: string) => {
+    remove(name)
+    setPendingRemoval(null)
   }
 
   return (
@@ -115,26 +146,67 @@ export function CityManager({ className }: { className?: string }) {
           <p className="mt-1.5 text-xs text-fg-3">Cargando…</p>
         ) : (
           <ul className="mt-1.5 max-w-2xl columns-1 gap-x-8 gap-y-0.5 sm:columns-2">
-            {cities.map((city) => (
-              <li
-                key={city.name}
-                className="group flex items-center justify-between gap-2 break-inside-avoid px-1 py-1"
-              >
-                <span className="nums min-w-0 truncate text-xs text-fg-2">
-                  <span className="font-medium text-fg">{city.name}</span>{' '}
-                  {formatLatitude(city.latitude)} {formatLongitude(city.longitude)}
-                </span>
-                <button
-                  type="button"
-                  aria-label={`Quitar ${city.name}`}
-                  onClick={() => remove(city.name)}
-                  disabled={removeCity.isPending}
-                  className="shrink-0 rounded-[3px] p-0.5 text-fg-3 opacity-0 transition-opacity hover:text-bad focus-visible:opacity-100 group-hover:opacity-100"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </li>
-            ))}
+            {cities.map((city) => {
+              const confirming = pendingRemoval === city.name
+              return (
+                <li key={city.name} className="break-inside-avoid px-1 py-1">
+                  <div className="group flex items-center justify-between gap-2">
+                    <span className="nums min-w-0 truncate text-xs text-fg-2">
+                      <span className="font-medium text-fg">{city.name}</span>{' '}
+                      {formatLatitude(city.latitude)} {formatLongitude(city.longitude)}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Quitar ${city.name}`}
+                      onClick={() => requestRemoval(city.name)}
+                      disabled={removeCity.isPending}
+                      ref={(node) => {
+                        if (node) removeButtonRefs.current.set(city.name, node)
+                        else removeButtonRefs.current.delete(city.name)
+                      }}
+                      className={cn(
+                        'shrink-0 rounded-[3px] p-0.5 text-fg-3 opacity-0 transition-opacity hover:text-bad focus-visible:opacity-100 group-hover:opacity-100',
+                        confirming && 'hidden',
+                      )}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {confirming ? (
+                    <div
+                      role="group"
+                      aria-label={`Confirmar quitar ${city.name}`}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          cancelRemoval(city.name)
+                        }
+                      }}
+                      className="animate-in mt-1.5 rounded-[3px] border border-bad/40 bg-bad/5 p-2"
+                    >
+                      <p className="text-[11px] leading-snug text-fg-2">
+                        Ingesta y datos dejarán de actualizarse para{' '}
+                        <span className="font-medium text-fg">{city.name}</span>.
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Button autoFocus size="sm" onClick={() => cancelRemoval(city.name)}>
+                          Cancelar
+                        </Button>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={removeCity.isPending}
+                          onClick={() => confirmRemoval(city.name)}
+                        >
+                          Quitar estación
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </li>
+              )
+            })}
           </ul>
         )}
         <p className="mt-2 max-w-md text-[11px] leading-snug text-fg-3">
