@@ -7,10 +7,12 @@ Uses a local SparkSession (no cluster, no MongoDB).
 All DB read/writes are stubbed out.
 """
 
+import ast
+import inspect
 import os
 import sys
 import unittest.mock as mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pyspark.sql import Row
@@ -303,3 +305,167 @@ class TestPrecipRollingSum:
         result = bp.create_precipitation_rolling_sum(sample_df)
         neg_count = result.filter(F.col("precip_sum_6h") < 0).count()
         assert neg_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Upsert _id, prune cutoff, transient retries — pure, no Spark/Mongo
+# ---------------------------------------------------------------------------
+
+
+class _TransientError(Exception):
+    """Stand-in for a pymongo OperationFailure carrying an error code."""
+
+    def __init__(self, code=None, details=None):
+        super().__init__(f"code={code}")
+        if code is not None:
+            self.code = code
+        if details is not None:
+            self.details = details
+
+
+class MongoNodeIsRecoveringException(Exception):
+    pass
+
+
+class MongoConnectionPoolClearedException(Exception):
+    pass
+
+
+class TestFeatureDocId:
+    """``_id = {city}_{epoch_seconds(timestamp)}`` — the working convention."""
+
+    def test_id_is_city_underscore_epoch_seconds(self):
+        assert bp.feature_doc_id("Madrid", 1_750_000_000) == "Madrid_1750000000"
+
+    def test_id_matches_prediction_convention(self):
+        # Same base composition as inference's _id, minus the horizon suffix.
+        assert bp.feature_doc_id("A Coruña", 1_750_003_600) == "A Coruña_1750003600"
+
+    def test_id_truncates_sub_second_timestamps(self):
+        assert bp.feature_doc_id("Madrid", 1_750_000_000.987) == "Madrid_1750000000"
+
+    def test_id_is_stable_and_distinct(self):
+        assert bp.feature_doc_id("Madrid", 1_750_000_000) == bp.feature_doc_id(
+            "Madrid", 1_750_000_000
+        )
+        assert bp.feature_doc_id("Madrid", 1_750_000_000) != bp.feature_doc_id(
+            "Madrid", 1_750_000_001
+        )
+        assert bp.feature_doc_id("Madrid", 1_750_000_000) != bp.feature_doc_id(
+            "Valencia", 1_750_000_000
+        )
+
+
+class TestPruneCutoff:
+    def test_default_retention_matches_raw_weather_ttl(self):
+        assert bp.RETENTION_DAYS == 180
+
+    def test_cutoff_is_now_minus_retention(self):
+        now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+        assert bp.prune_cutoff(now) == now - timedelta(days=180)
+
+    def test_cutoff_honours_explicit_retention(self):
+        now = datetime(2026, 9, 28, tzinfo=timezone.utc)
+        assert bp.prune_cutoff(now, retention_days=30) == now - timedelta(days=30)
+
+    def test_prune_filter_is_a_bounded_range_predicate(self):
+        cutoff = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        assert bp.prune_filter(cutoff) == {"timestamp": {"$lt": cutoff}}
+
+
+class TestTransientMongoErrors:
+    def test_code_91_shutdown_in_progress_is_transient(self):
+        assert bp.is_transient_mongo_error(_TransientError(code=91)) is True
+
+    def test_code_116_is_transient(self):
+        assert bp.is_transient_mongo_error(_TransientError(code=116)) is True
+
+    def test_code_from_details_is_transient(self):
+        assert bp.is_transient_mongo_error(_TransientError(details={"code": 91})) is True
+
+    def test_node_is_recovering_exception_is_transient(self):
+        assert bp.is_transient_mongo_error(MongoNodeIsRecoveringException("x")) is True
+
+    def test_connection_pool_cleared_exception_is_transient(self):
+        assert bp.is_transient_mongo_error(MongoConnectionPoolClearedException("x")) is True
+
+    def test_other_errors_are_not_transient(self):
+        assert bp.is_transient_mongo_error(ValueError("bad schema")) is False
+        assert bp.is_transient_mongo_error(_TransientError(code=11000)) is False
+
+
+class TestRetryBackoff:
+    def test_delay_is_exponential(self):
+        assert bp.retry_delay_seconds(0, base=5.0, factor=2.0, cap=60.0) == 5.0
+        assert bp.retry_delay_seconds(1, base=5.0, factor=2.0, cap=60.0) == 10.0
+        assert bp.retry_delay_seconds(2, base=5.0, factor=2.0, cap=60.0) == 20.0
+
+    def test_delay_is_capped(self):
+        assert bp.retry_delay_seconds(10, base=5.0, factor=2.0, cap=60.0) == 60.0
+
+    def test_retries_transient_then_succeeds(self):
+        calls = []
+        delays = []
+
+        def fn():
+            calls.append(1)
+            if len(calls) < 3:
+                raise _TransientError(code=91)
+            return "ok"
+
+        assert bp.run_with_mongo_retries(fn, attempts=4, sleep=delays.append) == "ok"
+        assert len(calls) == 3
+        assert delays == [bp.retry_delay_seconds(0), bp.retry_delay_seconds(1)]
+
+    def test_non_transient_error_raises_without_retrying(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            raise ValueError("permanent")
+
+        with pytest.raises(ValueError):
+            bp.run_with_mongo_retries(fn, attempts=4, sleep=lambda _: None)
+        assert len(calls) == 1
+
+    def test_exhausted_attempts_reraise(self):
+        calls = []
+        delays = []
+
+        def fn():
+            calls.append(1)
+            raise _TransientError(code=116)
+
+        with pytest.raises(_TransientError):
+            bp.run_with_mongo_retries(fn, attempts=3, sleep=delays.append)
+        assert len(calls) == 3
+        assert len(delays) == 2
+
+
+class TestWriteIsUpsertNotOverwrite:
+    def test_write_options_express_upsert(self):
+        opts = bp.feature_write_options("mongodb://example", "weather_features")
+        assert opts["operationType"] == "replace"
+        assert opts["upsertDocument"] == "true"
+        assert opts["collection"] == "weather_features"
+        assert "mode" not in opts
+
+    def test_save_uses_append_mode_and_never_overwrite(self):
+        # Inspect the actual `.mode(...)` calls, not prose: the docstring names
+        # the old overwrite behaviour on purpose.
+        tree = ast.parse(inspect.getsource(bp.save_features_to_mongodb))
+        mode_args = [
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "mode"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ]
+        assert "append" in mode_args
+        assert "overwrite" not in mode_args
+
+    def test_save_adds_the_stable_id_column(self):
+        body = inspect.getsource(bp.save_features_to_mongodb)
+        assert "add_feature_id" in body

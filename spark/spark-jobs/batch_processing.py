@@ -4,20 +4,44 @@ batch_processing.py
 Spark feature-engineering job.
 
 Reads from raw_weather (both live consumer records and historical backfill),
-builds atmospheric + time-series features, and overwrites weather_features
-with a full rebuilt snapshot (mode="overwrite").
+builds atmospheric + time-series features, and **upserts** the rebuilt snapshot
+into weather_features, keyed on a deterministic ``_id`` of
+``{city}_{epoch_seconds(timestamp)}``. Rows outside the retention window are
+pruned after a successful write.
+
+Write / retention design
+------------------------
+- The write is an **upsert** (connector ``operationType=replace`` +
+  ``upsertDocument=true``) on the stable ``_id``, not ``mode("overwrite")``.
+  Overwrite dropped and refilled the collection over several minutes, so the
+  live API's quality meter read an empty/partial collection, hourly inference
+  could score a partially-written collection (only the cities present), the
+  ``{city:1,timestamp:-1}`` index was dropped on every run, and a transient
+  Atlas restart mid-write (error 91) could leave the collection half-written.
+  Upsert never drops the collection, so the read API and the index stay intact
+  during a rebuild, and a re-run replaces the same documents (idempotent,
+  retry/backfill-safe).
+- After a successful write, rows older than ``RETENTION_DAYS`` (default 180 d,
+  aligned with raw_weather's TTL) are deleted. This is the **one intentional
+  non-city-prefixed delete** in the job: a single bounded range predicate on the
+  TTL-aligned ``timestamp`` field with no sort. weather_features is a rolling
+  snapshot (~30k docs at current volume), so the scan is small and cannot become
+  an Atlas M0 blocking sort (code 292).
 
 Key changes vs the previous version
 -------------------------------------
 - Source collection: raw_weather  (was weather_data)
-- Save mode: overwrite            (full rebuilt snapshot each run)
+- Save mode: upsert on ``_id`` + prune  (was a full overwrite each run)
 - Atmospheric pressure-level features extracted from upper-air payload
 - Specific humidity computed from relative humidity, temperature, and pressure
 - 6-hour rolling precipitation sum
 """
 
+import logging
 import os
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
@@ -25,6 +49,12 @@ from pyspark.sql.window import Window
 
 sys.path.append("/opt/config")
 from spark_config import FEATURES_CONFIG, create_spark_session
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Extraction
@@ -288,7 +318,7 @@ def create_target_variable(df, horizons):
 
 
 # ---------------------------------------------------------------------------
-# Incremental save
+# Upsert + retention
 # ---------------------------------------------------------------------------
 
 #: Observation inputs only. The ``save_features_to_mongodb`` dropna subset is
@@ -297,17 +327,188 @@ def create_target_variable(df, horizons):
 #: discard the freshest data on every rebuild (the ~6 h staleness bug).
 OBSERVATION_INPUT_COLUMNS = ["temperature", "humidity", "pressure", "wind_speed"]
 
+FEATURES_COLLECTION = "weather_features"
+MONGO_DATABASE = "weather_db"
 
-def save_features_to_mongodb(df, horizons, collection_name="weather_features"):
+#: Retention window for weather_features, in days. Kept aligned with
+#: raw_weather's 180-day TTL (``backend/app/db/mongo.py:TTL_INDEXES``) so the
+#: feature snapshot never outlives the raw data it was derived from.
+RETENTION_DAYS = int(os.getenv("WEATHER_FEATURES_RETENTION_DAYS", "180"))
+
+#: Transient Atlas failures a bounded retry absorbs, so one M0 restart does not
+#: abort a whole rebuild. 91 = ShutdownInProgress, 116 = InterruptedAtShutdown
+#: (pymongo surfaces these as MongoNodeIsRecoveringException /
+#: MongoConnectionPoolClearedException).
+TRANSIENT_MONGO_ERROR_CODES = frozenset({91, 116})
+TRANSIENT_MONGO_EXCEPTION_NAMES = frozenset(
+    {"MongoNodeIsRecoveringException", "MongoConnectionPoolClearedException"}
+)
+
+MONGO_RETRY_ATTEMPTS = 4
+MONGO_RETRY_BASE_DELAY_SECONDS = 5.0
+MONGO_RETRY_BACKOFF_FACTOR = 2.0
+MONGO_RETRY_MAX_DELAY_SECONDS = 60.0
+
+
+def feature_doc_id(city, timestamp_epoch_seconds):
+    """Stable ``weather_features`` ``_id``: ``{city}_{epoch_seconds}``.
+
+    The same composition the predictions write uses (``inference.py``
+    ``build_output_df``), minus the horizon suffix: one row per city-hour.
+    Re-running a rebuild replaces the same document instead of appending.
     """
-    Save the feature DataFrame to MongoDB in *overwrite* mode so that previously
-    processed rows are not duplicated.
+    return f"{city}_{int(timestamp_epoch_seconds)}"
 
-    The job is designed to be run periodically (every 6 hours by the scheduler).
-    Each run recomputes the whole history from raw_weather and replaces the
-    collection. Appending instead left one complete extra copy of the history
-    behind per run -- 2689 + 18172 + 18172 documents after two of them -- which
-    inflated storage and taught the model from the same hour several times over.
+
+def prune_cutoff(now=None, retention_days=RETENTION_DAYS):
+    """Oldest timestamp to keep: ``now - retention_days`` (UTC aware)."""
+    now = now or datetime.now(timezone.utc)
+    return now - timedelta(days=retention_days)
+
+
+def prune_filter(cutoff):
+    """Bounded, city-agnostic delete predicate for the retention prune.
+
+    This is the one intentional **non-city-prefixed** delete in the job. It is
+    safe because it is a plain range predicate on the TTL-aligned ``timestamp``
+    field with **no sort** — the ``{city:1,timestamp:-1}`` rule exists for
+    sorts, and no global ``{timestamp:-1}`` index is added. weather_features is
+    a rolling snapshot, so the scan is small and bounded by the retained window.
+    """
+    return {"timestamp": {"$lt": cutoff}}
+
+
+def _error_code(exc):
+    code = getattr(exc, "code", None)
+    if code is None:
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            code = details.get("code")
+    return code
+
+
+def is_transient_mongo_error(exc):
+    """True for Atlas failures worth retrying (code 91/116 or recovering/pool)."""
+    code = _error_code(exc)
+    if code is not None:
+        try:
+            if int(code) in TRANSIENT_MONGO_ERROR_CODES:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    return any(cls.__name__ in TRANSIENT_MONGO_EXCEPTION_NAMES for cls in type(exc).__mro__)
+
+
+def retry_delay_seconds(
+    attempt,
+    base=MONGO_RETRY_BASE_DELAY_SECONDS,
+    factor=MONGO_RETRY_BACKOFF_FACTOR,
+    cap=MONGO_RETRY_MAX_DELAY_SECONDS,
+):
+    """Exponential backoff delay for a zero-based *attempt*, capped."""
+    return min(cap, base * (factor**attempt))
+
+
+def run_with_mongo_retries(
+    fn,
+    *,
+    label="mongo operation",
+    attempts=MONGO_RETRY_ATTEMPTS,
+    sleep=time.sleep,
+):
+    """Run *fn* with bounded exponential backoff on transient Mongo errors.
+
+    Non-transient errors (and the final attempt) re-raise immediately. Every
+    Mongo phase here is idempotent (upsert on ``_id``, range delete), so
+    retrying the whole phase is safe: it never duplicates or corrupts rows.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == attempts - 1 or not is_transient_mongo_error(exc):
+                raise
+            delay = retry_delay_seconds(attempt)
+            logger.warning(
+                "%s failed with a transient error (%s); retry %d/%d in %.1fs",
+                label,
+                exc,
+                attempt + 1,
+                attempts - 1,
+                delay,
+            )
+            sleep(delay)
+
+
+def add_feature_id(df):
+    """Add the deterministic ``_id`` column (``{city}_{epoch(timestamp)}``)."""
+    return df.withColumn(
+        "_id",
+        F.concat_ws("_", F.col("city"), F.unix_timestamp(F.col("timestamp")).cast("string")),
+    )
+
+
+def feature_write_options(mongo_url, collection_name=FEATURES_COLLECTION):
+    """Connector 10.5.0 write options expressing an upsert, never an overwrite.
+
+    ``operationType=replace`` + ``upsertDocument=true`` is the 10.x form (the
+    same one ``inference.py:write_predictions`` uses): each ``_id`` replaces its
+    document, inserting it when absent. ``replaceDocument`` is the deprecated
+    3.x alias superseded by ``operationType`` — not required in 10.5.0, so it is
+    deliberately not set. ``mode("append")`` at the call site only means "do not
+    drop the collection"; the per-document replace comes from these options.
+    """
+    return {
+        "connection.uri": mongo_url,
+        "database": MONGO_DATABASE,
+        "collection": collection_name,
+        "operationType": "replace",
+        "upsertDocument": "true",
+    }
+
+
+def prune_old_features(
+    mongo_url, collection_name=FEATURES_COLLECTION, retention_days=RETENTION_DAYS, now=None
+):
+    """Delete ``weather_features`` rows older than the retention window.
+
+    One bounded, city-agnostic ``deleteMany`` range predicate (see
+    ``prune_filter``) run after a successful write. Returns the deleted count.
+    """
+    from pymongo import MongoClient
+
+    cutoff = prune_cutoff(now, retention_days)
+    client = MongoClient(mongo_url)
+    try:
+        collection = client[MONGO_DATABASE][collection_name]
+        deleted = run_with_mongo_retries(
+            lambda: collection.delete_many(prune_filter(cutoff)).deleted_count,
+            label=f"{collection_name} prune",
+        )
+    finally:
+        client.close()
+
+    print(f"Pruned {deleted} {collection_name} rows older than {cutoff.isoformat()}")
+    return deleted
+
+
+def save_features_to_mongodb(
+    df, horizons, collection_name=FEATURES_COLLECTION, retention_days=RETENTION_DAYS, now=None
+):
+    """
+    Upsert the rebuilt feature frame into MongoDB, then prune old rows.
+
+    The job runs every ~6 hours and recomputes the whole history from
+    raw_weather. The write is an **upsert keyed on the deterministic ``_id``**
+    (``{city}_{epoch_seconds(timestamp)}``) rather than ``mode("overwrite")``:
+    overwrite dropped and refilled the collection over several minutes, so the
+    live API's quality meter read an empty/partial collection, hourly inference
+    could score only the cities written so far, and the ``{city:1,timestamp:-1}``
+    index was dropped on every run. Upsert never drops the collection, so readers
+    and the index survive a rebuild, and a re-run replaces the same documents
+    (idempotent, retry/backfill-safe). A transient Atlas restart is absorbed by
+    bounded retries around both the read action and the write.
 
     The ``dropna`` subset is the *observation inputs only* (``temperature``,
     ``humidity``, ``pressure``, ``wind_speed``). Targets must **not** be in the
@@ -315,17 +516,31 @@ def save_features_to_mongodb(df, horizons, collection_name="weather_features"):
     (whose lead target is always null), so every healthy rebuild landed ~6 h
     stale. *horizons* is accepted for interface clarity only — it no longer
     gates the row-keeping decision.
+
+    After a successful write, rows with ``timestamp < now - retention_days``
+    (default 180 d, matching raw_weather's TTL) are pruned.
     """
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
-    print(f"BEFORE dropna: {df.count()} rows")
     df_clean = df.dropna(subset=OBSERVATION_INPUT_COLUMNS)
     df_clean = df_clean.dropDuplicates(["city", "timestamp"])
-    print(f"AFTER dropna & dropDuplicates: {df_clean.count()} rows")
+    df_clean = add_feature_id(df_clean)
 
-    df_clean.write.format("mongodb").option("connection.uri", mongo_url).option(
-        "database", "weather_db"
-    ).option("collection", collection_name).mode("overwrite").save()
+    # Read phase: this action is what pulls raw_weather through Spark (the
+    # dropna/dropDuplicates/withColumn above are lazy), so the retry covers the
+    # read, not just the write below.
+    row_count = run_with_mongo_retries(df_clean.count, label=f"{collection_name} read")
+    print(f"AFTER dropna & dropDuplicates: {row_count} rows")
+
+    def _write():
+        writer = df_clean.write.format("mongodb")
+        for key, value in feature_write_options(mongo_url, collection_name).items():
+            writer = writer.option(key, value)
+        writer.mode("append").save()
+
+    run_with_mongo_retries(_write, label=f"{collection_name} write")
+
+    prune_old_features(mongo_url, collection_name, retention_days=retention_days, now=now)
 
     return df_clean
 

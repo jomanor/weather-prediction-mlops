@@ -22,8 +22,9 @@ steady-state model from *derived* inputs and measured document sizes:
   estimate (600 B).
 
 Rows are one observation per station per hour; ``weather_features`` is a single
-overwritten snapshot bounded by the *raw* window (see the overwrite invariant
-test), so it is charged ``raw_weather`` days, not its own TTL.
+rolling snapshot maintained by an ``_id``-keyed upsert and bounded by the *raw*
+window (see ``test_weather_features_write_is_an_idempotent_upsert``), so it is
+charged ``raw_weather`` days, not its own TTL.
 
 **M2 (Batch 4):** inference scores every configured horizon per run and writes
 one row per ``(city, source_timestamp, horizon)`` with ``operationType=replace``
@@ -165,8 +166,8 @@ def steady_state_bytes(rebuilds: int | None = None, horizons: int | None = None)
     rows = {
         # raw_weather accumulates for its full TTL window.
         "raw_weather": (raw_days * per_day, MEASURED_AVG_OBJ_SIZE["raw_weather"]),
-        # weather_features is a single overwritten snapshot bounded by the raw
-        # window (see test_weather_features_is_written_as_an_overwrite_snapshot).
+        # weather_features is a single upsert-maintained snapshot bounded by the
+        # raw window (see test_weather_features_write_is_an_idempotent_upsert).
         "weather_features": (raw_days * per_day, MEASURED_AVG_OBJ_SIZE["weather_features"]),
         "weather_data": (
             RETENTION_DAYS["weather_data"] * per_day,
@@ -273,7 +274,7 @@ def test_safety_margin_is_meaningful():
 
 
 # ---------------------------------------------------------------------------
-# weather_features overwrite invariant — justifies treating it as a snapshot.
+# weather_features upsert invariant — justifies treating it as a snapshot.
 # ---------------------------------------------------------------------------
 
 
@@ -285,13 +286,30 @@ def _function_body(source: str, name: str) -> str:
     return tail if following is None else tail[: following.start() + 1]
 
 
-def test_weather_features_is_written_as_an_overwrite_snapshot():
-    body = _function_body(BATCH_PROCESSING_SOURCE.read_text(), "save_features_to_mongodb")
-    compact = re.sub(r"\s+", "", body)
+def test_weather_features_write_is_an_idempotent_upsert():
+    """Upsert invariant: replace each doc by ``_id``, never drop the collection.
 
-    # The function defaults to the weather_features collection ...
-    assert 'collection_name="weather_features"' in compact
-    # ... and writes it with overwrite, not append. The repo's actual write
-    # options build as: .option("collection", collection_name).mode("overwrite")
-    assert '.option("collection",collection_name).mode("overwrite")' in compact
-    assert 'mode("append")' not in compact
+    Guards the destructive ``mode("overwrite")`` snapshot: overwrite dropped and
+    refilled ``weather_features`` over several minutes, so live readers saw an
+    empty/partial collection, hourly inference scored only the cities written so
+    far, and the ``{city:1,timestamp:-1}`` index was lost on every run. The
+    write must stay a 10.5.0 connector upsert (``operationType=replace`` +
+    ``upsertDocument=true``) on an append, and the default target must stay
+    ``FEATURES_COLLECTION``.
+    """
+    source = BATCH_PROCESSING_SOURCE.read_text()
+    options = re.sub(r"\s+", "", _function_body(source, "feature_write_options"))
+    save = re.sub(r"\s+", "", _function_body(source, "save_features_to_mongodb"))
+
+    # Per-document replace on the deterministic ``_id`` (connector 10.5.0 form).
+    assert '"operationType":"replace"' in options
+    assert '"upsertDocument":"true"' in options
+    assert '"collection":collection_name' in options
+
+    # The save appends — a dropped collection (overwrite) must never come back.
+    assert '.mode("append")' in save
+    assert '.mode("overwrite")' not in save
+
+    # The default target is the weather_features collection, defined once.
+    assert re.search(r'^FEATURES_COLLECTION = "weather_features"$', source, re.MULTILINE)
+    assert "collection_name=FEATURES_COLLECTION" in save
