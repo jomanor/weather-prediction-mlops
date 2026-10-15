@@ -10,13 +10,15 @@ with a local master. No MongoDB, no MLflow, no cluster.
 """
 
 import importlib.util
+import io
 import os
 import sys
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, call, mock_open, patch
 
 import numpy as np
 import pytest
+from pymongo.errors import AutoReconnect, DuplicateKeyError
 from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql import Row
 from pyspark.sql import functions as F
@@ -620,7 +622,7 @@ def _save_and_capture(monkeypatch, tmp_path, commit, **save_kwargs):
             _FakeWritableModel(), "test_model", "GBT", "temperature", 1, **save_kwargs
         )
 
-    return mock_db["model_registry"].insert_one.call_args[0][0]
+    return mock_db["model_registry"].replace_one.call_args[0][1]
 
 
 class TestSaveModel:
@@ -681,6 +683,215 @@ class TestSaveModel:
         }
         inserted = _save_and_capture(monkeypatch, tmp_path, "abc123", diagnostics=diagnostics)
         assert inserted["diagnostics"] == diagnostics
+
+
+def _mock_save_model_env(monkeypatch, tmp_path, put_side_effect=None, replace_side_effect=None):
+    """Patch ``save_model``'s Mongo/GridFS/file deps and inject a no-op sleep
+    into the retry helper so transient-retry tests run instantly.
+
+    Patch target: ``run_with_mongo_retries``'s ``sleep`` kwarg (default
+    ``mongo_retry.time.sleep``). We keep the real helper and only bind
+    ``sleep`` to a recorder, so retry/backoff semantics are exercised for real.
+    """
+    monkeypatch.setenv("SPARK_TMP_DIR", str(tmp_path))
+    monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+    monkeypatch.setenv("GITHUB_SHA", "abc123")
+
+    mock_client = MagicMock()
+    mock_db = MagicMock()
+    mock_client.__getitem__.return_value = mock_db
+    mock_collection = mock_db["model_registry"]
+    mock_fs = MagicMock()
+    if put_side_effect is not None:
+        mock_fs.put.side_effect = put_side_effect
+    if replace_side_effect is not None:
+        mock_collection.replace_one.side_effect = replace_side_effect
+
+    real_run = ml_training.run_with_mongo_retries
+    sleeps = []
+
+    monkeypatch.setattr(ml_training, "MongoClient", lambda *a, **k: mock_client)
+    monkeypatch.setattr(ml_training, "GridFS", lambda *a, **k: mock_fs)
+    monkeypatch.setattr(ml_training.shutil, "make_archive", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.open", mock_open(read_data=b"z"))
+    monkeypatch.setattr(
+        ml_training,
+        "run_with_mongo_retries",
+        lambda fn, **kw: real_run(fn, sleep=sleeps.append, **kw),
+    )
+
+    return mock_fs, mock_collection
+
+
+class _RecordingGridFS:
+    """GridFS stand-in whose ``put`` genuinely reads the handle and records the
+    bytes it saw. Reading *before* raising on the first attempt simulates the
+    real failure mode: GridFS streams from the handle's current position to EOF,
+    so a failed ``put`` leaves the handle fully consumed."""
+
+    def __init__(self, transient_error):
+        self.put_bytes: list[bytes] = []
+        self.put_ids: list = []
+        self.deleted_ids: list = []
+        self._transient_error = transient_error
+        self._attempt = 0
+
+    def put(self, handle, **kwargs):
+        self._attempt += 1
+        self.put_bytes.append(handle.read())
+        self.put_ids.append(kwargs.get("_id"))
+        if self._attempt == 1:
+            raise self._transient_error
+        return None
+
+    def delete(self, file_id):
+        self.deleted_ids.append(file_id)
+
+
+def _mock_save_model_env_real_handle(monkeypatch, tmp_path, fs, payload):
+    """``_mock_save_model_env`` variant where the upload handle is a real
+    ``io.BytesIO`` (known ``payload``) instead of ``mock_open``. The handle is
+    genuinely consumed by ``fs.put``, so ``save_model``'s ``seek(0)`` rewind is
+    observable and a mutation removing it makes the retry upload empty bytes."""
+    monkeypatch.setenv("SPARK_TMP_DIR", str(tmp_path))
+    monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+    monkeypatch.setenv("GITHUB_SHA", "abc123")
+
+    mock_client = MagicMock()
+    mock_db = MagicMock()
+    mock_client.__getitem__.return_value = mock_db
+    mock_collection = mock_db["model_registry"]
+
+    def _fake_open(path, mode="r", *args, **kwargs):
+        # ``save_model`` only opens the zip for upload, always in binary mode.
+        assert mode == "rb", f"unexpected open mode {mode!r} for {path}"
+        return io.BytesIO(payload)
+
+    real_run = ml_training.run_with_mongo_retries
+    sleeps = []
+
+    monkeypatch.setattr(ml_training, "MongoClient", lambda *a, **k: mock_client)
+    monkeypatch.setattr(ml_training, "GridFS", lambda *a, **k: fs)
+    monkeypatch.setattr(ml_training.shutil, "make_archive", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.open", _fake_open)
+    monkeypatch.setattr(
+        ml_training,
+        "run_with_mongo_retries",
+        lambda fn, **kw: real_run(fn, sleep=sleeps.append, **kw),
+    )
+
+    return mock_collection, sleeps
+
+
+class TestSaveModelRetries:
+    """Transient Atlas faults on the GridFS upload / registry write must retry
+    without duplicating the model or changing its ``_id``."""
+
+    def test_gridfs_upload_retries_and_reuses_same_id(self, monkeypatch, tmp_path):
+        fs, collection = _mock_save_model_env(
+            monkeypatch, tmp_path, put_side_effect=[AutoReconnect("connection closed"), None]
+        )
+
+        ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        assert fs.put.call_count == 2
+        first_id = fs.put.call_args_list[0].kwargs["_id"]
+        second_id = fs.put.call_args_list[1].kwargs["_id"]
+        assert first_id == second_id
+        # The failed attempt's half-written file is removed exactly once.
+        fs.delete.assert_called_once_with(first_id)
+        # The registry exposes the same id the upload used.
+        doc = collection.replace_one.call_args[0][1]
+        assert doc["gridfs_file_id"] == first_id
+
+    def test_gridfs_upload_duplicate_key_existing_file_completes(self, monkeypatch, tmp_path):
+        fs, collection = _mock_save_model_env(
+            monkeypatch,
+            tmp_path,
+            put_side_effect=[
+                AutoReconnect("connection closed"),
+                DuplicateKeyError("E11000 duplicate key error"),
+            ],
+        )
+        fs.exists.return_value = True
+
+        ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        assert fs.put.call_count == 2
+        first_id = fs.put.call_args_list[0].kwargs["_id"]
+        second_id = fs.put.call_args_list[1].kwargs["_id"]
+        assert first_id == second_id
+        # The duplicate-key branch must not delete: the file is already complete
+        # on the server. The single delete is the transient first attempt's
+        # best-effort cleanup.
+        assert fs.delete.call_count == 1
+        doc = collection.replace_one.call_args[0][1]
+        assert doc["gridfs_file_id"] == first_id
+
+    def test_gridfs_upload_duplicate_key_missing_file_raises(self, monkeypatch, tmp_path):
+        fs, _collection = _mock_save_model_env(
+            monkeypatch, tmp_path, put_side_effect=[DuplicateKeyError("E11000 duplicate key error")]
+        )
+        fs.exists.return_value = False
+
+        with pytest.raises(DuplicateKeyError):
+            ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        # DuplicateKeyError is non-transient, so the helper re-raises on the
+        # first attempt instead of retrying.
+        assert fs.put.call_count == 1
+        fs.delete.assert_not_called()
+
+    def test_gridfs_upload_non_transient_failure_not_retried(self, monkeypatch, tmp_path):
+        fs, _collection = _mock_save_model_env(
+            monkeypatch, tmp_path, put_side_effect=[ValueError("bad model bytes")]
+        )
+
+        with pytest.raises(ValueError, match="bad model bytes"):
+            ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        assert fs.put.call_count == 1
+
+    def test_registry_write_retries_same_id_upsert(self, monkeypatch, tmp_path):
+        _fs, collection = _mock_save_model_env(
+            monkeypatch, tmp_path, replace_side_effect=[AutoReconnect("connection closed"), None]
+        )
+
+        ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        assert collection.replace_one.call_count == 2
+        first = collection.replace_one.call_args_list[0]
+        second = collection.replace_one.call_args_list[1]
+        assert first.kwargs == {"upsert": True}
+        assert second.kwargs == {"upsert": True}
+        assert first.args[0] == second.args[0]  # same _id filter on both attempts
+        doc = second.args[1]
+        assert second.args[0] == {"_id": doc["_id"]}
+
+    def test_retry_reuploads_complete_zip_after_handle_consumed(self, monkeypatch, tmp_path):
+        """A failed ``fs.put`` consumes the real file handle; the rewind must make
+        the retry re-stream the *whole* payload. Without ``seek(0)`` the retry
+        reads from EOF and GridFS stores a truncated (empty) zip under the same
+        ``_id`` — corrupt model, green CI."""
+        payload = b"complete-model-zip-payload"
+        fs = _RecordingGridFS(AutoReconnect("connection closed"))
+        collection, sleeps = _mock_save_model_env_real_handle(monkeypatch, tmp_path, fs, payload)
+
+        ml_training.save_model(_FakeWritableModel(), "test_model", "GBT", "temperature", 1)
+
+        # Both attempts streamed the complete payload (equal, non-empty).
+        assert len(fs.put_bytes) == 2
+        assert fs.put_bytes[0] == payload
+        assert fs.put_bytes[1] == payload
+        assert fs.put_bytes[1] != b""
+        # Same _id across attempts, failed attempt cleaned up once, and the
+        # registry exposes that same id.
+        assert fs.put_ids[0] == fs.put_ids[1]
+        assert fs.deleted_ids == [fs.put_ids[0]]
+        doc = collection.replace_one.call_args[0][1]
+        assert doc["gridfs_file_id"] == fs.put_ids[0]
+        # Retry slept once (recorded, not real).
+        assert sleeps == [5.0]
 
 
 class _FakeReader:
@@ -769,6 +980,77 @@ class TestLoadFeatures:
         # ... and the newest all-null-target row is retained.
         assert out[1].timestamp == base + timedelta(hours=2)
         assert out[1].target_temp_1h is None and out[1].target_temp_3h is None
+
+
+class TestLoadFeaturesCached:
+    """``_load_features_cached`` reads + materialises once, and is retried as a
+    single unit by ``run_with_mongo_retries`` so a transient Atlas blip re-runs
+    the read with a fresh plan instead of aborting the ~32 min training run."""
+
+    def test_materialises_once_and_returns_cached_frame(self, monkeypatch):
+        frame = MagicMock()
+        cached = MagicMock()
+        frame.cache.return_value = cached
+        monkeypatch.setattr(ml_training, "load_features", lambda _spark: frame)
+
+        parent = MagicMock()
+        parent.attach_mock(frame.cache, "cache")
+        parent.attach_mock(cached.count, "count")
+
+        out = ml_training._load_features_cached(MagicMock())
+
+        assert out is cached
+        # cache() on the freshly loaded frame, then count() to materialise.
+        parent.assert_has_calls([call.cache(), call.count()])
+
+    def test_no_retry_when_read_succeeds_first_try(self, monkeypatch):
+        calls = {"n": 0}
+        frame = MagicMock()
+        cached = MagicMock()
+        frame.cache.return_value = cached
+
+        def fake_load(_spark):
+            calls["n"] += 1
+            return frame
+
+        monkeypatch.setattr(ml_training, "load_features", fake_load)
+        # Patch target: run_with_mongo_retries' ``sleep`` kwarg (default
+        # mongo_retry.time.sleep) — bind it to a recorder so the test is instant.
+        sleeps = []
+        out = ml_training.run_with_mongo_retries(
+            lambda: ml_training._load_features_cached(MagicMock()),
+            label="load training features",
+            sleep=sleeps.append,
+        )
+
+        assert out is cached
+        assert calls["n"] == 1
+        assert sleeps == []
+
+    def test_retries_transient_failure_then_materialises(self, monkeypatch):
+        calls = {"n": 0}
+        frame = MagicMock()
+        cached = MagicMock()
+        frame.cache.return_value = cached
+
+        def fake_load(_spark):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise AutoReconnect("connection closed")
+            return frame
+
+        monkeypatch.setattr(ml_training, "load_features", fake_load)
+        # Patch target: run_with_mongo_retries' ``sleep`` kwarg (see above).
+        sleeps = []
+        out = ml_training.run_with_mongo_retries(
+            lambda: ml_training._load_features_cached(MagicMock()),
+            label="load training features",
+            sleep=sleeps.append,
+        )
+
+        assert out is cached
+        assert calls["n"] == 2
+        assert sleeps == [5.0]
 
 
 def _horizon_isolation_frame(spark):
@@ -867,3 +1149,72 @@ class TestMainPerHorizonIsolation:
             ("temp_prediction_1h_GBT", 1),
             ("temp_prediction_3h_GBT", 3),
         ]
+
+    def test_feature_load_transient_error_retries_and_trains(self, spark, monkeypatch):
+        """``main()`` wraps ``_load_features_cached`` in ``run_with_mongo_retries``:
+        a single transient read failure must re-run the load (not abort the run)
+        and still train + persist, with the backoff recorded instead of slept."""
+        frame = _horizon_isolation_frame(spark)
+        loads = {"n": 0}
+        trained: dict[int, list] = {}
+        saved: list[tuple] = []
+
+        monkeypatch.setattr(ml_training, "FEATURES_CONFIG", {"target_horizons": [1]})
+        monkeypatch.setattr(ml_training, "create_spark_session", lambda *a, **k: MagicMock())
+
+        def fake_load_cached(_spark):
+            loads["n"] += 1
+            if loads["n"] == 1:
+                raise AutoReconnect("connection closed")
+            return frame
+
+        monkeypatch.setattr(ml_training, "_load_features_cached", fake_load_cached)
+
+        def fake_split(horizon_df):
+            return horizon_df, horizon_df, horizon_df, {"kind": "temporal"}
+
+        monkeypatch.setattr(ml_training, "temporal_split", fake_split)
+
+        def fake_temp_train(horizon_df, _train, _val, _test, horizon):
+            trained.setdefault(horizon, []).append(horizon_df)
+            return (
+                MagicMock(),
+                "GBT",
+                [],
+                {"rmse": 1.0},
+                {},
+                {},
+                ["temperature"],
+                {"drift_psi": {}},
+            )
+
+        def fake_rain_train(_df, _train, _val, _test, horizon):
+            return (MagicMock(), "GBT", [], {"brier": 0.1}, {}, None, ["temperature"], None)
+
+        monkeypatch.setattr(ml_training, "train_temperature_prediction_model", fake_temp_train)
+        monkeypatch.setattr(ml_training, "train_rain_prediction_model", fake_rain_train)
+
+        def fake_save(_model, name, **kwargs):
+            saved.append((name, kwargs["horizon"]))
+
+        monkeypatch.setattr(ml_training, "save_model", fake_save)
+        monkeypatch.setattr(ml_training, "_log_to_mlflow", lambda **kwargs: None)
+
+        # Keep the real retry helper but bind sleep to a recorder (no real sleep),
+        # so the retry boundary in main() itself is what this test pins.
+        real_run = ml_training.run_with_mongo_retries
+        sleeps = []
+        monkeypatch.setattr(
+            ml_training,
+            "run_with_mongo_retries",
+            lambda fn, **kw: real_run(fn, sleep=sleeps.append, **kw),
+        )
+
+        ml_training.main()
+
+        # Both read attempts observed, one recorded backoff, and the run still
+        # trained and persisted the horizon's models.
+        assert loads["n"] == 2
+        assert sleeps == [5.0]
+        assert list(trained) == [1] and len(trained[1]) == 1
+        assert sorted(saved) == [("rain_prediction_1h_GBT", 1), ("temp_prediction_1h_GBT", 1)]
