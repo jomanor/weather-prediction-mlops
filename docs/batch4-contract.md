@@ -123,7 +123,9 @@ ML_CONFIG["long_horizon_from"] = 12          # horizons >= this use a reduced gr
   `maxDriftPsi` = max finite `drift_psi` values: `<0.1` **stable**, `≤0.25` **warn**,
   `>0.25` **drift**. Show it on `ModelsPage`.
 - WS-E: `scripts/pipeline_summary.py` prints a `::warning`/summary line listing any model
-  whose `maxDriftPsi > 0.25` (read from `model_registry`), plus the count of scored models.
+  whose `skill_score <= 0.0` (no better than persistence → roll back/retrain; read from
+  `model_registry`), plus the count of scored models. Per-feature PSI (top-3) is reported
+  informationally; the ModelsPage badge still derives from `maxDriftPsi`.
 
 ## Contract 4 — D2 analytics endpoints (WS-C produces, WS-D2 consumes)
 

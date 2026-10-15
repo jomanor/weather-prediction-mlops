@@ -93,7 +93,7 @@ was ruled out.
 - **Batch 4 shipped (all four workstreams):**
   - **M2 horizons as config** (`spark/config/spark_config.py:37`): `FEATURES_CONFIG["target_horizons"] = [1,3,6,12,24]` replaces `target_horizon`; `ML_CONFIG["long_horizon_from"] = 12` uses a reduced grid (first value of each param) for `h >= 12`. One-pass `create_target_variable(df, horizons)`; `ml_training.main` caches the frame once and trains per horizon (per-horizon dropna/split/`data_snapshot`); `inference.main` loads once, loops horizons, skips a missing model with a warning, and unions all horizons into ONE upsert. `_id = {city}_{epoch(source_timestamp)}_{h}h`.
   - **M2 freshness fix**: `save_features_to_mongodb`'s `dropna` subset is the observation inputs only, so the newest observation row survives (it previously forced every healthy rebuild ~6 h stale). **Critical review fix:** `prepare_features_for_ml` now excludes **all** `target_*` columns (it previously kept the other horizons' labels, leaking future values and making inference write nothing).
-  - **M4 diagnostics** (additive `model_registry.diagnostics`): `by_city`, `by_hour_of_day` (24, local hour), `by_rain_bucket` (dry <0.1 / light 0.1–2 / moderate 2–8 / heavy ≥8 mm), `drift_psi` (10 equal-width train bins, eps-guarded, null when <10 rows; a train→test proxy). Temperature slices fill rmse/mae/bias, rain slices brier, empty slices `n:0` + nulls. Exposed via `/api/models` (`ModelInfo.diagnostics`) and rendered as a ModelsPage "Deriva" badge (`<0.1` ok / `≤0.25` warn / `>0.25` drift, neutral when absent); `scripts/pipeline_summary.py` emits a non-blocking `::warning` for models with `maxDriftPsi > 0.25`.
+  - **M4 diagnostics** (additive `model_registry.diagnostics`): `by_city`, `by_hour_of_day` (24, local hour), `by_rain_bucket` (dry <0.1 / light 0.1–2 / moderate 2–8 / heavy ≥8 mm), `drift_psi` (10 equal-width train bins, eps-guarded, null when <10 rows; a train→test proxy). Temperature slices fill rmse/mae/bias, rain slices brier, empty slices `n:0` + nulls. Exposed via `/api/models` (`ModelInfo.diagnostics`) and rendered as a ModelsPage "Deriva" badge (`<0.1` ok / `≤0.25` warn / `>0.25` drift, neutral when absent); `scripts/pipeline_summary.py` reports the top-3 per-feature PSI per model (informational) and emits a non-blocking `::warning` only on actionable degradation (`skill_score <= 0.0`), title `Model skill degradation`.
   - **Prediction API**: `GET /api/predictions/latest?horizon=` (omitted → one row per `(city, horizon_hours)`; provided → one row per city) and `GET /api/predictions/{city}?horizon=`; response shapes unchanged. Frontend horizon selector (1/3/6/12/24, default 1) on the station page + `useLatestPredictions(horizon)` on overview.
   - **D2 analytics**: six cached read-only endpoints under `/api/analytics` (daily, climatology, wind-rose, diurnal, correlation, error-by-hour), all on-demand over `weather_features`, TTL 300 s + ETag/304, no new collection and no Spark/CI stage. New frontend "Analítica" page (feature `analytics`, order 50). `error-by-hour` joins the observed temperature at the **target hour** `source_timestamp + horizon_hours`, not `prediction_timestamp`.
   - **U6**: chart brushing + synced x-domain via `useChartSync` (domain now reset on unmount); hand-rolled command palette (Cmd/Ctrl-K, focus trap, Escape); `g`+key section shortcuts; `/` focuses search; mobile station bottom sheet + swipe.
@@ -110,6 +110,77 @@ was ruled out.
   - `weather_data` still holds 0 rows — expected; the R2 TTL entry for it is vestigial. Leave it in place.
 - **Trap fixed in Batch 3, do not regress it:** `inference.py` used to trust the MLflow registry for artifact metadata; when MLflow served the artifact the row lost its `interval` and reported fake `MLflow-latest` lineage. `_latest_model_entry` is now resolved first and always supplies metadata; MLflow only ever serves the *artifact*.
 
+## In flight (2026-09-30) — `fix/spark-atlas-transient-retries` (Spark job resilience)
+
+Worktree `../weather-prediction-mlops-atlas-retry`, branched off `main` a40b87d in its **own worktree** so the
+user's uncommitted Batch-4 session in the main checkout is untouched. Committed as `a7bcbae` on
+`fix/spark-atlas-transient-retries` (not pushed); worktree clean. Owner: lead
++ `ml-engineer`; interfaces frozen before fan-out.
+
+**Problem — `Run Spark jobs` is not "always failing", it fails ~5 % of runs but each one is a long red run.**
+Workflow `ml-pipeline` on `main`, last 60 runs: 52 success / 3 failure / 5 cancelled. All 3 failures are the
+`Run Spark jobs` job, all Atlas-side transients:
+
+- run 60 (2026-09-29, inference): `com.mongodb.MongoSocketReadException: Prematurely reached end of stream`
+  inside `write_predictions`' `output.count()` (py4j `o2362.count`).
+- run 39 (2026-09-27, inference): same exception at `.save()` (py4j `o2380.save`).
+- run 41 (2026-09-27, feature engineering, 31 s in): `MongoNodeIsRecoveringException` error 91
+  (`ShutdownInProgress`, "quiesce mode") on shard `ac-ikelm1f-shard-00-02` plus a
+  `MongoConnectionPoolClearedException` cascade.
+
+**Why a single dropped socket ends the run, and why the window is hours wide:** (1) Spark runs in **local
+mode** (`spark/config/spark_config.py`), so a stage aborts on the first task failure ("failed 1 times") —
+there is no task-level retry — and `main` has no driver-side retry on the Mongo-touching actions;
+(2) `inference.py` never caches `df_features`, so every action re-reads all of `weather_features` from Atlas
+(~40 sequential Mongo stages). Identical code has measured **8–10 s per stage** (run 61 → 3 min job) and
+**1,019–1,116 s per stage** (run 57 → 117 min; run 55 → 119 min) against the 120-min scheduled cap — the
+Atlas M0 congestion tail *is* the failure window and two runs finished within 3 min of being killed.
+
+**Branch contents (frozen interfaces):** new shared module `spark/spark-jobs/mongo_retry.py` —
+`is_transient_mongo_error(exc)`, `retry_delay_seconds(attempt, base=5.0, factor=2.0, cap=60.0)`,
+`run_with_mongo_retries(fn, *, label, attempts=4, sleep=time.sleep)`; it classifies pymongo errors **and**
+`Py4JJavaError`-wrapped Java Mongo errors by class name / error code / message fragment (walks
+`__cause__`/`__context__`, cycle-guarded) and returns False for anything unknown — fail fast, never mask a
+real bug. `inference.py` caches `df_features` (one Atlas read per run, `unpersist()` in `finally`) and
+retries the feature load, each per-horizon model load and the write (safe: `operationType=replace` +
+`upsertDocument=true` is an idempotent `_id` upsert). `ml_training.py` retries the training feature read and
+makes the GridFS upload / registry insert idempotent under retry (stable pre-generated `ObjectId`,
+best-effort `fs.delete` on a failed attempt, duplicate key on retry = the file was already uploaded,
+`replace_one(..., upsert=True)`). Worst case added wall time per retried operation is 35 s (4 attempts at
+5/10/20 s), trivial against the 120-min cap.
+
+**Deliberately NOT touched:** `spark/spark-jobs/batch_processing.py` — the uncommitted Batch-4 tree already
+carries an equivalent helper inside it under the same public names. On merge, delete that local copy and
+`from mongo_retry import run_with_mongo_retries` so feature engineering shares one implementation (the run-41
+failure mode lives in that phase).
+
+**Gates — both passed; every finding fixed (2 rounds each).** `code-reviewer` found one real must-fix: with a
+deterministic GridFS `_id`, a lost final ack turns a transient fault into a permanent `DuplicateKeyError`
+(11000, correctly classified non-transient) *and* orphans the file; the upload now treats a duplicate key with
+`fs.exists(file_id)` as an already-completed upload. `qa-engineer` ran a mutation study: every retry boundary
+in both jobs, every classification entry and the rewind-before-re-upload contract now fail when the
+corresponding code is mutated. Its findings added a total `is_transient_mongo_error` (an unguarded `str(node)`
+performed a JVM round-trip on a real `Py4JJavaError` and could mask the original error mid-classification),
+an `attempts < 1` `ValueError`, a self-contained cache test and a real-handle upload test.
+
+**Evidence:** `tests/unit` **163 passed / 1 skipped** (+48 over `main`'s 115 + 1 skip); `ruff check backend
+scripts spark kafka` all checks passed; `black --check backend scripts spark kafka` 70 files unchanged (that
+is the CI lint scope). Verify the branch with `git -C ../weather-prediction-mlops-atlas-retry show --stat HEAD`.
+
+**Known non-blockers, deliberately not fixed:** `ml_training.main` never unpersists the feature frame it
+caches (pre-existing, `spark.stop()` releases it); the 60 s backoff cap is unreachable at `attempts=4` (pinned
+by a pure unit test only); `tests/` is outside CI's ruff/black scope; CI installs `pytest`/`pymongo` unpinned;
+6 of the 8 integration tests need the CI `mongo:6` service and stay unmeasured locally.
+
+**Not merged, not pushed — the user's call (2026-09-30): keep the branch local.** No security gate (no auth,
+secrets or input surface changed). The user merges when the Batch-4 session is committed; pushing later would
+run the real `pipeline-test` on Python 3.11 if that extra evidence is ever wanted.
+
+**Agreed follow-up (user approved 2026-09-30):** once Batch 4 is committed in the main checkout, delete the
+duplicated retry helper inside `spark/spark-jobs/batch_processing.py` and import `run_with_mongo_retries` from
+`mongo_retry` so feature engineering, inference and training share one implementation. Do **not** touch that
+file while it is still uncommitted.
+
 ## Next: Batch 5
 
 Scope: **M5** stages (`staging` -> human promote -> `production`) + rollback script + shadow A/B, **M6** declare GridFS + `model_registry` canonical (the CI MLflow file store is ephemeral), **L6** optional rate-limited `POST /api/refresh` (server-side fetch; never a browser-triggered workflow dispatch; WebSocket rejected), **R6** structured JSON logs with `request_id`/`duration_ms`/`cache_hit`, stable error envelope, `/api/v1` mount (breaking — do before the frontend hardens).
@@ -122,6 +193,15 @@ Gate before done: `code-reviewer` on the diff, `qa-engineer` when tests change, 
 
 ## User-side items (cannot be done from the repo)
 
+- **Render deploy hook secret.** Add repo secret `RENDER_DEPLOY_HOOK` (Render
+  dashboard → `meteoml-api` → Settings → Deploy Hook) so CI's guarded `deploy`
+  job can trigger a deploy after the tests pass on `main`. Without it the job
+  skips with a notice and never fails. Separately, set the dashboard
+  **Auto-Deploy to "On Commit"** (not "After CI Checks Pass"): with CI-checks
+  mode Render skips the deploy when it sees zero checks on the merge commit.
+  `render.yaml` already declares `autoDeployTrigger: commit`; the dashboard
+  value must match. Running both is safe — Render ignores a deploy request for
+  an already-deployed commit.
 - Sentry DSN on Render.
 - Healthchecks.io checks for the ingest/inference/train crons (highest value: a dead-man's switch on `ingest.yml` + features; the in-repo `::warning` is ephemeral).
 - Atlas project alerts (disk >80%, connections >80%, query targeting).
