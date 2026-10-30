@@ -6,10 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.core.rate_limit import RefreshRateLimiter
-from app.repositories.weather_repo import WeatherRepository
+from app.main import create_app
+from app.repositories.city_repo import get_city_repo
+from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.services.openmeteo import (
     CURRENT_VARIABLES,
     OPEN_METEO_URL,
@@ -53,7 +56,7 @@ def _reset_limiter(application, **bounds) -> None:
 def test_refresh_settings_defaults():
     settings = Settings(_env_file=None)
 
-    assert settings.refresh_enabled is True
+    assert settings.refresh_enabled is False
     assert settings.refresh_city_cooldown_seconds == 900
     assert settings.refresh_max_per_minute == 6
     assert settings.refresh_max_per_day == 48
@@ -297,6 +300,33 @@ def test_limiter_windows_roll_over_with_the_clock():
 # ---------------------------------------------------------------------------
 # Disabled and upstream failures
 # ---------------------------------------------------------------------------
+
+
+async def test_default_config_is_503_without_touching_upstream_or_storage(weather_repo, city_repo):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=open_meteo_payload())
+
+    application = create_app(Settings(_env_file=None))
+    application.dependency_overrides[get_weather_repo] = lambda: weather_repo
+    application.dependency_overrides[get_city_repo] = lambda: city_repo
+    application.dependency_overrides[get_openmeteo_service] = lambda: _service_with(handler)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://test"
+    ) as default_client:
+        response = await default_client.post("/api/v1/refresh", json={"city": "Madrid"})
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "refresh_disabled"
+    assert error["message"] == "The refresh endpoint is disabled"
+    assert error["request_id"] == response.headers["x-request-id"]
+    assert seen == []
+    assert weather_repo.calls == []
+    assert city_repo.calls == []
 
 
 async def test_disabled_is_503(client, app, settings, weather_repo):

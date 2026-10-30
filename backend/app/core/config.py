@@ -45,11 +45,13 @@ class Settings(BaseSettings):
 
     geo_timeout_seconds: float = 8.0
 
-    #: Optional ``POST /refresh``. The daily cap is a storage guard (one document
-    #: per call into ``raw_weather``, the largest collection on the free tier),
-    #: not a throughput target. The limiter is process-local: Render runs one
-    #: instance, so no distributed state is needed.
-    refresh_enabled: bool = True
+    #: Optional ``POST /refresh``, off unless the operator sets
+    #: ``REFRESH_ENABLED=true``. The endpoint is unauthenticated and writes a
+    #: document to ``raw_weather`` (the largest collection on the free tier), so
+    #: exposing it is a deliberate choice. The limiter that caps those writes is
+    #: per process: its counters reset whenever the free-tier instance restarts
+    #: or sleeps, so it bounds a wake's writes, not a billing period's.
+    refresh_enabled: bool = False
     refresh_city_cooldown_seconds: int = 900
     refresh_max_per_minute: int = 6
     refresh_max_per_day: int = 48

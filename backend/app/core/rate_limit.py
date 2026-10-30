@@ -1,9 +1,13 @@
 """In-process rate limiting for the optional refresh endpoint.
 
-Render runs exactly one instance, so a process-local limiter is authoritative:
-there is no second process to coordinate with and no shared counter to pay for.
-The state is guarded by an ``asyncio.Lock``, so concurrent requests cannot both
-observe a free slot and then both consume it.
+The caps are per process lifetime: state lives in this object's memory and is
+lost on restart, redeploy or a free-tier idle spin-down. After the instance
+wakes, the counters start from zero. This is a storage guard against a caller
+hammering one live process — not a distributed quota, and it does not bound
+writes across a billing period. Enabling the endpoint is therefore an explicit
+operator decision (``REFRESH_ENABLED=true``), not a default. The state is
+guarded by an ``asyncio.Lock``, so concurrent requests cannot both observe a
+free slot and then both consume it.
 
 Two limits apply per accepted attempt:
 
