@@ -21,6 +21,7 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+from tests.unit.fake_registry import FakeDb, FakeRegistryCollection, dt, make_entry
 
 # Ensure spark jobs and config are on sys.path
 SPARK_JOBS_DIR = os.path.join(os.path.dirname(__file__), "../../spark/spark-jobs")
@@ -33,25 +34,49 @@ import inference  # noqa: E402
 
 
 class TestModelRegistryLookup:
-    def test_latest_model_entry_found(self):
-        mock_db = MagicMock()
-        mock_db.__getitem__.return_value.find_one.return_value = {
-            "model_name": "temp_prediction_1h_GBT",
-            "gridfs_file_id": "mock_id_123",
-            "version": "20260629_120000",
-        }
+    """Registry resolution is stage-aware (M5) and lives in ``model_selection``."""
 
-        entry = inference._latest_model_entry(mock_db, "temp_prediction_1h")
-        assert entry is not None
-        assert entry["model_name"] == "temp_prediction_1h_GBT"
-        mock_db.__getitem__.assert_called_with("model_registry")
+    def test_production_is_preferred_over_a_newer_staging_doc(self):
+        db = FakeDb(
+            {
+                "model_registry": FakeRegistryCollection(
+                    [
+                        make_entry(
+                            "temp_prediction_1h_Prod", doc_id="p1", stage="production", timestamp=dt(1)
+                        ),
+                        make_entry(
+                            "temp_prediction_1h_New", doc_id="s1", stage="staging", timestamp=dt(5)
+                        ),
+                    ]
+                )
+            }
+        )
+        entry, is_fallback = inference.model_selection.select_entry(db, "temp_prediction_1h_")
+        assert entry["_id"] == "p1"
+        assert is_fallback is False
 
-    def test_latest_model_entry_not_found(self):
-        mock_db = MagicMock()
-        mock_db.__getitem__.return_value.find_one.return_value = None
+    def test_newest_staging_is_the_flagged_fallback(self):
+        db = FakeDb(
+            {
+                "model_registry": FakeRegistryCollection(
+                    [
+                        make_entry(
+                            "temp_prediction_1h_Old", doc_id="s0", stage="staging", timestamp=dt(2)
+                        ),
+                        make_entry(
+                            "temp_prediction_1h_New", doc_id="s1", stage="staging", timestamp=dt(5)
+                        ),
+                    ]
+                )
+            }
+        )
+        entry, is_fallback = inference.model_selection.select_entry(db, "temp_prediction_1h_")
+        assert entry["_id"] == "s1"
+        assert is_fallback is True
 
-        entry = inference._latest_model_entry(mock_db, "non_existent_prefix")
-        assert entry is None
+    def test_nothing_matches(self):
+        db = FakeDb({"model_registry": FakeRegistryCollection([])})
+        assert inference.model_selection.select_entry(db, "non_existent_prefix") == (None, False)
 
 
 class TestLoadLatestModel:
@@ -84,18 +109,47 @@ class TestLoadLatestModel:
                 assert meta["version"].startswith("MLflow-")
                 assert "interval" not in meta
 
-    def test_load_latest_model_mlflow_artifact_uses_registry_metadata(self):
-        # Regression: MLflow artifact wins, but metadata must come from the
-        # newest model_registry doc so interval + lineage are not dropped.
+    def test_load_latest_model_gridfs_wins_over_mlflow(self):
+        # M6 regression: a registry doc WITH a gridfs_file_id is always served
+        # from GridFS. MLflow is attempted only when the doc is absent or has no
+        # file id — it must never win, and its metadata never replaces the
+        # registry's.
         entry = {
             "model_name": "temp_prediction_1h_LinearRegression",
             "version": "20260925_201254",
-            "gridfs_file_id": "mock_id",
+            "stage": "production",
+            "gridfs_file_id": "gridfs-123",
             "interval": {
                 "level": 0.8,
                 "lower_offset": -0.8971481336983871,
                 "upper_offset": 0.5871447896789732,
             },
+        }
+        mock_db = MagicMock()
+        mock_db["model_registry"].find_one.return_value = entry
+        mock_model = MagicMock()
+
+        with patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "http://localhost:5000"}):
+            with patch("mlflow.spark.load_model") as mlflow_load:
+                with patch.object(inference.PipelineModel, "load", return_value=mock_model) as load:
+                    with patch.object(inference, "_download_and_unzip", return_value="/tmp/x"):
+                        model, meta = inference.load_latest_model(
+                            mock_db, MagicMock(), "temp_prediction_1h", MagicMock()
+                        )
+
+        assert model == mock_model
+        assert meta == entry
+        assert meta["interval"]["lower_offset"] == pytest.approx(-0.8971481336983871)
+        mlflow_load.assert_not_called()
+        load.assert_called_once_with("/tmp/x")
+
+    def test_load_latest_model_mlflow_only_without_gridfs_id(self):
+        # No gridfs_file_id -> the ephemeral MLflow store is the only artifact
+        # source left, but the registry doc still owns model_name/version.
+        entry = {
+            "model_name": "temp_prediction_1h_GBT",
+            "version": "registry-version",
+            "stage": "production",
         }
         mock_db = MagicMock()
         mock_db["model_registry"].find_one.return_value = entry
@@ -109,9 +163,33 @@ class TestLoadLatestModel:
 
         assert model == mock_model
         assert meta == entry
-        assert meta["model_name"] == "temp_prediction_1h_LinearRegression"
-        assert meta["version"] == "20260925_201254"
-        assert meta["interval"]["lower_offset"] == pytest.approx(-0.8971481336983871)
+        assert meta["version"] == "registry-version"  # never "MLflow-latest"
+
+    def test_load_latest_model_warns_when_falling_back_to_staging(self, caplog):
+        entry = {
+            "model_name": "temp_prediction_1h_GBT",
+            "version": "v1",
+            "stage": "staging",
+            "gridfs_file_id": "gridfs-123",
+        }
+        mock_db = MagicMock()
+        # No production doc for this prefix: only the staging query matches.
+        mock_db["model_registry"].find_one.side_effect = (
+            lambda query, **kwargs: entry if query.get("stage") == "staging" else None
+        )
+        mock_model = MagicMock()
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(inference.PipelineModel, "load", return_value=mock_model):
+                with patch.object(inference, "_download_and_unzip", return_value="/tmp/x"):
+                    with caplog.at_level(logging.WARNING, logger="inference"):
+                        model, meta = inference.load_latest_model(
+                            mock_db, MagicMock(), "temp_prediction_1h", MagicMock()
+                        )
+
+        assert model == mock_model
+        assert meta is entry
+        assert any("No production model" in r.message for r in caplog.records)
 
 
 class TestInferenceTransformation:
@@ -697,3 +775,299 @@ class TestMainMongoRetry:
 
         # Early return on an empty feature frame still unpersists in ``finally``.
         features_df.unpersist.assert_called_once_with()
+
+
+class TestPredictionIdTimezoneIndependence:
+    """``_id`` embeds ``epoch(source_timestamp)``; a session-TZ change must not
+    mint a new key for the same prediction (that would re-insert rows)."""
+
+    @staticmethod
+    def _output(spark):
+        ts = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+        df = spark.createDataFrame(
+            [
+                Row(
+                    city="Madrid",
+                    timestamp=ts,
+                    temperature=20.0,
+                    predicted_temperature=21.0,
+                    predicted_rain=0.1,
+                )
+            ],
+            schema=StructType(
+                [
+                    StructField("city", StringType(), False),
+                    StructField("timestamp", TimestampType(), False),
+                    StructField("temperature", DoubleType(), True),
+                    StructField("predicted_temperature", DoubleType(), True),
+                    StructField("predicted_rain", DoubleType(), True),
+                ]
+            ),
+        )
+        return inference.build_output_df(
+            df,
+            temp_meta={"model_name": "t", "version": "v1"},
+            rain_meta={"model_name": "r", "version": "v1"},
+            horizon=1,
+        )
+
+    def test_same_id_under_non_utc_session_timezone(self, spark):
+        expected = f"Madrid_{int(datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc).timestamp())}_1h"
+        original = spark.conf.get("spark.sql.session.timeZone")
+        try:
+            spark.conf.set("spark.sql.session.timeZone", "UTC")
+            utc_id = self._output(spark).first()._id
+            spark.conf.set("spark.sql.session.timeZone", "Asia/Tokyo")
+            tokyo_id = self._output(spark).first()._id
+            spark.conf.set("spark.sql.session.timeZone", "America/New_York")
+            ny_id = self._output(spark).first()._id
+        finally:
+            spark.conf.set("spark.sql.session.timeZone", original)
+
+        assert utc_id == expected
+        assert tokyo_id == expected
+        assert ny_id == expected
+
+    def test_create_spark_session_pins_utc(self):
+        # Second belt: the real session builder must pin the zone too (read from
+        # source — ``test_batch_processing`` stubs ``spark_config`` in
+        # ``sys.modules``, so importing it here would yield a MagicMock).
+        source = open(os.path.join(SPARK_CONFIG_DIR, "spark_config.py")).read()
+        assert 'config("spark.sql.session.timeZone", "UTC")' in source
+
+
+class _ScaleModel:
+    """Pipeline stand-in: ``prediction = temperature * scale`` (probability-ish)."""
+
+    stages = []
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def transform(self, df):
+        return df.withColumn("prediction", df["temperature"] * self.scale)
+
+
+class TestShadowComparison:
+    @pytest.fixture()
+    def features(self, spark):
+        return spark.createDataFrame(
+            [
+                Row(city="Madrid", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=20.0),
+                Row(city="Valencia", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=25.0),
+            ],
+            schema=StructType(
+                [
+                    StructField("city", StringType(), False),
+                    StructField("timestamp", TimestampType(), False),
+                    StructField("temperature", DoubleType(), True),
+                ]
+            ),
+        )
+
+    def test_temperature_deltas(self, spark, features):
+        metrics = inference.shadow_comparison(
+            features, _FakeModel(1.0), _FakeModel(3.0), target="temperature"
+        )
+        assert metrics["n_samples"] == 2
+        assert metrics["temp_abs_delta_mean"] == pytest.approx(2.0)
+        assert metrics["temp_abs_delta_max"] == pytest.approx(2.0)
+        assert metrics["last_source_timestamp"] == datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+
+    def test_rain_disagreement_at_half(self, spark):
+        df = spark.createDataFrame(
+            [Row(city="Madrid", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                 temperature=0.2),
+             Row(city="Valencia", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                 temperature=0.8)],
+            schema=StructType(
+                [
+                    StructField("city", StringType(), False),
+                    StructField("timestamp", TimestampType(), False),
+                    StructField("temperature", DoubleType(), True),
+                ]
+            ),
+        )
+        # production: 0.2 / 0.8 -> dry + wet; shadow: 0.5 / 2.0 -> wet + wet
+        metrics = inference.shadow_comparison(df, _ScaleModel(1.0), _ScaleModel(2.5), target="rain")
+        assert metrics["rain_disagreement_rate"] == pytest.approx(0.5)
+        assert metrics["rain_prob_delta_mean"] == pytest.approx(0.75)
+        assert "temp_abs_delta_mean" not in metrics
+
+
+class TestShadowDoc:
+    def test_temperature_payload_shape(self):
+        prod = make_entry("temp_prediction_1h_Prod", doc_id="p1", stage="production", version="v1")
+        shadow = make_entry("temp_prediction_1h_New", doc_id="s1", stage="staging", version="v2")
+        metrics = {
+            "n_samples": 15,
+            "last_source_timestamp": dt(3),
+            "temp_abs_delta_mean": 0.5,
+            "temp_abs_delta_max": 1.5,
+        }
+        doc = inference.build_shadow_doc(prod, shadow, "temperature", 1, metrics, updated_at=dt(4))
+
+        assert doc["_id"] == "p1_s1"
+        assert doc["target"] == "temperature"
+        assert doc["horizon_hours"] == 1
+        assert doc["production_model_name"] == "temp_prediction_1h_Prod"
+        assert doc["production_model_version"] == "v1"
+        assert doc["shadow_model_name"] == "temp_prediction_1h_New"
+        assert doc["shadow_model_version"] == "v2"
+        assert doc["n_samples"] == 15
+        assert doc["last_source_timestamp"] == dt(3)
+        assert doc["temp_abs_delta_mean"] == 0.5
+        assert doc["temp_abs_delta_max"] == 1.5
+        assert doc["updated_at"] == dt(4)
+        assert "rain_prob_delta_mean" not in doc
+
+    def test_rain_payload_shape(self):
+        prod = make_entry("rain_prediction_1h_Prod", doc_id="p1", stage="production")
+        shadow = make_entry("rain_prediction_1h_New", doc_id="s1", stage="staging")
+        metrics = {
+            "n_samples": 10,
+            "last_source_timestamp": dt(3),
+            "rain_prob_delta_mean": 0.12,
+            "rain_disagreement_rate": 0.1,
+        }
+        doc = inference.build_shadow_doc(prod, shadow, "rain", 1, metrics, updated_at=dt(4))
+
+        assert doc["_id"] == "p1_s1"
+        assert doc["target"] == "rain"
+        assert doc["rain_prob_delta_mean"] == 0.12
+        assert doc["rain_disagreement_rate"] == 0.1
+        assert "temp_abs_delta_mean" not in doc
+
+    def test_write_shadow_is_an_idempotent_upsert(self):
+        db = FakeDb()
+        doc = {"_id": "p1_s1", "n_samples": 1, "updated_at": dt(4)}
+        inference.write_shadow(db, doc)
+        inference.write_shadow(db, {**doc, "n_samples": 2})
+        stored = db["model_shadow"].docs
+        assert len(stored) == 1  # replace_one(upsert=True): never two rows
+        assert stored[0]["n_samples"] == 2
+
+
+class TestRunShadowAb:
+    def _db(self):
+        return FakeDb(
+            {
+                "model_registry": FakeRegistryCollection(
+                    [
+                        make_entry("temp_prediction_1h_Prod", doc_id="p1", stage="production"),
+                        make_entry("temp_prediction_1h_New", doc_id="s1", stage="staging"),
+                    ]
+                )
+            }
+        )
+
+    def test_skips_without_production(self, spark, monkeypatch):
+        db = FakeDb(
+            {
+                "model_registry": FakeRegistryCollection(
+                    [make_entry("temp_prediction_1h_New", doc_id="s1", stage="staging")]
+                )
+            }
+        )
+        monkeypatch.setattr(
+            inference, "load_model_entry", MagicMock(side_effect=AssertionError("must not load"))
+        )
+        entry = db["model_registry"].docs[0]
+        result = inference.run_shadow_ab(
+            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), entry,
+            _latest_features_df(spark), 1, "temperature",
+        )
+        assert result is None
+        assert db["model_shadow"].docs == []
+
+    def test_writes_one_doc_per_pair(self, spark, monkeypatch):
+        db = self._db()
+        monkeypatch.setattr(inference, "load_model_entry", lambda fs, entry: _FakeModel(3.0))
+        prod = db["model_registry"].find_one({"_id": "p1"})
+
+        first = inference.run_shadow_ab(
+            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
+            _latest_features_df(spark), 1, "temperature",
+        )
+        second = inference.run_shadow_ab(
+            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
+            _latest_features_df(spark), 1, "temperature",
+        )
+
+        assert first["_id"] == "p1_s1"
+        assert second["_id"] == "p1_s1"
+        docs = db["model_shadow"].docs
+        assert len(docs) == 1  # idempotent: one doc per (production, shadow) pair
+        assert docs[0]["n_samples"] == 2
+        assert docs[0]["temp_abs_delta_max"] == pytest.approx(2.0)
+
+    def test_shadow_failure_is_logged_and_skipped(self, spark, monkeypatch, caplog):
+        db = self._db()
+        prod = db["model_registry"].find_one({"_id": "p1"})
+
+        def boom(_fs, _entry):
+            raise RuntimeError("gridfs unavailable")
+
+        monkeypatch.setattr(inference, "load_model_entry", boom)
+
+        with caplog.at_level(logging.WARNING, logger="inference"):
+            result = inference.run_shadow_ab(
+                db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
+                _latest_features_df(spark), 1, "temperature",
+            )
+
+        assert result is None  # never raises into inference
+        assert db["model_shadow"].docs == []
+        assert any("Shadow A/B" in r.message for r in caplog.records)
+
+
+class TestMainShadowWiring:
+    """``main()`` runs the A/B only for a real production model, never on the
+    staging fallback, and a shadow fault cannot fail the run."""
+
+    def _run_main(self, monkeypatch, spark, stage):
+        monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+        monkeypatch.setattr(inference, "FEATURES_CONFIG", {"target_horizons": [1]})
+        monkeypatch.setattr(inference, "create_spark_session", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(inference, "MongoClient", lambda url: MagicMock())
+        monkeypatch.setattr(inference, "GridFS", lambda db: MagicMock())
+        features_df = _latest_features_df(spark)
+        monkeypatch.setattr(inference, "load_latest_features", lambda s, m: features_df)
+
+        def fake_load(_db, _fs, prefix, _spark):
+            kind = "temp" if prefix.startswith("temp") else "rain"
+            return _FakeModel(1.0), {
+                "_id": f"{kind}-prod",
+                "model_name": f"{kind}_prediction_1h_GBT",
+                "version": "v1",
+                "stage": stage,
+            }
+
+        monkeypatch.setattr(inference, "load_latest_model", fake_load)
+        writes: list = []
+        monkeypatch.setattr(
+            inference, "write_predictions", lambda output, url: writes.append(output)
+        )
+        calls: list = []
+        monkeypatch.setattr(
+            inference,
+            "run_shadow_ab",
+            lambda *args: calls.append({"prefix": args[2], "target": args[7]}),
+        )
+        inference.main()
+        return calls, writes
+
+    def test_shadow_runs_for_production_models(self, spark, monkeypatch):
+        calls, writes = self._run_main(monkeypatch, spark, "production")
+        assert writes, "predictions must still be written"
+        assert calls == [
+            {"prefix": "temp_prediction_1h", "target": "temperature"},
+            {"prefix": "rain_prediction_1h", "target": "rain"},
+        ]
+
+    def test_shadow_never_runs_on_the_staging_fallback(self, spark, monkeypatch):
+        calls, writes = self._run_main(monkeypatch, spark, "staging")
+        assert writes
+        assert calls == []

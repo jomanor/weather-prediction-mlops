@@ -12,9 +12,20 @@ Design decisions
 ----------------
 - Models are stored as zipped Spark PipelineModel directories in GridFS.
   The entry point metadata lives in ``model_registry``, ordered by
-  ``timestamp`` descending.
+  ``timestamp`` descending.  GridFS + ``model_registry`` are canonical (M6):
+  the CI MLflow file store is ephemeral, so MLflow is only tried when the
+  registry has no document (or the document carries no ``gridfs_file_id``).
+- Which document is scored is decided by ``model_selection.select_entry``:
+  ``stage="production"`` when a human promoted one, otherwise the newest
+  ``staging`` document with a logged warning (never a silent promotion).
 - We load *both* models (temp + rain) so we can store both predictions in
   a single document per city per inference run.
+- Shadow A/B (M5): when a production model is selected and a newer ``staging``
+  document exists for the same prefix, the shadow model scores the same cached
+  feature frame and ONE idempotent doc per ``(production_id, shadow_id)`` goes
+  into ``model_shadow``.  Pieces are bounded by construction: O(#model-pairs),
+  never O(#predictions) — no prediction rows are written by the A/B path, and
+  a shadow failure logs and is skipped rather than failing the run.
 - The job is idempotent: every prediction row carries a stable ``_id`` derived
   from (city, source_timestamp, horizon), and the write uses the connector's
   replace (upsert) operation, so re-runs after a failure replace the same
@@ -28,7 +39,9 @@ import os
 import shutil
 import sys
 import zipfile
+from datetime import datetime, timezone
 
+import model_selection
 from gridfs import GridFS
 from mongo_retry import run_with_mongo_retries
 from pymongo import MongoClient
@@ -50,14 +63,11 @@ logger = logging.getLogger(__name__)
 
 TMP_DIR = os.path.join(os.getenv("SPARK_TMP_DIR", "/opt/spark-tmp"), "inference")
 
+#: Shadow A/B collection (M5): one doc per (production model, shadow model) pair.
+SHADOW_COLLECTION = "model_shadow"
 
-def _latest_model_entry(db, model_name_prefix: str) -> dict | None:
-    """Return the most recent model_registry document whose name starts with
-    *model_name_prefix*, or None if no model has been trained yet."""
-    return db["model_registry"].find_one(
-        {"model_name": {"$regex": f"^{model_name_prefix}"}},
-        sort=[("timestamp", -1)],
-    )
+#: Rain probability treated as "rain" when counting shadow/production disagreement.
+SHADOW_RAIN_THRESHOLD = 0.5
 
 
 def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:
@@ -80,66 +90,112 @@ def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:
     return model_path
 
 
-def load_latest_model(db, fs, model_name_prefix: str, spark):
-    """Fetch the latest matching model and its registry metadata.
+def load_model_entry(fs, entry) -> PipelineModel:
+    """Load the artifact of one registry *entry* from GridFS (canonical).
 
-    The **artifact** is loaded MLflow-first with a GridFS fallback, but the
-    **metadata** (``model_name``, ``version``, ``interval``) is always resolved
-    from the newest matching ``model_registry`` document. The MLflow file store
-    is ephemeral and carries no interval/lineage, so we never trust it for
-    metadata: the registry is canonical. Returns (PipelineModel, metadata_dict)
-    or (None, None).
+    GridFS is the canonical artifact store (M6) and the only one that carries a
+    deterministic ``_id`` for a registry document, so a document with a
+    ``gridfs_file_id`` is *always* served from GridFS. Used for the production
+    model and for shadow A/B challengers alike.
     """
-    # Resolve the registry metadata first, regardless of where the artifact
-    # ends up loading from. Only this doc carries the honest model_name/version
-    # and the prediction-interval block.
-    entry = _latest_model_entry(db, model_name_prefix)
+    file_id = entry["gridfs_file_id"]
+    local_dir = _download_and_unzip(fs, file_id, TMP_DIR)
+    try:
+        model = PipelineModel.load(local_dir)
+        logger.info(
+            "Loaded model '%s' (version %s).", entry.get("model_name"), entry.get("version")
+        )
+        return model
+    finally:
+        # Clean up extracted directory; keep nothing on disk
+        shutil.rmtree(local_dir, ignore_errors=True)
 
+
+def _load_from_mlflow(model_name_prefix: str):
+    """Try the ephemeral MLflow registry; return ``(model, derived_meta)`` or ``(None, None)``.
+
+    Only reached when ``model_registry`` cannot supply the artifact. The
+    returned metadata is deliberately minimal and labelled ``MLflow-*`` so a
+    row can never claim registry lineage it does not have.
+    """
     mlflow_uri = os.getenv("MLFLOW_TRACKING_URI")
-    if mlflow_uri:
-        try:
-            import mlflow.spark
+    if not mlflow_uri:
+        return None, None
 
-            mlflow.set_tracking_uri(mlflow_uri)
-            candidate_names = [model_name_prefix]
-            if "temp_prediction" in model_name_prefix:
-                candidate_names.append(
-                    model_name_prefix.replace("temp_prediction", "weather_temperature")
-                )
-            elif "rain_prediction" in model_name_prefix:
-                candidate_names.append(model_name_prefix.replace("rain_prediction", "weather_rain"))
+    try:
+        import mlflow.spark
 
-            for cand in candidate_names:
-                for stage in ["Production", "latest", "None"]:
-                    try:
-                        model_uri = f"models:/{cand}/{stage}"
-                        logger.info(
-                            "Attempting to load model '%s' from MLflow Registry...", model_uri
-                        )
-                        model = mlflow.spark.load_model(model_uri)
-                        logger.info("Successfully loaded model from MLflow Registry: %s", model_uri)
-                        if entry is not None:
-                            return model, entry
-                        return model, {"model_name": cand, "version": f"MLflow-{stage}"}
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.info("MLflow model load skipped/failed (%s), falling back to GridFS...", e)
+        mlflow.set_tracking_uri(mlflow_uri)
+        candidate_names = [model_name_prefix]
+        if "temp_prediction" in model_name_prefix:
+            candidate_names.append(
+                model_name_prefix.replace("temp_prediction", "weather_temperature")
+            )
+        elif "rain_prediction" in model_name_prefix:
+            candidate_names.append(model_name_prefix.replace("rain_prediction", "weather_rain"))
+
+        for cand in candidate_names:
+            for stage in ["Production", "latest", "None"]:
+                try:
+                    model_uri = f"models:/{cand}/{stage}"
+                    logger.info("Attempting to load model '%s' from MLflow Registry...", model_uri)
+                    model = mlflow.spark.load_model(model_uri)
+                    logger.info("Successfully loaded model from MLflow Registry: %s", model_uri)
+                    return model, {"model_name": cand, "version": f"MLflow-{stage}"}
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.info("MLflow model load skipped/failed (%s).", e)
+
+    return None, None
+
+
+def load_latest_model(db, fs, model_name_prefix: str, spark):
+    """Fetch the selected (production, else staging) model and its registry metadata.
+
+    Order of resolution is frozen by Batch 5:
+
+    1. the registry document comes from ``model_selection.select_entry`` (so
+       ``stage="production"`` wins; staging is only a flagged fallback);
+    2. the **artifact** is loaded from **GridFS first** whenever the document
+       carries a ``gridfs_file_id``;
+    3. MLflow (``models:/{cand}/{stage}``) is only attempted when there is no
+       registry document at all, or the document has no ``gridfs_file_id`` —
+       and even then the registry's metadata wins, because the MLflow file store
+       is ephemeral and carries no interval/lineage.
+
+    Returns ``(PipelineModel, metadata_dict)`` or ``(None, None)``.
+    """
+    entry, is_fallback = model_selection.select_entry(db, model_name_prefix)
+    if is_fallback:
+        logger.warning(
+            "No production model for prefix '%s'; falling back to staging model '%s' "
+            "(promote one with scripts/promote_model.py).",
+            model_name_prefix,
+            entry.get("model_name"),
+        )
+
+    if entry is not None and entry.get("gridfs_file_id"):
+        return load_model_entry(fs, entry), entry
+
+    model, derived_meta = _load_from_mlflow(model_name_prefix)
+    if model is not None:
+        # The registry document, when it exists, stays the metadata source even
+        # though MLflow served the artifact.
+        return model, entry if entry is not None else derived_meta
 
     if entry is None:
         logger.warning("No model found for prefix '%s'. Skipping.", model_name_prefix)
         return None, None
 
-    file_id = entry["gridfs_file_id"]
-    local_dir = _download_and_unzip(fs, file_id, TMP_DIR)
-
-    try:
-        model = PipelineModel.load(local_dir)
-        logger.info("Loaded model '%s' (version %s).", entry["model_name"], entry.get("version"))
-        return model, entry
-    finally:
-        # Clean up extracted directory; keep nothing on disk
-        shutil.rmtree(local_dir, ignore_errors=True)
+    logger.warning(
+        "Registry entry '%s' (%s) has no gridfs_file_id and MLflow served no artifact; "
+        "skipping prefix '%s'.",
+        entry.get("model_name"),
+        entry.get("_id"),
+        model_name_prefix,
+    )
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +278,19 @@ def output_schema_columns() -> list[str]:
     ]
 
 
+def utc_epoch_seconds(column: str = "timestamp"):
+    """Epoch seconds for a TIMESTAMP *column*, pinned to UTC.
+
+    Spark renders and parses TIMESTAMP values with the *session* time zone, so a
+    naive epoch expression can mint a different ``_id`` for the same prediction
+    after a TZ change (the prediction key would drift and re-insert rows).
+    ``create_spark_session`` pins the session to UTC; this expression makes the
+    value independent of that setting as well by parsing the timestamp in the
+    explicit ``UTC`` zone, which a unit test locks against a non-UTC session TZ.
+    """
+    return F.unix_timestamp(F.to_utc_timestamp(F.col(column), F.lit("UTC")))
+
+
 def build_output_df(
     pred_df, temp_meta: dict | None = None, rain_meta: dict | None = None, horizon=None
 ):
@@ -259,7 +328,7 @@ def build_output_df(
         "_id": F.concat_ws(
             "_",
             F.col("city"),
-            F.unix_timestamp("timestamp").cast("string"),
+            utc_epoch_seconds("timestamp").cast("string"),
             F.lit(f"{horizon}h"),
         ),
         "city": F.col("city"),
@@ -350,6 +419,178 @@ def write_predictions(output, mongo_url: str):
 
 
 # ---------------------------------------------------------------------------
+# Shadow A/B
+# ---------------------------------------------------------------------------
+
+
+def _model_predictions(model, df, alias: str):
+    """Score *df* with *model* and keep ``city``/``timestamp``/``alias``.
+
+    Scratch columns (``features_raw``/``features``) are dropped so a second
+    pipeline can run on the same frame — see ``_pipeline_scratch_columns``.
+    """
+    out = model.transform(df).withColumnRenamed("prediction", alias)
+    scratch = _pipeline_scratch_columns(model)
+    if scratch:
+        out = out.drop(*scratch)
+    return out.select("city", "timestamp", F.col(alias).cast("double").alias(alias))
+
+
+def _as_utc_datetime(epoch_seconds):
+    """``datetime`` (UTC-aware) from an epoch integer; None stays None.
+
+    Collecting a TIMESTAMP column into Python yields a *naive* wall clock in the
+    session time zone, which pymongo would then store as if it were UTC. Going
+    through the pinned UTC epoch keeps the stored value honest.
+    """
+    if epoch_seconds is None:
+        return None
+    return datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc)
+
+
+def _as_float(value):
+    """Mongo-safe float (NaN/inf and Spark nulls become None)."""
+    if value is None:
+        return None
+    value = float(value)
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def shadow_comparison(df_features, production_model, shadow_model, target: str) -> dict:
+    """Compare production and shadow predictions on the SAME feature frame.
+
+    One aggregation over the cached frame; no prediction rows are written. The
+    join is on ``(city, timestamp)`` so a model that silently drops rows cannot
+    shift the deltas, and null predictions are excluded from both sides.
+    """
+    production = _model_predictions(production_model, df_features, "pred_production")
+    shadow = _model_predictions(shadow_model, df_features, "pred_shadow")
+
+    joined = production.join(shadow, on=["city", "timestamp"], how="inner").filter(
+        F.col("pred_production").isNotNull() & F.col("pred_shadow").isNotNull()
+    )
+
+    delta = F.abs(F.col("pred_shadow") - F.col("pred_production"))
+    row = joined.agg(
+        F.count(F.lit(1)).alias("n_samples"),
+        F.max(utc_epoch_seconds("timestamp")).alias("last_source_epoch"),
+        F.mean(delta).alias("delta_mean"),
+        F.max(delta).alias("delta_max"),
+        F.mean(
+            F.when(
+                (F.col("pred_production") >= SHADOW_RAIN_THRESHOLD)
+                != (F.col("pred_shadow") >= SHADOW_RAIN_THRESHOLD),
+                1.0,
+            ).otherwise(0.0)
+        ).alias("disagreement_rate"),
+    ).first()
+
+    metrics = {
+        "n_samples": int(row["n_samples"] or 0),
+        "last_source_timestamp": _as_utc_datetime(row["last_source_epoch"]),
+    }
+    if target == "rain":
+        metrics["rain_prob_delta_mean"] = _as_float(row["delta_mean"])
+        metrics["rain_disagreement_rate"] = _as_float(row["disagreement_rate"])
+    else:
+        metrics["temp_abs_delta_mean"] = _as_float(row["delta_mean"])
+        metrics["temp_abs_delta_max"] = _as_float(row["delta_max"])
+    return metrics
+
+
+def shadow_doc_id(production_id, shadow_id) -> str:
+    """Stable ``model_shadow`` ``_id`` — one doc per (production, shadow) pair."""
+    return f"{production_id}_{shadow_id}"
+
+
+def build_shadow_doc(
+    production_entry: dict,
+    shadow_entry_doc: dict,
+    target: str,
+    horizon: int,
+    metrics: dict,
+    updated_at: datetime | None = None,
+) -> dict:
+    """Registry-shape document for ``model_shadow`` (pure: no Spark, no Mongo)."""
+    doc = {
+        "_id": shadow_doc_id(production_entry.get("_id"), shadow_entry_doc.get("_id")),
+        "target": target,
+        "horizon_hours": horizon,
+        "production_model_name": production_entry.get("model_name"),
+        "production_model_version": production_entry.get("version"),
+        "shadow_model_name": shadow_entry_doc.get("model_name"),
+        "shadow_model_version": shadow_entry_doc.get("version"),
+        "last_source_timestamp": metrics.get("last_source_timestamp"),
+        "n_samples": int(metrics.get("n_samples") or 0),
+        "updated_at": updated_at or datetime.now(timezone.utc),
+    }
+    if target == "rain":
+        doc["rain_prob_delta_mean"] = metrics.get("rain_prob_delta_mean")
+        doc["rain_disagreement_rate"] = metrics.get("rain_disagreement_rate")
+    else:
+        doc["temp_abs_delta_mean"] = metrics.get("temp_abs_delta_mean")
+        doc["temp_abs_delta_max"] = metrics.get("temp_abs_delta_max")
+    return doc
+
+
+def write_shadow(db, doc: dict) -> None:
+    """Idempotent write: ``replace_one(_id, upsert=True)`` — a re-run never duplicates."""
+    db[SHADOW_COLLECTION].replace_one({"_id": doc["_id"]}, doc, upsert=True)
+
+
+def run_shadow_ab(
+    db,
+    fs,
+    prefix: str,
+    production_model,
+    production_entry: dict,
+    df_features,
+    horizon: int,
+    target: str,
+) -> dict | None:
+    """Score the shadow challenger and upsert its A/B doc; never raises.
+
+    Skipped (returns None) when there is no production model, no staged
+    challenger, no comparable rows, or the challenger cannot be loaded/run: a
+    shadow fault must never fail inference.
+    """
+    if production_model is None or not production_entry:
+        return None
+    if production_entry.get("stage") != model_selection.STAGE_PRODUCTION:
+        return None
+
+    try:
+        challenger = model_selection.shadow_entry(db, prefix, production_entry.get("_id"))
+        if challenger is None or not challenger.get("gridfs_file_id"):
+            return None
+
+        shadow_model = load_model_entry(fs, challenger)
+        metrics = shadow_comparison(df_features, production_model, shadow_model, target)
+        if metrics["n_samples"] == 0:
+            logger.info("Shadow A/B '%s' skipped: no comparable rows for %sh.", prefix, horizon)
+            return None
+
+        doc = build_shadow_doc(production_entry, challenger, target, horizon, metrics)
+        run_with_mongo_retries(
+            lambda: write_shadow(db, doc),
+            label=f"write shadow A/B {doc['_id']}",
+        )
+        logger.info(
+            "Shadow A/B '%s': production=%s shadow=%s n=%d",
+            doc["_id"],
+            doc["production_model_version"],
+            doc["shadow_model_version"],
+            doc["n_samples"],
+        )
+        return doc
+    except Exception as exc:
+        logger.warning("Shadow A/B for '%s' skipped after %s: %s", prefix, type(exc).__name__, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -379,6 +620,7 @@ def main():
             return
 
         output = None
+        shadow_jobs: list[tuple] = []
         for horizon in horizons:
             temp_prefix = f"temp_prediction_{horizon}h"
             rain_prefix = f"rain_prediction_{horizon}h"
@@ -413,6 +655,20 @@ def main():
             )
             output = horizon_output if output is None else output.unionByName(horizon_output)
 
+            # Shadow A/B (M5) candidates, deferred until after the prediction
+            # write so the A/B can never delay the critical path. It runs only
+            # when a real production model was selected — never on the staging
+            # fallback.
+            for target, prefix, prod_model, prod_meta in (
+                ("temperature", temp_prefix, temp_model, temp_meta),
+                ("rain", rain_prefix, rain_model, rain_meta),
+            ):
+                if not prod_meta or prod_meta.get("stage") != model_selection.STAGE_PRODUCTION:
+                    continue
+                if prod_model is None:
+                    continue
+                shadow_jobs.append((target, prefix, prod_model, prod_meta, horizon))
+
         if output is None:
             logger.warning("No horizon produced predictions. Run ml_training.py first.")
             return
@@ -424,6 +680,21 @@ def main():
             lambda: write_predictions(output, mongo_url),
             label="write predictions",
         )
+
+        # Shadow A/B (M5): bounded to one doc per (production, shadow) pair,
+        # scored on the SAME cached frame, and never fatal — run_shadow_ab logs
+        # and skips on any fault.
+        for target, prefix, prod_model, prod_meta, horizon in shadow_jobs:
+            run_shadow_ab(
+                db,
+                fs,
+                prefix,
+                prod_model,
+                prod_meta,
+                df_features,
+                horizon,
+                target,
+            )
 
     except Exception as exc:
         logger.error("Inference job failed: %s", exc)
