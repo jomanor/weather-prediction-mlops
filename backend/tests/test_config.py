@@ -1,5 +1,8 @@
 """Settings and CORS behaviour."""
 
+import pytest
+from pydantic import ValidationError
+
 from app.core.config import Settings
 
 
@@ -14,6 +17,13 @@ def test_defaults(monkeypatch):
     assert settings.aemet_api_key is None
     assert settings.aemet_cache_ttl_seconds == 3600
     assert settings.ensure_indexes_on_start is True
+    assert settings.prediction_stale_after_hours == 24.0
+
+
+def test_prediction_stale_after_hours_must_be_non_negative(monkeypatch):
+    monkeypatch.setenv("PREDICTION_STALE_AFTER_HOURS", "-1")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_cors_origins_comma_separated(monkeypatch):

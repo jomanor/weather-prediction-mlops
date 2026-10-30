@@ -1,8 +1,11 @@
 """Model prediction schemas (``docs/api-contract.md`` → Prediction)."""
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+from app.core.coerce import as_utc
 
 
 class Prediction(BaseModel):
@@ -20,6 +23,10 @@ class Prediction(BaseModel):
     temp_model_version: str | None = None
     rain_model_name: str | None = None
     rain_model_version: str | None = None
+    #: Age of ``source_timestamp`` at serialization time. ``None`` when the
+    #: timestamp is missing (never invent an age); ``stale`` then stays False.
+    source_age_hours: float | None = None
+    stale: bool = False
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -38,9 +45,26 @@ class Prediction(BaseModel):
                 "temp_model_version": "20260923_020000",
                 "rain_model_name": "rain_prediction_1h_GradientBoostedTrees",
                 "rain_model_version": "20260923_020000",
+                "source_age_hours": 1.0,
+                "stale": False,
             }
         }
     )
+
+
+def freshness_fields(
+    source_timestamp: datetime | None, now: datetime, stale_after_hours: float
+) -> dict[str, Any]:
+    """``source_age_hours``/``stale`` for a prediction, computed at serialization.
+
+    A missing (or unparseable) ``source_timestamp`` yields ``None``/``False``:
+    the API must never invent an age for a row it cannot date.
+    """
+    timestamp = as_utc(source_timestamp)
+    if timestamp is None:
+        return {"source_age_hours": None, "stale": False}
+    age_hours = round((now - timestamp).total_seconds() / 3600, 1)
+    return {"source_age_hours": age_hours, "stale": age_hours > stale_after_hours}
 
 
 class LatestPredictionsResponse(BaseModel):

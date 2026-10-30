@@ -45,6 +45,11 @@ class Settings(BaseSettings):
 
     geo_timeout_seconds: float = 8.0
 
+    #: A served prediction whose source observation is older than this is
+    #: flagged ``stale`` (row stays visible, never dropped). The default matches
+    #: one ingest/rebuild cycle plus jitter.
+    prediction_stale_after_hours: float = Field(default=24.0, ge=0)
+
     #: Optional ``POST /refresh``, off unless the operator sets
     #: ``REFRESH_ENABLED=true``. The endpoint is unauthenticated and writes a
     #: document to ``raw_weather`` (the largest collection on the free tier), so

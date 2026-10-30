@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from app.repositories.prediction_repo import get_prediction_repo
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
+from app.schemas.predictions import Prediction, freshness_fields
 from app.schemas.quality import CityQuality
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
@@ -165,6 +166,8 @@ async def test_predictions_latest(client):
         "temp_model_version",
         "rain_model_name",
         "rain_model_version",
+        "source_age_hours",
+        "stale",
     }
     assert prediction["city"] == "Madrid"
     # The interval is passed through verbatim; the interval-less legacy doc would
@@ -239,6 +242,71 @@ async def test_predictions_for_city_filters_horizon(client, app, multi_horizon_p
     assert len(body) == 1
     assert body[0]["horizon_hours"] == 3
     assert body[0]["predicted_temperature"] == 22.0
+
+
+async def test_predictions_latest_fresh_row_is_not_stale(client):
+    response = await client.get("/api/predictions/latest")
+
+    assert response.status_code == 200
+    prediction = response.json()["predictions"][0]
+    # ``prediction_points`` is 1 h old; the wall clock has advanced a little by
+    # the time the route serializes it, so allow a small tolerance.
+    assert prediction["stale"] is False
+    assert abs(prediction["source_age_hours"] - 1.0) < 0.2
+
+
+async def test_predictions_latest_flags_a_35_day_old_row_without_dropping_it(client, app, now):
+    stale_row = Prediction(
+        city="Pasadena",
+        source_timestamp=now - timedelta(days=35),
+        prediction_timestamp=now - timedelta(days=35) + timedelta(hours=1),
+        horizon_hours=1,
+        predicted_temperature=18.0,
+    )
+    fresh_row = Prediction(
+        city="Madrid",
+        source_timestamp=now - timedelta(hours=1),
+        prediction_timestamp=now,
+        horizon_hours=1,
+        predicted_temperature=21.0,
+    )
+    app.dependency_overrides[get_prediction_repo] = lambda: FakePredictionRepository(
+        [stale_row, fresh_row]
+    )
+
+    response = await client.get("/api/predictions/latest", params={"horizon": 1})
+
+    assert response.status_code == 200
+    rows = {p["city"]: p for p in response.json()["predictions"]}
+    # A stale row stays visible and flagged, never dropped.
+    assert set(rows) == {"Madrid", "Pasadena"}
+    assert rows["Pasadena"]["stale"] is True
+    assert abs(rows["Pasadena"]["source_age_hours"] - 35 * 24) < 0.2
+    assert rows["Madrid"]["stale"] is False
+    assert abs(rows["Madrid"]["source_age_hours"] - 1.0) < 0.2
+
+
+async def test_predictions_freshness_fields_survive_both_prefixes(client):
+    for prefix in ("/api", "/api/v1"):
+        latest = await client.get(f"{prefix}/predictions/latest")
+        assert latest.status_code == 200, prefix
+        assert "source_age_hours" in latest.json()["predictions"][0], prefix
+        assert "stale" in latest.json()["predictions"][0], prefix
+
+        city = await client.get(f"{prefix}/predictions/Madrid")
+        assert city.status_code == 200, prefix
+        assert all("source_age_hours" in row for row in city.json()), prefix
+        assert all("stale" in row for row in city.json()), prefix
+
+
+def test_freshness_fields_never_invent_an_age(now):
+    assert freshness_fields(None, now, 24.0) == {"source_age_hours": None, "stale": False}
+    # Exactly at the threshold is not stale; past it is.
+    assert freshness_fields(now - timedelta(hours=24), now, 24.0) == {
+        "source_age_hours": 24.0,
+        "stale": False,
+    }
+    assert freshness_fields(now - timedelta(hours=1), now, 24.0)["stale"] is False
 
 
 async def test_benchmark_for_city(client):
