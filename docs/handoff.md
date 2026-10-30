@@ -278,6 +278,48 @@ and verified against production; do not regress them.
   production model versions; `GET /api/v1/weather/quality` correctly reports `bad` completeness (~0.23)
   because the ingest cron still delivers only ~4–7 observations/day — that is the L1 signal, not a code bug.
 
+
+## 2026-10-30 — P0: three surfaces, design system, city-write gate
+
+The app was consolidated from five top-level surfaces to three; the proposal and
+the cut list live in `docs/app-rethink.md`.
+
+- **IA** — Resumen `/` (map + compact station list + one freshness line; only
+  `/cities`, `/weather/current`, `/map/stations` on mount), Estación
+  `/stations?city=X` (hero, one canonical chart with series toggles, one
+  prediction card), Sistema `/sistema?tab=calidad|modelos|benchmark|analitica`
+  (the former quality/models/benchmark/analytics pages as tabs). `/benchmark`,
+  `/models`, `/analytics` redirect with `Navigate replace`; `/stations` was kept
+  to preserve deep links. Nav is 3 items on both the top bar and the mobile
+  bottom bar; shortcuts are `g r`, `g e`, `g s`.
+- **Removed** — `StationSheet` (+ `sheet.ts`), `CityManager`, `DerivedPanel`,
+  the per-station model name/version lines, the home MAE stat/quality meter, the
+  city write hooks, and the unused `Sparkline`. Tapping a pin or a row now
+  navigates to the station surface.
+- **Design system** — one token set in `styles/index.css`: type 10/11/12/13/14/16/18/22
+  px (old `text-4xl/5xl` clamped), radius 2/3/4 px, a single `0 1px 2px` shadow
+  (plus the sheet elevation), 120/180/240 ms motion behind
+  `prefers-reduced-motion`, one chart-axis/tooltip convention, and an accessible
+  `Tabs` primitive. Banned: gradients/glows, icon soup, mixed chart styles,
+  oversized heroes, inconsistent number formats. Font family unchanged (UI-03 is
+  a pending user decision).
+- **Security** — `POST /cities` and `DELETE /cities/{name}` now require
+  `Authorization: Bearer $CITY_WRITES_TOKEN`; unset → 503 `city_writes_disabled`,
+  wrong/missing → 401 `unauthorized` + `WWW-Authenticate`. Reads are unaffected.
+  The public `POST /refresh` remains opt-in/off by default.
+- **Data** — the 35-day hourly backfill fixed the 6 h gaps: 12,090 rows inserted
+  (Pasadena 2 → 841 consecutive hours), quality went from completeness 0.216 /
+  max-gap 8 h / all-`bad` to **1.000 / 1 h / all-`ok`** for 15 cities, and
+  predictions now cover 15/15 cities fresh. Every feature rebuild also fills the
+  last 48 h hourly, so the short-range charts stay dense between backfills.
+- **Gates** — backend 258; root 315 + 7 skipped; frontend 222, typecheck, lint,
+  build. Playwright probe on the deployed site: 3 nav items, no unnamed buttons,
+  zero gradients, no horizontal page scroll at 390/1440, and the Resumen mount
+  fires exactly the three expected endpoints. One real defect found by the probe
+  (Analítica panned the page 238 px at 390 px because a sticky column inside the
+  diurnal heatmap leaked into the root scroll area) is fixed with
+  `position: relative` on the table.
+
 ## Next: Batch 6
 
 No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
