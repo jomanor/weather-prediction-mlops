@@ -1,9 +1,18 @@
-"""Station registry: CRUD contract, validation, and idempotent startup seeding."""
+"""Station registry: CRUD contract, validation, write gating, and seeding."""
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from app.core.cities import DEFAULT_CITIES
-from app.repositories.city_repo import seed_default_cities
+from app.core.config import Settings
+from app.main import create_app
+from app.repositories.city_repo import get_city_repo, seed_default_cities
+from tests.conftest import CITY_WRITES_TOKEN
+
+#: Credentials the ``settings`` fixture accepts for a registry write.
+WRITE_AUTH = {"Authorization": f"Bearer {CITY_WRITES_TOKEN}"}
+#: Both prefixes serve the same route objects; the gate must cover each mount.
+WRITE_PREFIXES = ["/api/cities", "/api/v1/cities"]
 
 
 async def test_list_cities_returns_objects_sorted(client):
@@ -19,6 +28,7 @@ async def test_list_cities_returns_objects_sorted(client):
 async def test_create_city_trims_name_and_persists(client):
     response = await client.post(
         "/api/cities",
+        headers=WRITE_AUTH,
         json={"name": "  Sevilla ", "latitude": 37.3891, "longitude": -5.9845},
     )
 
@@ -30,7 +40,9 @@ async def test_create_city_trims_name_and_persists(client):
 
 async def test_create_duplicate_is_case_insensitive_409(client):
     response = await client.post(
-        "/api/cities", json={"name": "madrid", "latitude": 1.0, "longitude": 2.0}
+        "/api/cities",
+        headers=WRITE_AUTH,
+        json={"name": "madrid", "latitude": 1.0, "longitude": 2.0},
     )
 
     assert response.status_code == 409
@@ -52,14 +64,14 @@ async def test_create_duplicate_is_case_insensitive_409(client):
     ],
 )
 async def test_create_invalid_payload_is_400(client, payload):
-    response = await client.post("/api/cities", json=payload)
+    response = await client.post("/api/cities", headers=WRITE_AUTH, json=payload)
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "bad_request"
 
 
 async def test_delete_city_is_204_and_registry_only(client):
-    response = await client.delete("/api/cities/Madrid")
+    response = await client.delete("/api/cities/Madrid", headers=WRITE_AUTH)
 
     assert response.status_code == 204
     assert response.content == b""
@@ -69,10 +81,96 @@ async def test_delete_city_is_204_and_registry_only(client):
 
 
 async def test_delete_unknown_city_is_404(client):
-    response = await client.delete("/api/cities/Atlantis")
+    response = await client.delete("/api/cities/Atlantis", headers=WRITE_AUTH)
 
     assert response.status_code == 404
     assert response.json()["error"]["message"] == "City 'Atlantis' not found"
+
+
+# ---------------------------------------------------------------------------
+# Write gating (CITY_WRITES_TOKEN)
+# ---------------------------------------------------------------------------
+
+
+def _unconfigured_client(city_repo) -> AsyncClient:
+    """An app whose settings leave ``city_writes_token`` unset (the shipped default)."""
+    application = create_app(Settings(_env_file=None))
+    application.dependency_overrides[get_city_repo] = lambda: city_repo
+    return AsyncClient(transport=ASGITransport(app=application), base_url="http://test")
+
+
+@pytest.mark.parametrize("prefix", WRITE_PREFIXES)
+async def test_writes_are_503_when_no_token_is_configured(prefix, city_repo):
+    new_city = {"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845}
+    async with _unconfigured_client(city_repo) as unconfigured:
+        created = await unconfigured.post(prefix, headers=WRITE_AUTH, json=new_city)
+        deleted = await unconfigured.delete(f"{prefix}/Madrid", headers=WRITE_AUTH)
+
+    for response in (created, deleted):
+        assert response.status_code == 503
+        error = response.json()["error"]
+        assert error["code"] == "city_writes_disabled"
+        assert error["message"] == "City writes are disabled"
+        assert error["request_id"] == response.headers["x-request-id"]
+    # The gate runs before the handler: no read, no write ever reached the repo.
+    assert city_repo.calls == []
+    assert [city.name for city in city_repo.cities] == ["Madrid", "Alicante"]
+
+
+@pytest.mark.parametrize("prefix", WRITE_PREFIXES)
+async def test_reads_are_unaffected_when_no_token_is_configured(prefix, city_repo):
+    async with _unconfigured_client(city_repo) as unconfigured:
+        response = await unconfigured.get(prefix)
+
+    assert response.status_code == 200
+    assert [city["name"] for city in response.json()] == ["Alicante", "Madrid"]
+
+
+@pytest.mark.parametrize("prefix", WRITE_PREFIXES)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # no header at all
+        {"Authorization": "Bearer wrong-token"},  # wrong secret
+        {"Authorization": f"Bearer {CITY_WRITES_TOKEN}x"},  # prefix of the right one
+        {"Authorization": CITY_WRITES_TOKEN},  # right secret, wrong scheme
+        {"Authorization": "Basic dXNlcjpwdw=="},
+    ],
+)
+async def test_bad_token_is_401_on_both_writes(prefix, headers, client, city_repo):
+    new_city = {"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845}
+
+    created = await client.post(prefix, headers=headers, json=new_city)
+    deleted = await client.delete(f"{prefix}/Madrid", headers=headers)
+
+    for response in (created, deleted):
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        error = response.json()["error"]
+        assert error["code"] == "unauthorized"
+        assert error["request_id"] == response.headers["x-request-id"]
+        # The submitted value is never echoed back.
+        assert "Bearer" not in error["message"]
+        assert CITY_WRITES_TOKEN not in response.text
+    assert city_repo.calls == []
+    assert [city.name for city in city_repo.cities] == ["Madrid", "Alicante"]
+
+
+@pytest.mark.parametrize("prefix", WRITE_PREFIXES)
+async def test_correct_token_allows_both_writes(prefix, client, city_repo):
+    created = await client.post(
+        prefix,
+        headers=WRITE_AUTH,
+        json={"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+    )
+    deleted = await client.delete(f"{prefix}/Madrid", headers=WRITE_AUTH)
+
+    assert created.status_code == 201
+    assert created.json() == {"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845}
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert city_repo.calls == ["get", "upsert", "delete"]
+    assert [city.name for city in city_repo.cities] == ["Alicante", "Sevilla"]
 
 
 # ---------------------------------------------------------------------------

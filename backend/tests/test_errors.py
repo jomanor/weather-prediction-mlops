@@ -30,11 +30,14 @@ async def test_unknown_path_is_a_not_found_envelope(client):
     _assert_envelope(response, 404, "not_found")
 
 
-async def test_validation_error_is_an_envelope_without_the_submitted_value(client):
+async def test_validation_error_is_an_envelope_without_the_submitted_value(client, write_auth):
     # ``longitude`` is missing, so the whole submitted body is pydantic's
-    # ``input``: it must not be reflected back to the caller.
+    # ``input``: it must not be reflected back to the caller. The registry write
+    # is gated, so the caller is authorised here on purpose: it is the body that
+    # must be rejected, not the token.
     response = await client.post(
         "/api/v1/cities",
+        headers=write_auth,
         json={"name": "SECRET-abc123", "latitude": 40.4},
     )
 

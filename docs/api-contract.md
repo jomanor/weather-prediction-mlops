@@ -302,19 +302,31 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
   `prediction − observed`. Positive means the model ran warm, negative means it
   ran cold. `bias` follows the same sign.
 
-## Station registry (v2.1)
+## Station registry (v2.2)
 
 The Mongo collection `cities` is the station registry and the source of truth
 for ingestion: producers read it, the API exposes and manages it.
 
+Reads are public. **Writes are gated** by the `CITY_WRITES_TOKEN` env var: the
+registry drives ingestion, so deleting a station silently stops its ingestion
+and degrades the quality meter. The gate applies identically to `/api/cities`
+and `/api/v1/cities`.
+
 - `GET /api/cities` → array of `{ "name": string, "latitude": number, "longitude": number }`
   (the old bare string array is superseded; seeded with the 15 default
   stations — 14 Spanish plus Pasadena — on startup when the collection is empty).
+  Unauthenticated, never gated.
 - `POST /api/cities` body `{ "name", "latitude", "longitude" }` → 201 with the
   stored city. 409 when the name already exists (case-insensitive), 400 for
   invalid coordinates.
 - `DELETE /api/cities/{name}` → 204. Removes the station from the registry
   only; historical documents in `raw_weather`/`weather_data` are kept.
+- Auth on both writes: `Authorization: Bearer <CITY_WRITES_TOKEN>`.
+  - Token unset (also when the env var is empty) → **503**
+    `city_writes_disabled`, message `City writes are disabled`.
+  - Header missing, wrong scheme, or wrong token → **401** `unauthorized` with
+    `WWW-Authenticate: Bearer`. The token is never echoed in the body or
+    written to a log; the access log line carries no headers.
 - `GET /api/geo/search?q={query}` → `{ "results": [ { "name", "latitude",
   "longitude", "country", "admin1" } ] }` proxied from the Open-Meteo
   geocoding API (no key, `language=es`, max 8). `admin1`/`country` may be
