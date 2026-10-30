@@ -2,4 +2,5 @@ pymongo
 numpy
 pyarrow
 # ``pyspark.ml.functions`` imports pandas; mlflow used to bring it transitively.
-pandas==2.3.3
+# The spark image's python is 3.8; 2.0.3 is the newest wheel it accepts.
+pandas==2.0.3
