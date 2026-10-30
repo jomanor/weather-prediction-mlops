@@ -2,7 +2,7 @@ import { Suspense } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { AppShell } from '@/app/AppShell'
-import { FEATURES } from '@/app/registry'
+import { FEATURES, REDIRECTS } from '@/app/registry'
 import { LoadingBlock } from '@/components/ui/Feedback'
 
 /** Route table generated from the feature registry, one lazy chunk per route. */
@@ -27,6 +27,9 @@ export function AppRoutes() {
             )
           }),
         )}
+        {REDIRECTS.map((redirect) => (
+          <Route key={redirect.from} path={redirect.from} element={<Navigate to={redirect.to} replace />} />
+        ))}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

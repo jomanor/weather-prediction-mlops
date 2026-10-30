@@ -10,7 +10,6 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { CurrentConditions } from '@/features/station/CurrentConditions'
-import { DerivedPanel } from '@/features/station/DerivedPanel'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
 import {
   PREDICTION_HORIZONS,
@@ -192,10 +191,6 @@ export function StationPage() {
                 <LatestPrediction predictions={predictions.data ?? []} />
               )}
             </div>
-          </div>
-
-          <div className="px-4 sm:px-6">
-            {history.data?.points.length ? <DerivedPanel points={history.data.points} /> : null}
           </div>
         </>
       )}

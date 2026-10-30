@@ -24,11 +24,23 @@ export interface FeatureRoute {
   component: LazyExoticComponent<ComponentType>
 }
 
+export interface FeatureRedirect {
+  /** Legacy path relative to the app shell, e.g. `benchmark`. */
+  path: string
+  /** Target, search included, e.g. `/sistema?tab=benchmark`. */
+  to: string
+}
+
 export interface FeatureManifest {
   /** Unique across the registry. */
   id: string
   navItem?: NavItem
   routes: FeatureRoute[]
+  /**
+   * Permanent redirects for paths this feature absorbed. Old deep links keep
+   * working without a fourth (or fifth) surface in the navigation.
+   */
+  redirects?: FeatureRedirect[]
 }
 
 export function orderNavItems(items: NavItem[]): NavItem[] {

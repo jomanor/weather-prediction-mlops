@@ -6,7 +6,6 @@ import { usePreferences } from '@/app/preferences'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
-import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { DailyAnomalyChart } from '@/features/analytics/components/DailyAnomalyChart'
@@ -31,7 +30,8 @@ const DAYS_SCHEMA = { days: urlOption(DAY_OPTIONS, 90) }
 
 const DAY_SEGMENTS = DAY_OPTIONS.map((value) => ({ value, label: `${value} d` }))
 
-export function AnalyticsPage() {
+/** Analytics tab: diurnal cycle, daily anomaly / degree-days and the wind rose. */
+export function AnalyticsPanel() {
   const [state, setState] = useUrlState(DAYS_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
@@ -56,40 +56,34 @@ export function AnalyticsPage() {
   }
 
   return (
-    <div className="space-y-5 pb-8">
-      <PageHeader
-        title="Analítica climática"
-        description="Ciclo diurno, anomalía y grados-día, y régimen de viento calculados sobre las observaciones almacenadas."
-        actions={
-          <>
-            <Button onClick={refetchAll} disabled={refreshing}>
-              <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
-              Actualizar
-            </Button>
-            <label className="sr-only" htmlFor="analytics-city">
-              Estación
-            </label>
-            <select
-              id="analytics-city"
-              value={city}
-              onChange={(event) => selectCity(event.target.value)}
-              className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
-            >
-              {cities.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-            <Segmented
-              value={days}
-              onChange={(value) => setState({ days: value })}
-              options={DAY_SEGMENTS}
-              label="Ventana"
-            />
-          </>
-        }
-      />
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center gap-2 px-4 sm:px-6">
+        <label className="sr-only" htmlFor="analytics-city">
+          Estación
+        </label>
+        <select
+          id="analytics-city"
+          value={city}
+          onChange={(event) => selectCity(event.target.value)}
+          className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
+        >
+          {cities.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+        <Segmented
+          value={days}
+          onChange={(value) => setState({ days: value })}
+          options={DAY_SEGMENTS}
+          label="Ventana"
+        />
+        <Button className="ml-auto" onClick={refetchAll} disabled={refreshing}>
+          <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
+          Actualizar
+        </Button>
+      </div>
 
       <div className="px-4 sm:px-6">
         <Panel flush>

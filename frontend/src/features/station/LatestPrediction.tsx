@@ -35,8 +35,8 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
   return (
     <Panel flush>
       <PanelHeader
-        title="Predicción del modelo"
-        subtitle="Salida real del job de inferencia Spark GBT"
+        title="Predicción"
+        subtitle="Última salida del job de inferencia"
         actions={
           latest ? (
             <>
@@ -93,18 +93,6 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
               <dt className="text-fg-3">Instante origen</dt>
               <dd className="nums text-fg-2">{formatDateTime(latest.source_timestamp)}</dd>
             </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-fg-3">Ejecución</dt>
-              <dd className="nums text-fg-2">{formatDateTime(latest.prediction_timestamp)}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-fg-3">Modelo</dt>
-              <dd className="truncate text-fg-2">{latest.temp_model_name ?? '—'}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-fg-3">Versión</dt>
-              <dd className="nums text-fg-2">{latest.temp_model_version ?? '—'}</dd>
-            </div>
             {hasInterval ? (
               <div className="flex justify-between gap-3">
                 <dt className="text-fg-3">Intervalo</dt>
@@ -123,28 +111,6 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
               </div>
             ) : null}
           </dl>
-
-          {predictions.length > 1 ? (
-            <div className="border-t border-line px-4 py-3">
-              <div className="label mb-2">Últimas ejecuciones</div>
-              <ul className="space-y-1">
-                {predictions.slice(0, 6).map((prediction) => (
-                  <li
-                    key={prediction.prediction_timestamp + prediction.source_timestamp}
-                    className="flex items-center justify-between gap-3 text-[11px]"
-                  >
-                    <span className="nums text-fg-3">{formatDateTime(prediction.source_timestamp)}</span>
-                    <span className="nums text-model">
-                      {formatTemperature(prediction.predicted_temperature, units)}
-                    </span>
-                    <span className="nums text-fg-3">
-                      obs {formatTemperature(prediction.observed_temperature, units)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
         </>
       )}
     </Panel>

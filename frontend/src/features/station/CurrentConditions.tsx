@@ -47,15 +47,15 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
         </div>
       </div>
 
-      <div className="mt-5 flex flex-wrap items-end gap-x-8 gap-y-4 border-b border-line pb-5">
-        <div className="flex items-center gap-4">
-          <WeatherIcon className={cn('h-10 w-10', toneClass[weather.tone])} strokeWidth={1.5} />
+      <div className="mt-4 flex flex-wrap items-end gap-x-8 gap-y-4 border-b border-line pb-4">
+        <div className="flex items-center gap-3">
+          <WeatherIcon className={cn('h-8 w-8', toneClass[weather.tone])} strokeWidth={1.5} />
           <div>
-            <div className="nums text-5xl font-medium leading-none tracking-[-0.03em] text-fg">
+            <div className="nums text-2xl font-medium leading-none tracking-[-0.02em] text-fg">
               {formatTemperature(station.temperature, units).replace('°', '')}
               <span className="text-fg-3">°</span>
             </div>
-            <div className="mt-1.5 text-xs text-fg-2">{weather.label}</div>
+            <div className="mt-1 text-xs text-fg-2">{weather.label}</div>
           </div>
         </div>
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { skillTone } from '@/features/models/ModelsPage'
+import { skillTone } from '@/features/system/components/ModelsPanel'
 
 describe('skillTone thresholds', () => {
   it('treats ≥ 0.3 as a solid win', () => {

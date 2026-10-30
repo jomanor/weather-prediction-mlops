@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
-import { FEATURES, NAV_ITEMS, ROUTES } from '@/app/registry'
+import { FEATURES, NAV_ITEMS, REDIRECTS, ROUTES } from '@/app/registry'
 
 describe('feature registry', () => {
+  it('exposes exactly the three surfaces', () => {
+    expect(NAV_ITEMS.map((item) => [item.label, item.to])).toEqual([
+      ['Resumen', '/'],
+      ['Estación', '/stations'],
+      ['Sistema', '/sistema'],
+    ])
+    expect(FEATURES).toHaveLength(3)
+  })
+
   it('resolves every nav item to a registered route', () => {
     const registered = new Set(ROUTES.map((route) => route.to))
     for (const item of NAV_ITEMS) {
@@ -25,5 +34,16 @@ describe('feature registry', () => {
   it('exposes every manifest route exactly once', () => {
     const expected = FEATURES.reduce((total, feature) => total + feature.routes.length, 0)
     expect(ROUTES).toHaveLength(expected)
+  })
+
+  it('redirects the absorbed pages into Sistema tabs', () => {
+    expect(REDIRECTS.map((redirect) => [redirect.from, redirect.to])).toEqual([
+      ['/benchmark', '/sistema?tab=benchmark'],
+      ['/models', '/sistema?tab=modelos'],
+      ['/analytics', '/sistema?tab=analitica'],
+    ])
+    /* A redirect must never shadow a live route or a nav target. */
+    const live = new Set(ROUTES.map((route) => route.to))
+    for (const redirect of REDIRECTS) expect(live.has(redirect.from)).toBe(false)
   })
 })
