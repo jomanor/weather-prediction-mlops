@@ -386,6 +386,18 @@ class WeatherRepository:
         nulls = sum(1 for _, temperature in rows if to_float(temperature) is None)
         null_rate = (nulls / observed_hours) if observed_hours else None
         last_observed_at = rows[-1][0] if rows else None
+        if last_observed_at is None:
+            # No rows inside the window: fall back to the city's all-time latest
+            # feature row so a station that went silent reports a large (honest)
+            # ``age_hours`` instead of ``null`` (which reads as "never observed").
+            # City-prefixed descending sort keeps it index-backed.
+            cursor = (
+                self._features.find({"city": city}, {"city": 1, "timestamp": 1})
+                .sort([("city", 1), ("timestamp", -1)])
+                .limit(1)
+            )
+            async for doc in cursor:
+                last_observed_at = as_utc(doc.get("timestamp"))
         age_hours = (
             (now - last_observed_at).total_seconds() / 3600.0
             if last_observed_at is not None

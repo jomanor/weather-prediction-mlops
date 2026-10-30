@@ -281,9 +281,19 @@ async def test_quality_report_per_city_queries_are_city_prefixed_and_sorted():
     assert len(expected_cities) == 15
     # One equality-prefixed query per city: ``city`` is pinned, so the
     # ``{city: 1, timestamp: -1}`` index serves the ascending timestamp sort.
-    assert len(features.cursors) == len(expected_cities)
-    for cursor in features.cursors:
-        assert cursor.sort_spec == [("city", 1), ("timestamp", 1)]
+    # Every city without a row in the window also gets a descending, still
+    # city-prefixed, latest-row fallback (13 of the 15 stations here).
+    window_cursors = [
+        cursor for cursor in features.cursors if cursor.sort_spec == [("city", 1), ("timestamp", 1)]
+    ]
+    fallback_cursors = [
+        cursor
+        for cursor in features.cursors
+        if cursor.sort_spec == [("city", 1), ("timestamp", -1)]
+    ]
+    assert len(window_cursors) == len(expected_cities)
+    assert len(fallback_cursors) == len(expected_cities) - 2
+    assert all(cursor.sort_spec[0] == ("city", 1) for cursor in features.cursors)
     assert features.find_calls[0][0] == {
         "city": "Alicante",
         "timestamp": {"$gte": OBSERVED_AT - timedelta(days=1), "$lte": OBSERVED_AT},
@@ -366,8 +376,10 @@ async def test_quality_report_city_outside_window_is_empty_and_bad():
     assert madrid.completeness == 0.0
     assert madrid.max_gap_hours == 0.0  # fewer than two points
     assert madrid.null_rate is None
-    assert madrid.last_observed_at is None
-    assert madrid.age_hours is None
+    # The window is empty but the station is not: report its real age instead
+    # of null (which would claim it was never observed).
+    assert madrid.last_observed_at == OBSERVED_AT - timedelta(hours=100)
+    assert madrid.age_hours == 100.0
     assert madrid.status == "bad"
 
 
