@@ -21,6 +21,7 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+
 from tests.unit.fake_registry import FakeDb, FakeRegistryCollection, dt, make_entry
 
 # Ensure spark jobs and config are on sys.path
@@ -42,7 +43,10 @@ class TestModelRegistryLookup:
                 "model_registry": FakeRegistryCollection(
                     [
                         make_entry(
-                            "temp_prediction_1h_Prod", doc_id="p1", stage="production", timestamp=dt(1)
+                            "temp_prediction_1h_Prod",
+                            doc_id="p1",
+                            stage="production",
+                            timestamp=dt(1),
                         ),
                         make_entry(
                             "temp_prediction_1h_New", doc_id="s1", stage="staging", timestamp=dt(5)
@@ -174,8 +178,8 @@ class TestLoadLatestModel:
         }
         mock_db = MagicMock()
         # No production doc for this prefix: only the staging query matches.
-        mock_db["model_registry"].find_one.side_effect = (
-            lambda query, **kwargs: entry if query.get("stage") == "staging" else None
+        mock_db["model_registry"].find_one.side_effect = lambda query, **kwargs: (
+            entry if query.get("stage") == "staging" else None
         )
         mock_model = MagicMock()
 
@@ -190,6 +194,34 @@ class TestLoadLatestModel:
         assert model == mock_model
         assert meta is entry
         assert any("No production model" in r.message for r in caplog.records)
+
+
+class TestLatestPerCity:
+    def test_duplicate_feature_rows_collapse_to_one_row_per_city(self, spark):
+        """A legacy duplicate must not become two predictions with the same _id."""
+        schema = StructType(
+            [
+                StructField("city", StringType(), False),
+                StructField("timestamp", TimestampType(), False),
+                StructField("temperature", DoubleType(), True),
+            ]
+        )
+        ts = datetime(2026, 10, 30, 12, 0, 0, tzinfo=timezone.utc)
+        df = spark.createDataFrame(
+            [
+                Row(city="Madrid", timestamp=ts, temperature=20.0),
+                Row(city="Madrid", timestamp=ts, temperature=20.0),
+                Row(city="Madrid", timestamp=datetime(2026, 10, 30, 6, 0, 0), temperature=18.0),
+                Row(city="Palma", timestamp=ts, temperature=22.0),
+            ],
+            schema=schema,
+        )
+
+        out = inference.latest_per_city(df)
+
+        assert out.count() == 2
+        assert [row.city for row in out.orderBy("city").collect()] == ["Madrid", "Palma"]
+        assert out.where("city = 'Madrid'").first().temperature == 20.0
 
 
 class TestInferenceTransformation:
@@ -598,7 +630,7 @@ class TestLoadLatestFeaturesCache:
         frame = MagicMock()
         cached = MagicMock()
         frame.attach_mock(cached, "cached")
-        latest.join.return_value = frame
+        latest.join.return_value.dropDuplicates.return_value = frame
         frame.cache.return_value = cached
         cached.count.return_value = 7
 
@@ -608,6 +640,7 @@ class TestLoadLatestFeaturesCache:
         # must hand that exact object back — discarding the cached frame (and
         # silently re-scanning Atlas) would return ``frame`` instead.
         assert result is cached
+        latest.join.return_value.dropDuplicates.assert_called_once_with(["city", "timestamp"])
         # ``.cache()`` must be called before ``.count()`` so the count itself
         # performs the materialisation that populates the cache.
         assert frame.method_calls == [call.cache(), call.cached.count()]
@@ -853,10 +886,16 @@ class TestShadowComparison:
     def features(self, spark):
         return spark.createDataFrame(
             [
-                Row(city="Madrid", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
-                    temperature=20.0),
-                Row(city="Valencia", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
-                    temperature=25.0),
+                Row(
+                    city="Madrid",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=20.0,
+                ),
+                Row(
+                    city="Valencia",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=25.0,
+                ),
             ],
             schema=StructType(
                 [
@@ -878,10 +917,18 @@ class TestShadowComparison:
 
     def test_rain_disagreement_at_half(self, spark):
         df = spark.createDataFrame(
-            [Row(city="Madrid", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
-                 temperature=0.2),
-             Row(city="Valencia", timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
-                 temperature=0.8)],
+            [
+                Row(
+                    city="Madrid",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=0.2,
+                ),
+                Row(
+                    city="Valencia",
+                    timestamp=datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc),
+                    temperature=0.8,
+                ),
+            ],
             schema=StructType(
                 [
                     StructField("city", StringType(), False),
@@ -987,8 +1034,14 @@ class TestRunShadowAb:
         )
         entry = db["model_registry"].docs[0]
         result = inference.run_shadow_ab(
-            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), entry,
-            _latest_features_df(spark), 1, "temperature",
+            db,
+            MagicMock(),
+            "temp_prediction_1h_",
+            _FakeModel(1.0),
+            entry,
+            _latest_features_df(spark),
+            1,
+            "temperature",
         )
         assert result is None
         assert db["model_shadow"].docs == []
@@ -999,12 +1052,24 @@ class TestRunShadowAb:
         prod = db["model_registry"].find_one({"_id": "p1"})
 
         first = inference.run_shadow_ab(
-            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
-            _latest_features_df(spark), 1, "temperature",
+            db,
+            MagicMock(),
+            "temp_prediction_1h_",
+            _FakeModel(1.0),
+            prod,
+            _latest_features_df(spark),
+            1,
+            "temperature",
         )
         second = inference.run_shadow_ab(
-            db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
-            _latest_features_df(spark), 1, "temperature",
+            db,
+            MagicMock(),
+            "temp_prediction_1h_",
+            _FakeModel(1.0),
+            prod,
+            _latest_features_df(spark),
+            1,
+            "temperature",
         )
 
         assert first["_id"] == "p1_s1"
@@ -1025,8 +1090,14 @@ class TestRunShadowAb:
 
         with caplog.at_level(logging.WARNING, logger="inference"):
             result = inference.run_shadow_ab(
-                db, MagicMock(), "temp_prediction_1h_", _FakeModel(1.0), prod,
-                _latest_features_df(spark), 1, "temperature",
+                db,
+                MagicMock(),
+                "temp_prediction_1h_",
+                _FakeModel(1.0),
+                prod,
+                _latest_features_df(spark),
+                1,
+                "temperature",
             )
 
         assert result is None  # never raises into inference
@@ -1102,9 +1173,7 @@ def _coverage_output(spark, cities, oldest=None):
     rows = [
         Row(
             city=city,
-            source_timestamp=(
-                oldest if (oldest is not None and index == 0) else newest
-            ),
+            source_timestamp=(oldest if (oldest is not None and index == 0) else newest),
             horizon_hours=1.0,
         )
         for index, city in enumerate(cities)
@@ -1242,9 +1311,7 @@ class TestReportPredictionCoverage:
             ),
         )
         output = _coverage_output(spark, ["Pasadena"])
-        monkeypatch.setattr(
-            inference, "run_inference", lambda *a, **k: output
-        )
+        monkeypatch.setattr(inference, "run_inference", lambda *a, **k: output)
         written = {}
         monkeypatch.setattr(
             inference, "write_predictions", lambda out, url: written.update(rows=out.count())

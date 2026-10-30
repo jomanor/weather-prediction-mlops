@@ -211,6 +211,21 @@ def load_latest_model(db, fs, model_name_prefix: str, spark):
 # ---------------------------------------------------------------------------
 
 
+def latest_per_city(df):
+    """Newest feature row per city, deduplicated on ``(city, timestamp)``.
+
+    The inner join on ``(city, timestamp)`` turns duplicate feature rows into
+    duplicate predictions with the SAME ``_id`` (one row per city/epoch/horizon),
+    so the ``dropDuplicates`` is not cosmetic: legacy ObjectId-keyed rows made
+    that duplication real once, and a stale duplicate must never break a write
+    batch or inflate the scored row count.
+    """
+    latest = df.groupBy("city").agg(F.max("timestamp").alias("timestamp"))
+    return latest.join(df, on=["city", "timestamp"], how="inner").dropDuplicates(
+        ["city", "timestamp"]
+    )
+
+
 def load_latest_features(spark, mongo_url: str):
     """Read weather_features from Mongo and return only the most-recent row
     per city (using MAX(timestamp))."""
@@ -225,9 +240,7 @@ def load_latest_features(spark, mongo_url: str):
     if "_id" in df.columns:
         df = df.drop("_id")
 
-    # Keep latest record per city
-    latest = df.groupBy("city").agg(F.max("timestamp").alias("timestamp"))
-    df_latest = latest.join(df, on=["city", "timestamp"], how="inner")
+    df_latest = latest_per_city(df)
 
     # Materialise once: every horizon's transform and the final write reuse this
     # frame, so caching removes ~10 full re-scans of weather_features per run.
