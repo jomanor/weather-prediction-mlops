@@ -85,11 +85,11 @@ with the schemas from `src/api/schemas.ts`, run it with `./node_modules/.bin/vit
 <file>`, then delete the file. That is how a whole class of "the app is broken" reports
 was ruled out.
 
-## State at handoff (2026-09-25, after Batch 4)
+## State at handoff (2026-10-19, after Batch 5)
 
-- Batches 1–3 are merged and deployed on `main` (Batch 3 = the previous squash commit).
-  Batch 4 is **complete but uncommitted** on `feat/batch4` (working tree; do not
-  commit/push — the lead integrates). Frozen interfaces: `docs/batch4-contract.md`.
+- Batches 1–4 are merged on `main` (Batch 4 = 48b7380, PR #14). Batch 5 is merged locally as
+  0d68c57 / 9cc244a / 1d92c9d on top of bf0bcdf and **not pushed yet**; the model-lifecycle contract
+  lives in `docs/model-lifecycle.md`. The Batch-4 detail below is kept as history.
 - **Batch 4 shipped (all four workstreams):**
   - **M2 horizons as config** (`spark/config/spark_config.py:37`): `FEATURES_CONFIG["target_horizons"] = [1,3,6,12,24]` replaces `target_horizon`; `ML_CONFIG["long_horizon_from"] = 12` uses a reduced grid (first value of each param) for `h >= 12`. One-pass `create_target_variable(df, horizons)`; `ml_training.main` caches the frame once and trains per horizon (per-horizon dropna/split/`data_snapshot`); `inference.main` loads once, loops horizons, skips a missing model with a warning, and unions all horizons into ONE upsert. `_id = {city}_{epoch(source_timestamp)}_{h}h`.
   - **M2 freshness fix**: `save_features_to_mongodb`'s `dropna` subset is the observation inputs only, so the newest observation row survives (it previously forced every healthy rebuild ~6 h stale). **Critical review fix:** `prepare_features_for_ml` now excludes **all** `target_*` columns (it previously kept the other horizons' labels, leaking future values and making inference write nothing).
@@ -105,17 +105,16 @@ was ruled out.
 - **Live-data findings (Batch 4):**
   - Storage re-measured 2026-09-25: `weather_predictions` avgObjSize **437 B** (not 405) and **15** live cities (not 14) — see the DB row above for the projection and tripwire.
   - Predicted-row growth is bounded by the ~6 h feature-rebuild rate (upsert keyed on `source_timestamp`), not the hourly inference schedule.
-  - Pasadena is in Atlas but absent from `FALLBACK_CITIES`/`DEFAULT_CITIES`/`CANONICAL_CITIES`, so several endpoints (incl. diurnal/correlation/error-by-hour) omit it.
-  - `weather_features` is overwritten each rebuild, dropping its `{city:1,timestamp:-1}` index while `ensure_indexes` only runs at backend startup; the new analytics endpoints are the first hot consumers → COLLSCAN + in-memory sort until a restart (latency, not code 292, at current volume).
+  - ~~Pasadena is in Atlas but absent from `DEFAULT_CITIES`/`CANONICAL_CITIES`~~ **fixed**: `DEFAULT_CITIES` includes Pasadena and `analytics_repo.CANONICAL_CITIES` derives from it.
+  - ~~`weather_features` is overwritten each rebuild, dropping its `{city:1,timestamp:-1}` index~~ **fixed in Batch 5 (M6)**: the write is append+upsert and `batch_processing.ensure_features_index` recreates the index after every write (warning-only on failure).
   - `weather_data` still holds 0 rows — expected; the R2 TTL entry for it is vestigial. Leave it in place.
 - **Trap fixed in Batch 3, do not regress it:** `inference.py` used to trust the MLflow registry for artifact metadata; when MLflow served the artifact the row lost its `interval` and reported fake `MLflow-latest` lineage. `_latest_model_entry` is now resolved first and always supplies metadata; MLflow only ever serves the *artifact*.
 
-## In flight (2026-09-30) — `fix/spark-atlas-transient-retries` (Spark job resilience)
+## Resolved (2026-09-30) — `fix/spark-atlas-transient-retries` (Spark job resilience)
 
-Worktree `../weather-prediction-mlops-atlas-retry`, branched off `main` a40b87d in its **own worktree** so the
-user's uncommitted Batch-4 session in the main checkout is untouched. Committed as `a7bcbae` on
-`fix/spark-atlas-transient-retries` (not pushed); worktree clean. Owner: lead
-+ `ml-engineer`; interfaces frozen before fan-out.
+Merged to `main` as 8272b15. The evidence below is kept because the failure modes are still live. The agreed
+follow-up shipped in Batch 5: `batch_processing.py` imports the shared `run_with_mongo_retries` and keeps no
+local copy.
 
 **Problem — `Run Spark jobs` is not "always failing", it fails ~5 % of runs but each one is a long red run.**
 Workflow `ml-pipeline` on `main`, last 60 runs: 52 success / 3 failure / 5 cancelled. All 3 failures are the
@@ -172,20 +171,62 @@ caches (pre-existing, `spark.stop()` releases it); the 60 s backoff cap is unrea
 by a pure unit test only); `tests/` is outside CI's ruff/black scope; CI installs `pytest`/`pymongo` unpinned;
 6 of the 8 integration tests need the CI `mongo:6` service and stay unmeasured locally.
 
-**Not merged, not pushed — the user's call (2026-09-30): keep the branch local.** No security gate (no auth,
-secrets or input surface changed). The user merges when the Batch-4 session is committed; pushing later would
-run the real `pipeline-test` on Python 3.11 if that extra evidence is ever wanted.
+**Status:** merged as 8272b15. No security gate was required (no auth, secrets or input surface changed).
+The agreed follow-up (shared retry helper in `batch_processing.py`) is done; feature engineering, inference
+and training now share one implementation.
 
-**Agreed follow-up (user approved 2026-09-30):** once Batch 4 is committed in the main checkout, delete the
-duplicated retry helper inside `spark/spark-jobs/batch_processing.py` and import `run_with_mongo_retries` from
-`mongo_retry` so feature engineering, inference and training share one implementation. Do **not** touch that
-file while it is still uncommitted.
+## Batch 5 shipped (M5, M6, L6, R6)
 
-## Next: Batch 5
+- **R6 API surface**: every route is mounted once from an aggregate router under canonical `/api/v1`
+  and a deprecated `/api` alias (Render's health path and the Netlify proxy keep working; the frontend is
+  unchanged). Frozen error envelope `{"error":{"code","message","request_id"}}` for 404/422/500 and every
+  explicit `APIError`; `/health/ready` keeps its documented 503 body. One JSON access line per request
+  (`ts`, `level`, `request_id`, `method`, `path` without query string, `status_code`, `duration_ms`,
+  `cache_hit`); `X-Request-Id` is echoed when it matches `[A-Za-z0-9._-]{1,64}` and regenerated otherwise.
+  The TTL cache is now LRU-bounded and invalid cities are rejected against the registry.
+- **M5 lifecycle** (`docs/model-lifecycle.md`): training always writes `staging`; `scripts/promote_model.py`
+  promotes one document to `production`, supersedes the incumbent in the same slot, supports `--dry-run` and
+  `--rollback`, refuses a document without `gridfs_file_id`, and is idempotent. Inference resolves through
+  `model_selection.select_entry`: production when present, otherwise the newest staging with a warning (this
+  is why the hourly job keeps working until the first promote). Shadow A/B scores a newer staging challenger
+  on the same cached feature frame and upserts one `model_shadow` doc per (production, shadow) pair with
+  disagreement stats — no extra prediction rows, never on the critical path, failures are logged and skipped.
+  `_id` epochs are pinned to UTC (`spark.sql.session.timeZone=UTC` + `utc_epoch_seconds`).
+- **M6 canonical store**: GridFS artifact + `model_registry` metadata are the system of record; inference
+  loads GridFS first and MLflow only for a legacy doc without a file id, never for metadata. MLflow logging
+  is opt-in on `MLFLOW_TRACKING_URI`, imports lazily and cannot fail a run; `ml-pipeline.yml` no longer sets
+  the CI file store or installs mlflow. The feature index is recreated after the write.
+- **L6 refresh**: `POST /api/refresh` (and `/api/v1/refresh`) fetches one registered city from Open-Meteo,
+  upserts the identical `raw_weather` document and returns
+  `{city, source_timestamp, fetched_at, features_refreshed:false, predictions_refreshed:false}`. It never
+  runs Spark. Process-local limiter: 900 s per city, 6/min, 48/day — rejections do not consume budget,
+  attempts do; exceeded → 429 + `Retry-After`, disabled → 503, unknown city → 404, upstream → 502.
+- **Follow-ups closed**: shared `mongo_retry` helper, LRU cache bound + city validation, feature-index
+  repair, Pasadena in the derived city lists, tz-independent prediction `_id`, MLflow no longer a dependency
+  of CI, mobile sheet/map touch fixes (tap tolerance, focus/Escape, swipe axis lock, safe-area layout).
+- **Gates (measured on the merged tree)**: backend `234 passed`; root `268 passed, 7 skipped` (the 7 need a
+  live `mongo:6`; run with `PYSPARK_PYTHON=$PWD/.venv/bin/python`); frontend `35 files / 187 tests passed`,
+  typecheck clean, lint 0 errors, build ok (chunk-size warning only); `ruff` clean; `black` 81 files
+  unchanged.
 
-Scope: **M5** stages (`staging` -> human promote -> `production`) + rollback script + shadow A/B, **M6** declare GridFS + `model_registry` canonical (the CI MLflow file store is ephemeral), **L6** optional rate-limited `POST /api/refresh` (server-side fetch; never a browser-triggered workflow dispatch; WebSocket rejected), **R6** structured JSON logs with `request_id`/`duration_ms`/`cache_hit`, stable error envelope, `/api/v1` mount (breaking — do before the frontend hardens). The canonical model store, promotion flow, shadow semantics, fallback rule and env vars are declared in `docs/model-lifecycle.md` (M6).
+**Decisions/assumptions to keep:** `/api` stays the served alias (removing it is a coordinated frontend +
+Render change); the refresh endpoint is deliberately unauthenticated but globally capped because every
+accepted attempt writes a `raw_weather` document (48/day ≈ 12 MB over the 180-day TTL, inside the M0 budget);
+promotion stays a human CLI action, not an API; shadow A/B measures production↔challenger disagreement, not
+accuracy, and only runs after a real promote.
 
-Also carry the accepted follow-ups in `docs/roadmap.md`: bound/LRU the cache keyed on the unbounded `city` string, k6 cold-burst test, read-API latency/availability SLO (needs an OTel histogram or structured slow-request logs first), production-drift SLI + pipeline dead-man's switch, re-run `ensure_indexes` after the feature write (done in M6 — `batch_processing.ensure_features_index` recreates `{city:1,timestamp:-1}` after every write, non-fatally), the Pasadena registry gap, the `unix_timestamp` `_id` TZ dependency, surfacing `X-Data-Age-Seconds` to the frontend, and the still-unconsumed `/series`/`/summary`/`/range` endpoints.
+**Deploy notes:** a fresh deploy serves both `/api/health` and `/api/v1/health` (either proving the image
+shipped, unlike `/api/health/ready`); the hourly `job=inference` will log the staging-fallback warning until
+the first promote; `POST /api/refresh` is available immediately but writes no features/predictions.
+
+## Next: Batch 6
+
+No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
+surface `X-Data-Age-Seconds` in the frontend (`apiGet` does not read response headers), consume
+`/series`/`/summary`/`/range`, k6 cold-burst, a read-API latency/availability SLO (the JSON access log now
+has the fields an OTel histogram would need), a pageable production-drift signal (sustained
+`skill_score <= 0.0` or temperature-feature drift → GitHub issue, never a page), and a dead-man's switch for
+`ingest` + features. Browser verification still needs the desktop app session.
 
 **L1 (15-min ingest) is deferred, not cancelled.** Measured projection with 15-min ingest is ~637 MiB at a 180-day raw window (~890 MiB if features densify too), which breaks the 512 MB M0 cap. Three ways forward when it is picked up: shorten the raw window to ~90 d (free, ~350 MiB, halves the training window), upgrade the Atlas tier (2 GB, paid), or keep hourly ingest. Do not start L1 without re-measuring storage first.
 

@@ -4,11 +4,15 @@ Single source of truth for the `backend/` service and the `frontend/` app.
 Both sides must match this document. Changing it means changing both sides
 in the same PR.
 
-Base path: `/api`
+Canonical base path: `/api/v1` (Batch 5). The same route objects are also served under `/api` as a
+deprecated alias — both answer identically, but new clients should use `/api/v1`. Render's health check and
+the current frontend still use `/api`; removing the alias is a coordinated change.
 Content type: `application/json`
 Timestamps: ISO-8601 UTC strings (`2026-09-23T14:00:00Z`).
 Nullable fields are always present in the payload, `null` when unknown —
 never omitted.
+Response headers: cached endpoints send `ETag`, `Cache-Control` and `X-Data-Age-Seconds`; every response
+sends `X-Request-Id` (also embedded in error bodies).
 
 ## Health
 
@@ -198,6 +202,35 @@ through from the registry document (also nullable).
 }
 ```
 
+## Refresh (optional, rate-limited)
+
+### `POST /api/refresh`
+
+Server-side Open-Meteo fetch for one registered station. Writes one `raw_weather`
+document; never runs Spark, so features and predictions are not refreshed.
+
+```json
+{ "city": "Madrid" }
+```
+
+```json
+{
+  "city": "Madrid",
+  "source_timestamp": "2026-10-19T18:00:00Z",
+  "fetched_at": "2026-10-19T18:00:04Z",
+  "features_refreshed": false,
+  "predictions_refreshed": false
+}
+```
+
+- `404 city_not_found` when the name is not in the station registry.
+- `429 refresh_rate_limited` with `Retry-After` (seconds): one fetch per city
+  per 900 s, at most 6/minute and 48/day per process. Rejected requests do not
+  consume budget; attempts do.
+- `503 refresh_disabled` when `REFRESH_ENABLED=false`.
+- `502 refresh_upstream_error` when Open-Meteo fails or returns no usable
+  observation.
+
 ## Shared types
 
 ```ts
@@ -250,7 +283,10 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
 
 ## Conventions
 
-- Errors: `{ "detail": "human readable" }` with a 4xx/5xx status.
+- Errors: every 4xx/5xx body is the stable envelope
+  `{ "error": { "code": "snake_case", "message": "human readable", "request_id": "…" } }`.
+  The only exception is `GET /health/ready` (503 `{ "status", "database" }`), an
+  operational probe. Validation errors never echo the submitted value.
 - CORS: allowed origins come from the `CORS_ORIGINS` env var (comma separated),
   default `http://localhost:5173`.
 - No endpoint may return placeholder, synthetic or randomised values. If data
@@ -265,8 +301,8 @@ The Mongo collection `cities` is the station registry and the source of truth
 for ingestion: producers read it, the API exposes and manages it.
 
 - `GET /api/cities` → array of `{ "name": string, "latitude": number, "longitude": number }`
-  (the old bare string array is superseded; seeded with the 14 default
-  stations on startup when the collection is empty).
+  (the old bare string array is superseded; seeded with the 15 default
+  stations — 14 Spanish plus Pasadena — on startup when the collection is empty).
 - `POST /api/cities` body `{ "name", "latitude", "longitude" }` → 201 with the
   stored city. 409 when the name already exists (case-insensitive), 400 for
   invalid coordinates.
