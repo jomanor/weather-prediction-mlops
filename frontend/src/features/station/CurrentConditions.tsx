@@ -31,7 +31,7 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="label">Observación</div>
-          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-fg">{station.city}</h2>
+          <h2 className="mt-1.5 text-value font-semibold tracking-tight text-fg">{station.city}</h2>
           <p className="nums mt-1 text-[11px] text-fg-3">
             {isNum(station.latitude) ? `${station.latitude.toFixed(2)}°N` : '—'} ·{' '}
             {isNum(station.longitude) ? `${station.longitude.toFixed(2)}°E` : '—'}
@@ -51,7 +51,7 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
         <div className="flex items-center gap-3">
           <WeatherIcon className={cn('h-8 w-8', toneClass[weather.tone])} strokeWidth={1.5} />
           <div>
-            <div className="nums text-2xl font-medium leading-none tracking-[-0.02em] text-fg">
+            <div className="nums text-hero font-medium leading-none tracking-[-0.02em] text-fg">
               {formatTemperature(station.temperature, units).replace('°', '')}
               <span className="text-fg-3">°</span>
             </div>
