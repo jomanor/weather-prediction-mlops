@@ -341,6 +341,7 @@ the cut list live in `docs/app-rethink.md`.
   horizon); the card picks the selected horizon from it; the chart plots the run at
   `source_timestamp + horizon_hours`. Verified: the 48 h chart now spans observations + the +24 h
   forecast, the model line is in the future, and the card reads the latest run.
+- **Pasadena is hidden from Sistema** (Calidad, Benchmark, Analítica) per the user's choice: the AEMET-covered set drives those tabs, so the city picker excludes it, `?city=Pasadena` falls back to Madrid, the diurnal heatmap has no Pasadena row and the quality table/counters are computed over the 14 Spanish stations (with a footnote pointing to Resumen/Estación). Resumen and Estación still show it; the API is unchanged.
 - **Netlify**: `meteoml.netlify.app` returns Netlify's "Site not found" (404) while
   Netlify status is operational and Render is 200. The frontend fixes above were verified against a
   local Vite dev server proxying the live API. The deployed URL must be re-confirmed before trusting
