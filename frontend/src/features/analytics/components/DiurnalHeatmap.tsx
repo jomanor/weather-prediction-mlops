@@ -26,7 +26,10 @@ export function DiurnalHeatmap({
 
   return (
     <div className={cn('overflow-x-auto', className)}>
-      <table className="border-separate border-spacing-[3px] text-[10px]">
+      {/* `relative` keeps the sticky first column from leaking into the root
+          scroll area (Chrome counts the 618 px table content as page overflow
+          otherwise, so the whole app can pan horizontally at 390 px). */}
+      <table className="relative border-separate border-spacing-[3px] text-[10px]">
         <caption className="sr-only">
           Temperatura media por estación y hora local, en grados centígrados
         </caption>
