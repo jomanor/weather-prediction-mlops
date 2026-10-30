@@ -153,6 +153,15 @@ jobs:
         if: needs.resolve.outputs.inference == '1' || needs.resolve.outputs.features == '1'
         run: python scripts/ingest_weather.py
 
+      - name: Backfill recent hourly history
+        # GitHub throttles the hourly crons to a handful of runs/day, so live
+        # ingest alone leaves 6-7 h gaps. Filling the last two days hourly keeps
+        # the short-range charts (and rolling features) dense without new
+        # infrastructure. Idempotent: rows are skipped by _id, so steady state
+        # is one row per city-hour, not per run. ~1-2 min.
+        if: needs.resolve.outputs.features == '1'
+        run: python scripts/backfill_historical_data.py --days 2 --recent 2
+
       - name: Feature engineering
         if: needs.resolve.outputs.features == '1'
         run: python spark/spark-jobs/batch_processing.py
