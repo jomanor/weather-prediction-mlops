@@ -9,9 +9,16 @@ Usage
 -----
     python scripts/backfill_historical_data.py [--start YYYY-MM-DD] [--end YYYY-MM-DD]
     python scripts/backfill_historical_data.py --days 90 --recent 5
+    python scripts/backfill_historical_data.py --days 35 --recent 5 --city Pasadena
 
 Options
 -------
+    --city   : only backfill the named station(s). Repeatable and/or
+               comma-separated (``--city Pasadena --city Madrid`` or
+               ``--city Pasadena,Madrid``). Default: every city in the
+               registry. Names are matched case- and accent-insensitively;
+               an unknown name aborts the run instead of silently doing
+               nothing.
     --days   : backfill the last N days (overrides --start); the range the app
                queries is only the last few days, so 90 keeps the free tier far
                below its 512 MB limit while still giving training a long series.
@@ -44,6 +51,7 @@ import argparse
 import os
 import sys
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 import requests
@@ -186,6 +194,55 @@ def fetch_recent_chunk(city: str, lat: float, lon: float, past_days: int) -> dic
     return None
 
 
+def _normalise_city_name(name: str) -> str:
+    """Fold case and strip accents so ``Almeria`` matches ``Almería``."""
+    decomposed = unicodedata.normalize("NFKD", name.strip().casefold())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def parse_city_filter(values: list[str] | None) -> list[str]:
+    """Normalise ``--city`` values (repeatable and/or comma-separated).
+
+    Returns a de-duplicated list of names, preserving the order given.
+    ``None``/``[]`` means "no filter" and yields an empty list.
+    """
+    if not values:
+        return []
+    names: list[str] = []
+    for raw in values:
+        for part in str(raw).split(","):
+            name = part.strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def select_cities(
+    cities: dict[str, tuple[float, float]], wanted: list[str]
+) -> dict[str, tuple[float, float]]:
+    """Restrict the registry to *wanted*.
+
+    An empty *wanted* returns the registry unchanged. Unknown names raise
+    ``KeyError`` so a typo fails loudly instead of writing nothing.
+    """
+    if not wanted:
+        return dict(cities)
+
+    lookup = {_normalise_city_name(name): name for name in cities}
+    selected: dict[str, tuple[float, float]] = {}
+    unknown: list[str] = []
+    for name in wanted:
+        resolved = name if name in cities else lookup.get(_normalise_city_name(name))
+        if resolved is None:
+            unknown.append(name)
+            continue
+        selected[resolved] = cities[resolved]
+
+    if unknown:
+        raise KeyError(f"unknown city/cities: {', '.join(unknown)}")
+    return selected
+
+
 def load_cities(db) -> dict[str, tuple[float, float]]:
     """The station registry the API seeds, as {name: (lat, lon)}."""
     cities: dict[str, tuple[float, float]] = {}
@@ -320,6 +377,16 @@ def parse_args():
         help="Also fill the last N days from the forecast API (default: 0)",
     )
     parser.add_argument(
+        "--city",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Only backfill this station. Repeatable and/or comma-separated; "
+            "default is every city in the registry"
+        ),
+    )
+    parser.add_argument(
         "--chunk-days",
         type=int,
         default=180,
@@ -362,11 +429,24 @@ def main():
 
     # Match the deployed station registry when it exists; fall back to the
     # bundled list on a brand-new database the API has not seeded yet.
-    cities = load_cities(db) or CITIES
+    registry = load_cities(db) or CITIES
+
+    # Optional single-station repair: no filter means the whole registry.
+    wanted = parse_city_filter(args.city)
+    try:
+        cities = select_cities(registry, wanted)
+    except KeyError as exc:
+        print(f"[ERROR] {exc.args[0] if exc.args else exc}")
+        print(f"        known cities: {', '.join(sorted(registry))}")
+        client.close()
+        sys.exit(1)
 
     print(f"Backfill range : {start_date} → {end_date}")
     print(f"Recent fill    : {args.recent} day(s) from the forecast API")
-    print(f"Cities         : {len(cities)}")
+    if wanted:
+        print(f"Cities         : {len(cities)} of {len(registry)} (filtered: {', '.join(cities)})")
+    else:
+        print(f"Cities         : {len(cities)}")
     print(f"Chunk size     : {args.chunk_days} days")
     print(f"MongoDB        : {args.mongo_url.split('@')[-1]}")  # hide credentials
     print()
