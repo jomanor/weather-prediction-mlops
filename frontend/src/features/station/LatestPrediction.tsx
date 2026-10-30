@@ -24,11 +24,13 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
   const latest = predictions[0]
   const hasInterval =
     latest !== undefined && isNum(latest.temp_lower) && isNum(latest.temp_upper)
-  /* TODO(stale-api): the prediction API will expose `source_age_hours` and a
-     `stale` flag. Until then the age is derived locally from the origin
-     observation so the badge stays honest without depending on new fields. */
-  const ageHours = latest ? ageInHours(latest.source_timestamp) : null
-  const isStale = ageHours !== null && ageHours > PREDICTION_STALE_HOURS
+  /* The API resolves age/stale from the same timestamp, so both agree; the
+     local fallback keeps a legacy payload honest too. */
+  const ageHours = latest?.source_age_hours ?? (latest ? ageInHours(latest.source_timestamp) : null)
+  /* OR, not `??`: a legacy payload without the field parses to `stale=false`,
+     and the local age must still flag it. */
+  const isStale =
+    latest?.stale === true || (ageHours !== null && ageHours > PREDICTION_STALE_HOURS)
 
   return (
     <Panel flush>

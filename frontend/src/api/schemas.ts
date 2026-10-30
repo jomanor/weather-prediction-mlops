@@ -58,6 +58,13 @@ export const predictionSchema = z.object({
   temp_model_version: nullableString,
   rain_model_name: nullableString,
   rain_model_version: nullableString,
+  /* Batch 5 R6: age of the source observation and a server-side stale flag
+     (24 h default). Additive; older payloads omit them. */
+  source_age_hours: nullableNumber,
+  stale: z
+    .boolean()
+    .optional()
+    .transform((value) => value ?? false),
 })
 export type Prediction = z.infer<typeof predictionSchema>
 

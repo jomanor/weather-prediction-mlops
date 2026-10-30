@@ -120,6 +120,11 @@ across the returned rows (null when empty).
 { "count": 70, "generated_at": "2026-09-23T14:00:00Z", "predictions": [Prediction, ...] }
 ```
 
+Every `Prediction` also carries `source_age_hours` (number|null) and `stale`
+(boolean): the age of `source_timestamp` at request time, and whether it exceeds
+`PREDICTION_STALE_AFTER_HOURS` (env, default 24). Stale rows stay visible and
+flagged — never dropped. A missing `source_timestamp` yields `null`/`false`.
+
 ### `GET /api/predictions/{city}?limit=48&horizon=`
 
 `Prediction[]` or `404` when the city has no predictions. `limit` is 1..500
