@@ -12,6 +12,8 @@ function point(observed_at: string, temperature: number | null): WeatherPoint {
 function prediction(input: {
   prediction_timestamp: string
   predicted_temperature: number | null
+  source_timestamp?: string
+  horizon_hours?: number
   temp_lower?: number | null
   temp_upper?: number | null
   interval_level?: number | null
@@ -38,6 +40,75 @@ describe('buildHistoryChartData', () => {
     expect(hasInterval).toBe(false)
     expect(rows[0].band_base).toBeNull()
     expect(rows[0].band_size).toBeNull()
+  })
+
+  it('plots a prediction at its target time source + horizon, not when inference ran', () => {
+    const { rows } = buildHistoryChartData(
+      [],
+      [
+        prediction({
+          source_timestamp: '2026-09-25T09:00:00Z',
+          horizon_hours: 3,
+          prediction_timestamp: '2026-09-25T09:05:00Z',
+          predicted_temperature: 22,
+        }),
+      ],
+      'metric',
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].ts).toBe(new Date('2026-09-25T12:00:00Z').getTime())
+    expect(rows[0].model).toBeCloseTo(22)
+  })
+
+  it('keeps only the newest source run when handed prediction history', () => {
+    const { rows } = buildHistoryChartData(
+      [],
+      [
+        // Older run, target 09:00.
+        prediction({
+          source_timestamp: '2026-09-25T08:00:00Z',
+          horizon_hours: 1,
+          prediction_timestamp: '2026-09-25T08:05:00Z',
+          predicted_temperature: 10,
+        }),
+        // Newer run, target 11:00.
+        prediction({
+          source_timestamp: '2026-09-25T10:00:00Z',
+          horizon_hours: 1,
+          prediction_timestamp: '2026-09-25T10:05:00Z',
+          predicted_temperature: 20,
+        }),
+      ],
+      'metric',
+    )
+    expect(rows.map((row) => row.ts)).toEqual([new Date('2026-09-25T11:00:00Z').getTime()])
+    expect(rows[0].model).toBeCloseTo(20)
+  })
+
+  it('plots one model point per horizon of the newest run', () => {
+    const { rows } = buildHistoryChartData(
+      [],
+      [
+        prediction({
+          source_timestamp: '2026-09-25T09:00:00Z',
+          horizon_hours: 1,
+          prediction_timestamp: '2026-09-25T09:05:00Z',
+          predicted_temperature: 21,
+        }),
+        prediction({
+          source_timestamp: '2026-09-25T09:00:00Z',
+          horizon_hours: 6,
+          prediction_timestamp: '2026-09-25T09:05:00Z',
+          predicted_temperature: 24,
+        }),
+      ],
+      'metric',
+    )
+    expect(rows.map((row) => row.ts)).toEqual([
+      new Date('2026-09-25T10:00:00Z').getTime(),
+      new Date('2026-09-25T15:00:00Z').getTime(),
+    ])
+    expect(rows.map((row) => row.model)).toEqual([21, 24])
   })
 
   it('derives band_base and band_size from temp_lower/temp_upper', () => {

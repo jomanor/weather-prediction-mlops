@@ -1,5 +1,6 @@
 import type { Prediction, WeatherPoint } from '@/api/schemas'
 import { convertTemperature, isNum, type UnitSystem } from '@/lib/format'
+import { forecastTargetMs, latestRun } from '@/lib/predictions'
 
 /** One merged timeline row: observations and model predictions share the hour. */
 export interface HistoryChartRow {
@@ -62,11 +63,17 @@ export function buildHistoryChartData(
     }
   }
 
+  /* The `/predictions/{city}` query returns prediction *history* (oldest →
+     newest), so only the newest source run is plotted: mixing runs would draw
+     the model line across days of past inferences and drag the x-domain back.
+     Each row is placed at the instant it forecasts — `source_timestamp` plus
+     `horizon_hours` — not at `prediction_timestamp` (when inference ran). The
+     domain may therefore extend into the future by up to the max horizon. */
   let hasInterval = false
   let hasModel = false
-  for (const prediction of predictions) {
-    const ts = new Date(prediction.prediction_timestamp).getTime()
-    if (!Number.isFinite(ts) || !isNum(prediction.predicted_temperature)) continue
+  for (const prediction of latestRun(predictions)) {
+    const ts = forecastTargetMs(prediction)
+    if (ts === null || !isNum(prediction.predicted_temperature)) continue
     const row = bucket(ts)
     row.model = convertTemperature(prediction.predicted_temperature, units)
     hasModel = true

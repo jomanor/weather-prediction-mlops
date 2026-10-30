@@ -38,10 +38,18 @@ export const useStats = (city: string, hours = 24) =>
 export const PREDICTION_HORIZONS = [1, 3, 6, 12, 24] as const
 export type PredictionHorizon = (typeof PREDICTION_HORIZONS)[number]
 
-export const usePredictions = (city: string, limit = 48, horizon: number = 1) =>
+/**
+ * Contract 2: prediction history for one city, unfiltered by horizon.
+ *
+ * One query per station: the page derives the latest run, the card row for the
+ * selected horizon and the chart curve from the same window. Filtering by
+ * horizon here would return at most one model point per inference run, i.e. a
+ * point cloud instead of a forecast curve.
+ */
+export const usePredictions = (city: string, limit = 200) =>
   useApiQuery(
-    queryKeys.predictions(city, limit, horizon),
-    `/predictions/${encodeURIComponent(city)}?limit=${limit}&horizon=${horizon}`,
+    queryKeys.predictions(city, limit),
+    `/predictions/${encodeURIComponent(city)}?limit=${limit}`,
     z.array(predictionSchema),
     { enabled: Boolean(city), allowNotFound: true },
   )

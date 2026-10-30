@@ -29,8 +29,7 @@ export const queryKeys = {
   history: (city: string, hours: number) => ['history', city, hours] as const,
   stats: (city: string, hours: number) => ['stats', city, hours] as const,
   latestPredictions: (horizon: number) => ['predictions', 'latest', horizon] as const,
-  predictions: (city: string, limit: number, horizon: number) =>
-    ['predictions', city, limit, horizon] as const,
+  predictions: (city: string, limit: number) => ['predictions', city, limit] as const,
   benchmark: (city: string, hours: number) => ['benchmark', city, hours] as const,
   benchmarkSummary: ['benchmark', 'summary'] as const,
   models: ['models'] as const,
