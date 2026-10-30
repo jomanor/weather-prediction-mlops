@@ -14,12 +14,23 @@ from app.core.cache import TTLCache
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import RequestContextMiddleware, configure_logging
+from app.core.rate_limit import RefreshRateLimiter
 from app.db.mongo import create_client, ensure_indexes, ping
 from app.repositories.city_repo import seed_default_cities
-from app.routers import analytics, benchmark, cities, health, models, predictions, weather
+from app.routers import (
+    analytics,
+    benchmark,
+    cities,
+    health,
+    models,
+    predictions,
+    refresh,
+    weather,
+)
 from app.routers.map import router as map_router
 from app.services.aemet import AemetService
 from app.services.geo import GeocodingService
+from app.services.openmeteo import OpenMeteoService
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +78,7 @@ def _api_routes() -> APIRouter:
     api.include_router(benchmark.router)
     api.include_router(models.router)
     api.include_router(analytics.router)
+    api.include_router(refresh.router)
     return api
 
 
@@ -89,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db = db
         app.state.aemet = AemetService(settings)
         app.state.geo = GeocodingService(settings)
+        app.state.openmeteo = OpenMeteoService()
         # One background task per process; awaited on shutdown so it is never
         # orphaned. ``ping`` above already guaranteed Mongo is reachable, so the
         # first request is served without waiting for indexes/seeding.
@@ -122,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     task.cancel()
             await app.state.aemet.aclose()
             await app.state.geo.aclose()
+            await app.state.openmeteo.aclose()
             client.close()
             logger.info("MongoDB client closed")
 
@@ -135,6 +149,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Single process => one in-memory cache; created per app so tests and any
     # future multi-app embedding never share state across instances.
     app.state.ttl_cache = TTLCache()
+    # Same reasoning for the refresh limiter and the settings the route reads
+    # (the enabled flag must follow the app's settings, not the env-cached
+    # ``get_settings()``).
+    app.state.settings = settings
+    app.state.refresh_limiter = RefreshRateLimiter(
+        cooldown_seconds=settings.refresh_city_cooldown_seconds,
+        max_per_minute=settings.refresh_max_per_minute,
+        max_per_day=settings.refresh_max_per_day,
+    )
 
     # Order matters: middleware added last is outermost. RequestContext must wrap
     # CORS so that preflights are logged too and so the id/access line covers

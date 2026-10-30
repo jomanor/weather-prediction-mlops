@@ -45,6 +45,15 @@ class Settings(BaseSettings):
 
     geo_timeout_seconds: float = 8.0
 
+    #: Optional ``POST /refresh``. The daily cap is a storage guard (one document
+    #: per call into ``raw_weather``, the largest collection on the free tier),
+    #: not a throughput target. The limiter is process-local: Render runs one
+    #: instance, so no distributed state is needed.
+    refresh_enabled: bool = True
+    refresh_city_cooldown_seconds: int = 900
+    refresh_max_per_minute: int = 6
+    refresh_max_per_day: int = 48
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Comma separated ``CORS_ORIGINS`` as a list, blanks dropped."""
