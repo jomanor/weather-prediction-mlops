@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import sys
+from datetime import datetime, timezone
 
 from tests.conftest import REPO_ROOT
 
@@ -179,3 +180,185 @@ def test_threshold_constants():
     assert ps.SKILL_SCORE_WARN_THRESHOLD == 0.0
     assert ps.TOP_DRIFT_FEATURES == 3
     assert not hasattr(ps, "DRIFT_PSI_WARN_THRESHOLD")
+
+
+# ---------------------------------------------------------------------------
+# Prediction coverage (2026-10-30: 1 of 15 cities scored, silently)
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_warning_threshold_is_ninety_percent():
+    assert ps.PREDICTION_COVERAGE_WARN_RATIO == 0.9
+
+
+def test_coverage_warning_fires_when_one_of_fifteen_cities_is_scored():
+    body = ps.coverage_warning(1, 15)
+    assert body is not None
+    assert "prediction coverage 1/15 cities (7%)" in body
+
+
+def test_coverage_warning_is_silent_at_and_above_ninety_percent():
+    assert ps.coverage_warning(15, 15) is None
+    assert ps.coverage_warning(9, 10) is None  # exactly 90 %
+    assert ps.coverage_warning(14, 15) is None
+
+
+def test_coverage_warning_fires_just_below_ninety_percent():
+    assert ps.coverage_warning(8, 10) is not None
+    assert ps.coverage_warning(13, 15) is not None
+
+
+def test_coverage_warning_is_silent_when_no_cities_are_known():
+    # An empty/fresh weather_features must not produce a false alarm.
+    assert ps.coverage_warning(0, 0) is None
+
+
+def _coverage_db(rows, cities):
+    """mongomock db with ``rows`` predictions and ``cities`` featured stations."""
+    import mongomock
+
+    db = mongomock.MongoClient().weather_db
+    if rows:
+        db.weather_predictions.insert_many(rows)
+    for city in cities:
+        db.weather_features.insert_one(
+            {"city": city, "timestamp": datetime(2026, 10, 30, 9, tzinfo=timezone.utc)}
+        )
+    return db
+
+
+class TestPredictionCoverageSection:
+    def test_rows_and_cities_are_reported_per_horizon(self):
+        rows = [
+            {"city": "Madrid", "horizon_hours": 1, "source_timestamp": datetime(2026, 10, 30, 9)},
+            {"city": "Valencia", "horizon_hours": 1, "source_timestamp": datetime(2026, 10, 30, 9)},
+            {"city": "Madrid", "horizon_hours": 3, "source_timestamp": datetime(2026, 10, 29, 15)},
+        ]
+        db = _coverage_db(rows, ["Madrid", "Valencia"])
+
+        stats = ps.prediction_horizon_stats(db)
+        assert sorted(stats) == [1, 3]
+        assert stats[1]["rows"] == 2 and stats[1]["cities"] == 2
+        assert stats[1]["cities_at_newest"] == 2
+        assert stats[3]["rows"] == 1 and stats[3]["cities"] == 1
+
+        lines = ps.prediction_coverage_lines(stats, ps.available_cities(db))
+        joined = "\n".join(lines)
+        assert "1h 2 rows / 2 cities" in joined
+        assert "3h 1 rows / 1 cities" in joined
+        assert "oldest source_timestamp 2026-10-29T15:00:00Z" in joined
+        assert "coverage: 1/2 cities (50%)" in joined
+
+    def test_newest_batch_coverage_is_what_collapses(self):
+        """History keeps 15 cities while the newest batch holds one: a lifetime
+        city count would hide the incident, ``cities_at_newest`` does not."""
+        rows = [
+            {"city": f"City{index}", "horizon_hours": 1, "source_timestamp": datetime(2026, 10, 29)}
+            for index in range(15)
+        ] + [
+            {"city": "Pasadena", "horizon_hours": 1, "source_timestamp": datetime(2026, 9, 25)},
+        ]
+        db = _coverage_db(rows, [f"City{index}" for index in range(15)])
+
+        stats = ps.prediction_horizon_stats(db)
+        assert stats[1]["cities"] == 16  # lifetime rows still name 16 cities
+        assert stats[1]["cities_at_newest"] == 15
+
+    def test_empty_predictions_report_no_rows_without_warning(self):
+        db = _coverage_db([], ["Madrid"])
+        stats = ps.prediction_horizon_stats(db)
+        assert stats == {}
+        assert ps.prediction_coverage_lines(stats, 1) == [
+            "- `weather_predictions` coverage: no prediction rows"
+        ]
+
+    def test_aggregation_failure_is_swallowed(self):
+        class _Boom:
+            def __getitem__(self, _name):
+                raise RuntimeError("atlas unavailable")
+
+        assert ps.prediction_horizon_stats(_Boom()) == {}
+        assert ps.available_cities(_Boom()) == 0
+
+    def test_summary_emits_the_coverage_warning_only_below_ninety_percent(self):
+        """Full coverage: no warning. One of fifteen cities: ``::warning``."""
+        cities = [f"City{index}" for index in range(15)]
+        full = ps.summary_and_warnings(
+            _coverage_db(
+                [
+                    {
+                        "city": city,
+                        "horizon_hours": 1,
+                        "source_timestamp": datetime(2026, 10, 30, 9),
+                    }
+                    for city in cities
+                ],
+                cities,
+            )
+        )
+        full_lines, full_warnings = full
+        assert not any(title == "Prediction coverage" for title, _ in full_warnings)
+        assert any("coverage: 15/15 cities (100%)" in line for line in full_lines)
+
+        partial = ps.summary_and_warnings(
+            _coverage_db(
+                [
+                    {
+                        "city": "Pasadena",
+                        "horizon_hours": 1,
+                        "source_timestamp": datetime(2026, 9, 25),
+                    }
+                ],
+                cities,
+            )
+        )
+        partial_lines, partial_warnings = partial
+        titles = [title for title, _ in partial_warnings]
+        assert "Prediction coverage" in titles
+        body = dict(partial_warnings)["Prediction coverage"]
+        assert "1/15 cities (7%)" in body
+        # Existing sections are intact.
+        assert any(line.startswith("- `weather_features`:") for line in partial_lines)
+        assert any(line.startswith("- `model_registry`") for line in partial_lines)
+        assert any(line.startswith("- `weather_predictions`") for line in partial_lines)
+
+    def test_summary_warning_starts_below_ninety_percent_not_below_fifty(self):
+        """13 of 15 cities (87 %) must warn: pins the 90 % boundary end to end."""
+        cities = [f"City{index}" for index in range(15)]
+        _, warnings = ps.summary_and_warnings(
+            _coverage_db(
+                [
+                    {
+                        "city": city,
+                        "horizon_hours": 1,
+                        "source_timestamp": datetime(2026, 10, 30, 9),
+                    }
+                    for city in cities[:13]
+                ],
+                cities,
+            )
+        )
+        assert "Prediction coverage" in [title for title, _ in warnings]
+
+    def test_main_prints_the_annotation_on_stderr_only(self, capsys, monkeypatch):
+        import mongomock
+
+        cities = [f"City{index}" for index in range(15)]
+        db = _coverage_db(
+            [{"city": "Pasadena", "horizon_hours": 1, "source_timestamp": datetime(2026, 9, 25)}],
+            cities,
+        )
+        # ``main`` owns its client: hand it one whose weather_db is pre-seeded.
+        monkeypatch.setenv("MONGO_URI", "mongodb://unit-test")
+        client = mongomock.MongoClient()
+        client.weather_db.weather_predictions.insert_many(db.weather_predictions.find({}))
+        client.weather_db.weather_features.insert_many(db.weather_features.find({}))
+        monkeypatch.setattr(ps, "MongoClient", lambda *a, **k: client)
+
+        assert ps.main() == 0
+        captured = capsys.readouterr()
+        assert "### Pipeline data snapshot" in captured.out
+        assert "::warning" not in captured.out, "annotations must not pollute the step summary"
+        assert (
+            "::warning title=Prediction coverage::prediction coverage 1/15 cities" in captured.err
+        )

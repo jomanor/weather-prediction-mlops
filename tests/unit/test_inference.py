@@ -1082,3 +1082,178 @@ class TestMainShadowWiring:
         calls, writes = self._run_main(monkeypatch, spark, "staging")
         assert writes
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Prediction coverage (the 2026-10-30 "scored 1 of 15 cities" incident)
+# ---------------------------------------------------------------------------
+
+
+def _coverage_output(spark, cities, oldest=None):
+    """A prediction-shaped frame with one row per city (source_timestamp set)."""
+    schema = StructType(
+        [
+            StructField("city", StringType(), False),
+            StructField("source_timestamp", TimestampType(), False),
+            StructField("horizon_hours", DoubleType(), True),
+        ]
+    )
+    newest = datetime(2026, 10, 30, 9, 0, 0)
+    rows = [
+        Row(
+            city=city,
+            source_timestamp=(
+                oldest if (oldest is not None and index == 0) else newest
+            ),
+            horizon_hours=1.0,
+        )
+        for index, city in enumerate(cities)
+    ]
+    return spark.createDataFrame(rows, schema=schema)
+
+
+def _features_for_cities(spark, cities):
+    schema = StructType(
+        [
+            StructField("city", StringType(), False),
+            StructField("timestamp", TimestampType(), False),
+            StructField("temperature", DoubleType(), True),
+        ]
+    )
+    return spark.createDataFrame(
+        [
+            Row(city=city, timestamp=datetime(2026, 10, 30, 9, 0, 0), temperature=20.0)
+            for city in cities
+        ],
+        schema=schema,
+    )
+
+
+class TestCoverageWarningThreshold:
+    """Pure threshold logic: warn under 90 % coverage or >12 h of staleness."""
+
+    def test_no_warning_at_full_coverage(self):
+        stats = {"scored_cities": 14, "available_cities": 14, "oldest_behind_hours": 0.0}
+        assert inference.coverage_warning(stats) is None
+
+    def test_warns_when_one_of_fourteen_cities_is_scored(self):
+        stats = {"scored_cities": 1, "available_cities": 14, "oldest_behind_hours": 0.0}
+        warning = inference.coverage_warning(stats)
+        assert warning is not None
+        assert "scored 1/14 cities" in warning
+
+    def test_boundary_is_ninety_percent(self):
+        exact = {"scored_cities": 9, "available_cities": 10, "oldest_behind_hours": 0.0}
+        below = {"scored_cities": 8, "available_cities": 10, "oldest_behind_hours": 0.0}
+        assert inference.coverage_warning(exact) is None
+        assert inference.coverage_warning(below) is not None
+
+    def test_warns_on_a_stale_scored_city(self):
+        stats = {"scored_cities": 14, "available_cities": 14, "oldest_behind_hours": 12.5}
+        warning = inference.coverage_warning(stats)
+        assert warning is not None
+        assert "12.5 h behind" in warning
+
+    def test_no_warning_at_the_staleness_boundary(self):
+        stats = {"scored_cities": 14, "available_cities": 14, "oldest_behind_hours": 12.0}
+        assert inference.coverage_warning(stats) is None
+
+    def test_constants_are_the_frozen_contract(self):
+        assert inference.COVERAGE_WARN_RATIO == 0.9
+        assert inference.STALE_SOURCE_HOURS == 12.0
+
+
+class TestReportPredictionCoverage:
+    """``report_prediction_coverage`` logs, annotates, and never raises."""
+
+    def test_warns_and_annotates_when_only_one_city_is_scorable(self, spark, caplog, capsys):
+        output = _coverage_output(spark, ["Pasadena"])
+        features = _features_for_cities(spark, [f"City{index}" for index in range(14)])
+
+        with caplog.at_level(logging.INFO, logger=inference.logger.name):
+            warning = inference.report_prediction_coverage(output, features)
+
+        assert warning is not None
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Scored 1/14 cities" in message for message in messages)
+        assert any(
+            record.levelno == logging.WARNING and "Prediction coverage" in record.getMessage()
+            for record in caplog.records
+        )
+        err = capsys.readouterr().err
+        assert "::warning title=Prediction coverage::scored 1/14 cities" in err
+
+    def test_no_warning_or_annotation_at_full_coverage(self, spark, caplog, capsys):
+        cities = [f"City{index}" for index in range(14)]
+        output = _coverage_output(spark, cities)
+        features = _features_for_cities(spark, cities)
+
+        with caplog.at_level(logging.INFO, logger=inference.logger.name):
+            warning = inference.report_prediction_coverage(output, features)
+
+        assert warning is None
+        assert any("Scored 14/14 cities" in record.getMessage() for record in caplog.records)
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "::warning" not in capsys.readouterr().err
+
+    def test_annotation_flags_a_stale_city(self, spark, capsys):
+        cities = ["Pasadena", "Madrid"]
+        output = _coverage_output(spark, cities, oldest=datetime(2026, 9, 25, 9, 0, 0))
+        features = _features_for_cities(spark, cities)
+
+        warning = inference.report_prediction_coverage(output, features)
+
+        assert warning is not None
+        assert "behind the newest" in warning
+        assert "::warning title=Prediction coverage::" in capsys.readouterr().err
+
+    def test_a_broken_check_never_blocks_the_write(self, spark, capsys):
+        # A frame without ``city`` makes the counts blow up; the diagnostic must
+        # swallow it, print no annotation, and let inference keep going.
+        broken = spark.createDataFrame(
+            [(datetime(2026, 10, 30, 9, 0, 0),)],
+            schema=StructType([StructField("source_timestamp", TimestampType(), True)]),
+        )
+        features = _features_for_cities(spark, ["Madrid"])
+
+        assert inference.report_prediction_coverage(broken, features) is None
+        assert "::warning" not in capsys.readouterr().err
+
+    def test_main_reports_coverage_before_writing(self, spark, monkeypatch, caplog, capsys):
+        """``main`` runs the check after the union and before the write, and the
+        write still happens when coverage is short (never raise)."""
+        monkeypatch.setenv("MONGO_URI", "mongodb://fake")
+        monkeypatch.setattr(inference, "FEATURES_CONFIG", {"target_horizons": [1]})
+        monkeypatch.setattr(inference, "create_spark_session", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(inference, "MongoClient", lambda url: MagicMock())
+        monkeypatch.setattr(inference, "GridFS", lambda db: MagicMock())
+        holder = MagicMock()
+        holder.count.return_value = 1
+        holder.unpersist = MagicMock()
+        # The cached feature frame's distinct-city count (the coverage denominator).
+        holder.select.return_value.distinct.return_value.count.return_value = 1
+        monkeypatch.setattr(inference, "load_latest_features", lambda s, m: holder)
+        monkeypatch.setattr(
+            inference,
+            "load_latest_model",
+            lambda _db, _fs, _prefix, _spark: (
+                _FakeModel(1.0),
+                {"model_name": "temp_prediction_1h_GBT", "version": "v1"},
+            ),
+        )
+        output = _coverage_output(spark, ["Pasadena"])
+        monkeypatch.setattr(
+            inference, "run_inference", lambda *a, **k: output
+        )
+        written = {}
+        monkeypatch.setattr(
+            inference, "write_predictions", lambda out, url: written.update(rows=out.count())
+        )
+
+        with caplog.at_level(logging.INFO, logger=inference.logger.name):
+            inference.main()
+
+        assert written == {"rows": 1}, "the write must still happen"
+        assert any("Scored 1/1 cities" in record.getMessage() for record in caplog.records)
+        # 1/1 is full coverage: no annotation, nothing raised.
+        assert "::warning" not in capsys.readouterr().err

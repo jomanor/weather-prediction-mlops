@@ -35,6 +35,26 @@ Write / retention design
   backend restarts. Recreating it here repairs that without a deploy, and the
   call is non-fatal: a failure is logged and a backend restart still repairs it.
 
+Rolling-window standard deviations (zero means "no observed variation")
+-----------------------------------------------------------------------
+The six ``*_std_6h`` features (temperature, humidity, pressure,
+specific_humidity, shortwave_radiation, wind_speed) are **coalesced to
+``0.0``** when their 6 h window holds fewer than two observations
+(``F.coalesce(F.stddev(...), F.lit(0.0))``). ``0.0`` is the honest value for
+that window: a single observation, or a data gap, means *no observed variation
+was recorded in the stored 6 h window*. It is a deliberate definition, **not**
+a missing-value imputation — nothing is invented about the weather, and no
+other feature or window is touched.
+
+Why it matters: the hourly cron is throttled by GitHub, so ``raw_weather``
+observations arrive every ~6-7 h. A 09:00 rebuild whose 6 h window contains one
+observation made all six std columns null for every city; the model's
+``VectorAssembler`` uses ``handleInvalid="skip"``, so inference silently dropped
+those rows and scored only the one stale city (production, 2026-10-30).
+Reporting 0.0 keeps a legitimate observation scorable. The longer windows do
+not need this: a 12/24 h window still spans the neighbouring observations of a
+6-7 h cadence.
+
 Key changes vs the previous version
 -------------------------------------
 - Source collection: raw_weather  (was weather_data)
@@ -241,6 +261,14 @@ def create_lag_features(df, lag_periods):
 # ---------------------------------------------------------------------------
 
 
+#: Rolling windows whose standard deviation is coalesced to ``0.0`` when the
+#: window holds fewer than two observations. Deliberately only the 6 h window:
+#: that is the window an observation cadence of ~6-7 h can leave with a single
+#: point, and it is the set of ``*_std_6h`` features that went null in
+#: production (2026-10-30) and made inference drop 14 of 15 cities.
+ZERO_FILLED_STD_WINDOW_HOURS = (6,)
+
+
 def create_rolling_features(df, window_sizes):
     rolling_columns = [
         "temperature",
@@ -262,7 +290,13 @@ def create_rolling_features(df, window_sizes):
             if col_name not in df.columns:
                 continue
             df = df.withColumn(f"{col_name}_mean_{hours}h", F.mean(col_name).over(window_spec))
-            df = df.withColumn(f"{col_name}_std_{hours}h", F.stddev(col_name).over(window_spec))
+            std_expr = F.stddev(col_name).over(window_spec)
+            if hours in ZERO_FILLED_STD_WINDOW_HOURS:
+                # 0.0 = "no observed variation in this window" (one observation
+                # or a gap), not a filled-in missing value. See the module
+                # docstring; a null here made the assembler skip the row.
+                std_expr = F.coalesce(std_expr, F.lit(0.0))
+            df = df.withColumn(f"{col_name}_std_{hours}h", std_expr)
             df = df.withColumn(f"{col_name}_min_{hours}h", F.min(col_name).over(window_spec))
             df = df.withColumn(f"{col_name}_max_{hours}h", F.max(col_name).over(window_spec))
 
