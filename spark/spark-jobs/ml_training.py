@@ -1,3 +1,29 @@
+"""
+ml_training.py
+==============
+Spark training job: fits the temperature and rain models for every configured
+horizon and publishes them.
+
+Canonical model store
+---------------------
+- **GridFS holds the artifact.** ``save_model`` zips the fitted
+  ``PipelineModel`` into GridFS and records the file's ``_id`` as
+  ``gridfs_file_id``. ``inference.py`` loads the model from there.
+- **``model_registry`` holds the metadata.** One document per trained model
+  (``metrics``, ``interval``, ``diagnostics``, ``split``, ``data_snapshot``,
+  ``params``, ``feature_importance``, ``commit``, ``stage``) — it is the only
+  source of lineage and prediction-interval information, and the backend's
+  ``/api/models`` reads it directly. Promotion (staging -> production) is a
+  field on that document; see ``docs/model-lifecycle.md``.
+- **MLflow is optional and experimental.** A training run logs to MLflow only
+  when ``MLFLOW_TRACKING_URI`` is set. The import is lazy (inside
+  ``_log_to_mlflow``), so this module imports and trains with ``mlflow``
+  uninstalled, and a failed MLflow log is a warning, never a failed run: the
+  GridFS artifact and the registry document are already durable at that point.
+  MLflow is never the system of record — the CI file store is ephemeral and
+  carries no lineage (see ``docs/model-lifecycle.md``).
+"""
+
 import sys
 
 from pyspark.ml import Pipeline
@@ -12,19 +38,20 @@ from pyspark.sql.types import DoubleType, FloatType, IntegerType, LongType, Shor
 
 sys.path.append("/opt/config")
 import json
+import logging
 import math
 import os
 import shutil
 from datetime import datetime
 
-import mlflow
-import mlflow.spark
 from bson import ObjectId
 from gridfs import GridFS
 from mongo_retry import run_with_mongo_retries
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from spark_config import FEATURES_CONFIG, ML_CONFIG, create_spark_session
+
+logger = logging.getLogger(__name__)
 
 
 def load_features(spark):
@@ -854,6 +881,21 @@ def _extract_grid_params(best_model, param_maps):
     }
 
 
+def _mlflow_tracking_uri():
+    """The configured MLflow tracking URI, or ``None`` when MLflow is off.
+
+    MLflow logging is **opt-in**: without an explicit ``MLFLOW_TRACKING_URI``
+    there is nothing to log to (the historical default of
+    ``http://localhost:5000`` made ``start_run()`` hang or fail a run that had
+    already published its model). ``file://`` URIs are honoured too — they are
+    simply not a registry (see ``docs/model-lifecycle.md``).
+    """
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    if uri is None:
+        return None
+    return uri.strip() or None
+
+
 def _log_to_mlflow(
     run_name: str,
     model_type: str,
@@ -864,40 +906,69 @@ def _log_to_mlflow(
     model,
     horizon: int,
 ):
-    """Log a single training run (temp or rain) to MLflow."""
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(f"weather-{model_type}-prediction")
+    """Optionally log a single training run (temp or rain) to MLflow.
 
-    with mlflow.start_run(run_name=run_name):
-        # --- params ---
-        mlflow.log_param("model_algorithm", model_name)
-        mlflow.log_param("horizon_hours", horizon)
-        mlflow.log_param("train_ratio", ML_CONFIG["data_split"]["train"])
-        mlflow.log_param("cv_folds", ML_CONFIG["cross_validation"]["num_folds"])
-        for k, v in params.items():
-            mlflow.log_param(k, v)
+    Best-effort side channel, never the system of record: GridFS holds the
+    artifact and ``model_registry`` the metadata. Returns ``True`` when a run
+    was logged, ``False`` when MLflow is disabled (no ``MLFLOW_TRACKING_URI``),
+    not installed, or the log failed — in which case the failure is logged as a
+    warning and the training run continues. This function does not raise.
+    """
+    tracking_uri = _mlflow_tracking_uri()
+    if tracking_uri is None:
+        # Silent by design (debug only): MLflow being off is the normal case, and
+        # this runs once per model (10x per nightly train).
+        logger.debug("MLFLOW_TRACKING_URI not set — skipping MLflow log for '%s'.", run_name)
+        return False
 
-        # --- metrics ---
-        for k, v in metrics.items():
-            if v is not None:
-                mlflow.log_metric(k, v)
+    # Imported lazily so the module (and training) work without mlflow
+    # installed; the CI runner no longer installs it for the training job.
+    try:
+        import mlflow
+        import mlflow.spark
 
-        # --- feature importance as JSON artifact ---
-        fi_dict = {f: imp for f, imp in important_features}
-        fi_path = f"/tmp/{run_name}_feature_importance.json"
-        with open(fi_path, "w") as fh:
-            json.dump(fi_dict, fh, indent=2)
-        mlflow.log_artifact(fi_path, artifact_path="feature_importance")
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(f"weather-{model_type}-prediction")
 
-        # --- log the Spark PipelineModel ---
-        mlflow.spark.log_model(
-            spark_model=model,
-            artifact_path="model",
-            registered_model_name=f"weather_{model_type}_{horizon}h",
+        with mlflow.start_run(run_name=run_name):
+            # --- params ---
+            mlflow.log_param("model_algorithm", model_name)
+            mlflow.log_param("horizon_hours", horizon)
+            mlflow.log_param("train_ratio", ML_CONFIG["data_split"]["train"])
+            mlflow.log_param("cv_folds", ML_CONFIG["cross_validation"]["num_folds"])
+            for k, v in params.items():
+                mlflow.log_param(k, v)
+
+            # --- metrics ---
+            for k, v in metrics.items():
+                if v is not None:
+                    mlflow.log_metric(k, v)
+
+            # --- feature importance as JSON artifact ---
+            fi_dict = {f: imp for f, imp in important_features}
+            fi_path = f"/tmp/{run_name}_feature_importance.json"
+            with open(fi_path, "w") as fh:
+                json.dump(fi_dict, fh, indent=2)
+            mlflow.log_artifact(fi_path, artifact_path="feature_importance")
+
+            # --- log the Spark PipelineModel ---
+            mlflow.spark.log_model(
+                spark_model=model,
+                artifact_path="model",
+                registered_model_name=f"weather_{model_type}_{horizon}h",
+            )
+    except Exception as exc:  # optional side channel, never fatal
+        logger.warning(
+            "MLflow logging failed for '%s' (%s: %s); continuing — the model is already "
+            "published to GridFS + model_registry, which are canonical.",
+            run_name,
+            type(exc).__name__,
+            exc,
         )
+        return False
 
-        print(f"MLflow run '{run_name}' logged successfully.")
+    print(f"MLflow run '{run_name}' logged successfully.")
+    return True
 
 
 def save_model(
@@ -1103,7 +1174,7 @@ def main():
                 diagnostics=rain_diagnostics,
             )
 
-            # --- log to MLflow ---
+            # --- optional MLflow log (only with MLFLOW_TRACKING_URI; never fatal) ---
             _log_to_mlflow(
                 run_name=f"temp_{temp_model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 model_type="temperature",

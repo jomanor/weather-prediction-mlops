@@ -27,6 +27,13 @@ Write / retention design
   TTL-aligned ``timestamp`` field with no sort. weather_features is a rolling
   snapshot (~30k docs at current volume), so the scan is small and cannot become
   an Atlas M0 blocking sort (code 292).
+- Also after a successful write, the ``{city:1, timestamp:-1}`` index is
+  recreated idempotently (``ensure_features_index``). Upsert never drops it, but
+  the older ``mode("overwrite")`` write did, and ``ensure_indexes`` only runs at
+  backend startup — so a collection left without the index makes every
+  ``{city:1,timestamp:-1}`` read (the analytics endpoints) a COLLSCAN until the
+  backend restarts. Recreating it here repairs that without a deploy, and the
+  call is non-fatal: a failure is logged and a backend restart still repairs it.
 
 Key changes vs the previous version
 -------------------------------------
@@ -416,6 +423,40 @@ def prune_old_features(
     return deleted
 
 
+#: The sort index the read API's and the analytics endpoints' ``{city:1,
+#: timestamp:-1}`` queries require (declared in ``backend/app/db/mongo.py``).
+#: Every Mongo sort must be city-prefixed; a global ``{timestamp:-1}`` index is
+#: deliberately never created here.
+FEATURES_SORT_INDEX = [("city", 1), ("timestamp", -1)]
+
+
+def ensure_features_index(mongo_url, collection_name=FEATURES_COLLECTION):
+    """Idempotently (re)create the ``{city:1, timestamp:-1}`` index after a write.
+
+    ``create_index`` is a no-op when an equivalent index already exists, so this
+    is safe on every rebuild. It exists because ``ensure_indexes`` in
+    ``backend/app/db/mongo.py`` only runs at backend startup: a collection whose
+    index was dropped (by the old ``mode("overwrite")`` write, or by an operator)
+    otherwise COLLSCANs on every city-prefixed sort until the API restarts. Run
+    inside ``run_with_mongo_retries`` so a transient Atlas blip does not turn
+    index repair into a failed pipeline run. Returns the index name.
+    """
+    from pymongo import MongoClient
+
+    client = MongoClient(mongo_url)
+    try:
+        collection = client[MONGO_DATABASE][collection_name]
+        name = run_with_mongo_retries(
+            lambda: collection.create_index(FEATURES_SORT_INDEX),
+            label=f"{collection_name} index",
+        )
+    finally:
+        client.close()
+
+    logger.info("Ensured %s index %s on %s", FEATURES_SORT_INDEX, name, collection_name)
+    return name
+
+
 def save_features_to_mongodb(
     df, horizons, collection_name=FEATURES_COLLECTION, retention_days=RETENTION_DAYS, now=None
 ):
@@ -441,7 +482,8 @@ def save_features_to_mongodb(
     gates the row-keeping decision.
 
     After a successful write, rows with ``timestamp < now - retention_days``
-    (default 180 d, matching raw_weather's TTL) are pruned.
+    (default 180 d, matching raw_weather's TTL) are pruned, then the
+    ``{city:1,timestamp:-1}`` index is recreated (idempotent, non-fatal).
     """
     mongo_url = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
@@ -464,6 +506,22 @@ def save_features_to_mongodb(
     run_with_mongo_retries(_write, label=f"{collection_name} write")
 
     prune_old_features(mongo_url, collection_name, retention_days=retention_days, now=now)
+
+    # Repair the city-prefixed sort index the read API/analytics need. A failure
+    # here is deliberately non-fatal: the data is already written and a backend
+    # restart (``ensure_indexes``) still repairs the index, so the rebuild must
+    # not be marked failed for a latency regression.
+    try:
+        ensure_features_index(mongo_url, collection_name)
+    except Exception as exc:
+        logger.warning(
+            "Could not recreate the %s index on %s (%s: %s); reads will COLLSCAN "
+            "until the next backend restart runs ensure_indexes.",
+            FEATURES_SORT_INDEX,
+            collection_name,
+            type(exc).__name__,
+            exc,
+        )
 
     return df_clean
 
