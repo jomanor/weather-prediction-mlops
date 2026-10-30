@@ -320,6 +320,32 @@ the cut list live in `docs/app-rethink.md`.
   diurnal heatmap leaked into the root scroll area) is fixed with
   `position: relative` on the table.
 
+
+## 2026-10-30 — P0 follow-up corrections (verified locally)
+
+- **The type scale was silently stripped.** `cn()` uses `tailwind-merge`, which classifies
+  `text-label|body|title|value|lead|page|hero` as *colours* and deletes them next to `text-fg*`.
+  Every control therefore inherited the 16 px root (the "font is huge on PC" report). Fixed by
+  registering the scale as `font-size` in `lib/cn.ts`; a unit test pins it. Verified computed sizes
+  now: h1 18, panel title 13/14, body 12/13, segmented controls 11.
+- **The Recharts `Brush` never mounted** (no `.recharts-brush` in the DOM), so the only chart
+  interaction was the series toggles. Replaced with a controlled zoom/pan implementation
+  (`chart-zoom.ts`, `useChartZoom.ts`): toolbar `− / + / Restablecer zoom`, wheel zoom anchored at
+  the cursor, drag-to-pan, double-click reset, `touch-action: pan-y`, bounds clamped to the data +
+  page window, all writing the shared `useChartSync` domain. Verified in a real browser: zoom-in
+  moves the left edge later, pan shifts it, reset restores.
+- **The station page showed the OLDEST prediction run and plotted predictions at
+  `prediction_timestamp`.** The API's `/{city}` list is oldest→newest, `LatestPrediction` took
+  `[0]`, and the chart drew each past run at the time inference ran. Now one unfiltered
+  `/predictions/{city}?limit=200` query derives `latestRun` (max `source_timestamp`, one row per
+  horizon); the card picks the selected horizon from it; the chart plots the run at
+  `source_timestamp + horizon_hours`. Verified: the 48 h chart now spans observations + the +24 h
+  forecast, the model line is in the future, and the card reads the latest run.
+- **Netlify**: `weather-mlops-1787759329.netlify.app` returns Netlify's "Site not found" (404) while
+  Netlify status is operational and Render is 200. The frontend fixes above were verified against a
+  local Vite dev server proxying the live API. The deployed URL must be re-confirmed before trusting
+  a live check.
+
 ## Next: Batch 6
 
 No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
