@@ -185,13 +185,17 @@ and training now share one implementation.
   `cache_hit`); `X-Request-Id` is echoed when it matches `[A-Za-z0-9._-]{1,64}` and regenerated otherwise.
   The TTL cache is now LRU-bounded and invalid cities are rejected against the registry.
 - **M5 lifecycle** (`docs/model-lifecycle.md`): training always writes `staging`; `scripts/promote_model.py`
-  promotes one document to `production`, supersedes the incumbent in the same slot, supports `--dry-run` and
-  `--rollback`, refuses a document without `gridfs_file_id`, and is idempotent. Inference resolves through
+  promotes one document to `production`, supersedes the incumbent in the same slot (peers first, so a crash
+  leaves zero production rather than two), supports `--dry-run` and `--rollback`, refuses a document whose
+  GridFS artifact is missing, and is idempotent (a prefix re-run whose candidate is not newer than the
+  incumbent exits 0 with "already production"). Inference resolves through
   `model_selection.select_entry`: production when present, otherwise the newest staging with a warning (this
-  is why the hourly job keeps working until the first promote). Shadow A/B scores a newer staging challenger
-  on the same cached feature frame and upserts one `model_shadow` doc per (production, shadow) pair with
-  disagreement stats — no extra prediction rows, never on the critical path, failures are logged and skipped.
-  `_id` epochs are pinned to UTC (`spark.sql.session.timeZone=UTC` + `utc_epoch_seconds`).
+  is why the hourly job keeps working until the first promote). Shadow A/B scores a strictly newer staging
+  challenger on the same cached feature frame and upserts one `model_shadow` doc per (production, shadow)
+  pair with disagreement stats — no extra prediction rows, never on the critical path, failures are logged
+  and skipped. `scripts/prune_models.py` never deletes a `production` or `superseded` artifact, and removes
+  shadow docs whose pair it pruned. `_id` epochs are pinned to UTC (`spark.sql.session.timeZone=UTC` +
+  `utc_epoch_seconds`).
 - **M6 canonical store**: GridFS artifact + `model_registry` metadata are the system of record; inference
   loads GridFS first and MLflow only for a legacy doc without a file id, never for metadata. MLflow logging
   is opt-in on `MLFLOW_TRACKING_URI`, imports lazily and cannot fail a run; `ml-pipeline.yml` no longer sets
@@ -199,21 +203,31 @@ and training now share one implementation.
 - **L6 refresh**: `POST /api/refresh` (and `/api/v1/refresh`) fetches one registered city from Open-Meteo,
   upserts the identical `raw_weather` document and returns
   `{city, source_timestamp, fetched_at, features_refreshed:false, predictions_refreshed:false}`. It never
-  runs Spark. Process-local limiter: 900 s per city, 6/min, 48/day — rejections do not consume budget,
-  attempts do; exceeded → 429 + `Retry-After`, disabled → 503, unknown city → 404, upstream → 502.
+  runs Spark. **Opt-in**: `REFRESH_ENABLED` defaults to `false` because this is an unauthenticated write
+  surface. When enabled, a process-local limiter applies 900 s per city, 6/min, 48/day — rejections do not
+  consume budget, attempts do; exceeded → 429 + `Retry-After`, disabled → 503, unknown city → 404, upstream
+  → 502. Caps are per process lifetime and reset when the free-tier instance sleeps: they are a storage
+  guard, not a distributed quota.
 - **Follow-ups closed**: shared `mongo_retry` helper, LRU cache bound + city validation, feature-index
   repair, Pasadena in the derived city lists, tz-independent prediction `_id`, MLflow no longer a dependency
   of CI, mobile sheet/map touch fixes (tap tolerance, focus/Escape, swipe axis lock, safe-area layout).
-- **Gates (measured on the merged tree)**: backend `234 passed`; root `268 passed, 7 skipped` (the 7 need a
+- **Gates (measured on the merged tree)**: backend `235 passed`; root `285 passed, 7 skipped` (the 7 need a
   live `mongo:6`; run with `PYSPARK_PYTHON=$PWD/.venv/bin/python`); frontend `35 files / 187 tests passed`,
   typecheck clean, lint 0 errors, build ok (chunk-size warning only); `ruff` clean; `black` 81 files
   unchanged.
+- **Review/QA outcome (fixed before merge)**: `reviewer` + `tester` independently found two blockers —
+  `prune_models` deleted the promoted (oldest) artifact, and a prefix `promote_model.py` re-run promoted an
+  older leftover staging doc. Both fixed with regression tests; also fixed: GridFS existence check on
+  promote, demote-before-promote ordering, horizon-less slot matching, newer-only shadow challenger, storage
+  budget including the 48 refresh docs/day (projection **380.5 MiB**, **3.5 MiB headroom**, first breaching
+  feature-rebuild rate now **10/day**), and the docs' CLI examples. QA mutations caught 3 of 4 targeted
+  faults; the surviving one (removing the limiter's `asyncio.Lock`) is unobservable because `acquire` has no
+  `await` between check and increment — kept as defence-in-depth, docstring corrected.
 
 **Decisions/assumptions to keep:** `/api` stays the served alias (removing it is a coordinated frontend +
-Render change); the refresh endpoint is deliberately unauthenticated but globally capped because every
-accepted attempt writes a `raw_weather` document (48/day ≈ 12 MB over the 180-day TTL, inside the M0 budget);
-promotion stays a human CLI action, not an API; shadow A/B measures production↔challenger disagreement, not
-accuracy, and only runs after a real promote.
+Render change); the refresh endpoint is opt-in because it is unauthenticated, and its caps reset on instance
+sleep; promotion stays a human CLI action, not an API; shadow A/B measures production↔challenger
+disagreement, not accuracy, and only runs after a real promote.
 
 **Deploy notes:** a fresh deploy serves both `/api/health` and `/api/v1/health` (either proving the image
 shipped, unlike `/api/health/ready`); the hourly `job=inference` will log the staging-fallback warning until

@@ -227,7 +227,9 @@ document; never runs Spark, so features and predictions are not refreshed.
 - `429 refresh_rate_limited` with `Retry-After` (seconds): one fetch per city
   per 900 s, at most 6/minute and 48/day per process. Rejected requests do not
   consume budget; attempts do.
-- `503 refresh_disabled` when `REFRESH_ENABLED=false`.
+- `503 refresh_disabled` when `REFRESH_ENABLED` is unset or false — the endpoint is opt-in
+  because it is an unauthenticated write surface. Enabled caps are per process
+  lifetime (they reset when the free-tier instance sleeps).
 - `502 refresh_upstream_error` when Open-Meteo fails or returns no usable
   observation.
 
