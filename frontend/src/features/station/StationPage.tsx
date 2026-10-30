@@ -23,6 +23,7 @@ import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
 import { isNum } from '@/lib/format'
+import { latestRun, pickHorizon } from '@/lib/predictions'
 
 const HOURS = [24, 48, 72, 168] as const
 type StationHours = (typeof HOURS)[number]
@@ -69,9 +70,15 @@ export function StationPage() {
 
   const current = useCurrentWeather(city)
   const history = useHistory(city, hours)
-  const predictions = usePredictions(city, 24, horizon)
+  /* One unfiltered predictions query per station; card and chart both derive
+     from it so they can never disagree about which run is the latest. */
+  const predictions = usePredictions(city)
+  const run = useMemo(() => latestRun(predictions.data ?? []), [predictions.data])
+  const selectedPrediction = useMemo(() => pickHorizon(run, horizon), [run, horizon])
   const intervalLevel =
-    predictions.data?.find((prediction) => isNum(prediction.interval_level))?.interval_level ?? null
+    selectedPrediction !== undefined && isNum(selectedPrediction.interval_level)
+      ? selectedPrediction.interval_level
+      : null
 
   /* Share the observed window with the benchmark charts on the same time axis. */
   const { brushed, resetWindow } = useChartWindow(hours, history.data?.points.at(-1)?.observed_at)
@@ -173,7 +180,7 @@ export function StationPage() {
                 ) : (
                   <HistoryChart
                     points={history.data?.points ?? []}
-                    predictions={predictions.data ?? []}
+                    predictions={run}
                     palette={palette}
                     variable={variable}
                     intervalLevel={intervalLevel}
@@ -188,7 +195,7 @@ export function StationPage() {
                   <LoadingBlock />
                 </Panel>
               ) : (
-                <LatestPrediction predictions={predictions.data ?? []} />
+                <LatestPrediction predictions={predictions.data ?? []} horizon={horizon} />
               )}
             </div>
           </div>

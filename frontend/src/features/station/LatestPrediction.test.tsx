@@ -17,10 +17,10 @@ function makePrediction(overrides: Record<string, unknown>): Prediction {
   })
 }
 
-function renderLatest(predictions: Prediction[]) {
+function renderLatest(predictions: Prediction[], horizon = 1) {
   return render(
     <PreferencesProvider>
-      <LatestPrediction predictions={predictions} />
+      <LatestPrediction predictions={predictions} horizon={horizon} />
     </PreferencesProvider>,
   )
 }
@@ -53,6 +53,60 @@ describe('LatestPrediction interval readout (Contract 2)', () => {
   })
 })
 
+
+describe('LatestPrediction picks the newest run and horizon', () => {
+  it('shows the newest run row for the selected horizon, not the oldest row', () => {
+    /* The API returns history oldest → newest, so the older run comes first. */
+    renderLatest(
+      [
+        makePrediction({
+          source_timestamp: '2026-09-25T08:00:00Z',
+          prediction_timestamp: '2026-09-25T08:05:00Z',
+          horizon_hours: 3,
+          predicted_temperature: 15,
+        }),
+        makePrediction({
+          source_timestamp: '2026-09-25T10:00:00Z',
+          prediction_timestamp: '2026-09-25T10:05:00Z',
+          horizon_hours: 3,
+          predicted_temperature: 25,
+        }),
+      ],
+      3,
+    )
+
+    expect(screen.getByText('25,0°')).toBeInTheDocument()
+    expect(screen.queryByText('15,0°')).not.toBeInTheDocument()
+    expect(screen.getByText('+3 h')).toBeInTheDocument()
+  })
+
+  it('falls back to the newest row when the selected horizon is missing', () => {
+    renderLatest(
+      [
+        makePrediction({
+          prediction_timestamp: '2026-09-25T10:01:00Z',
+          horizon_hours: 1,
+          predicted_temperature: 21,
+        }),
+        makePrediction({
+          prediction_timestamp: '2026-09-25T10:06:00Z',
+          horizon_hours: 6,
+          predicted_temperature: 26,
+        }),
+      ],
+      3,
+    )
+
+    // Horizon 3 was not written; the newest prediction_timestamp wins safely.
+    expect(screen.getByText('26,0°')).toBeInTheDocument()
+    expect(screen.getByText('+6 h')).toBeInTheDocument()
+  })
+
+  it('renders the empty state when there are no predictions', () => {
+    renderLatest([], 3)
+    expect(screen.getByText('Sin predicciones para esta estación')).toBeInTheDocument()
+  })
+})
 
 describe('LatestPrediction age and stale badge', () => {
   const NOW = new Date('2026-09-25T12:00:00Z').getTime()

@@ -15,13 +15,23 @@ import {
   formatTemperature,
   isNum,
 } from '@/lib/format'
+import { latestRun, pickHorizon } from '@/lib/predictions'
 
 /** A prediction whose source observation is older than this is flagged, not hidden. */
 export const PREDICTION_STALE_HOURS = 24
 
-export function LatestPrediction({ predictions }: { predictions: Prediction[] }) {
+interface LatestPredictionProps {
+  /** Prediction history as served (oldest → newest); the newest run is picked here. */
+  predictions: Prediction[]
+  /** Selected M2 horizon; falls back to the newest row when it is missing. */
+  horizon: number
+}
+
+export function LatestPrediction({ predictions, horizon }: LatestPredictionProps) {
   const { units } = usePreferences()
-  const latest = predictions[0]
+  /* The API is chronological, so the latest forecast is the newest
+     `source_timestamp` run, then the row for the selected horizon. */
+  const latest = pickHorizon(latestRun(predictions), horizon)
   const hasInterval =
     latest !== undefined && isNum(latest.temp_lower) && isNum(latest.temp_upper)
   /* The API resolves age/stale from the same timestamp, so both agree; the
