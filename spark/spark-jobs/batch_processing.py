@@ -40,9 +40,9 @@ Key changes vs the previous version
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 
+from mongo_retry import run_with_mongo_retries
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
 from pyspark.sql.window import Window
@@ -335,20 +335,6 @@ MONGO_DATABASE = "weather_db"
 #: feature snapshot never outlives the raw data it was derived from.
 RETENTION_DAYS = int(os.getenv("WEATHER_FEATURES_RETENTION_DAYS", "180"))
 
-#: Transient Atlas failures a bounded retry absorbs, so one M0 restart does not
-#: abort a whole rebuild. 91 = ShutdownInProgress, 116 = InterruptedAtShutdown
-#: (pymongo surfaces these as MongoNodeIsRecoveringException /
-#: MongoConnectionPoolClearedException).
-TRANSIENT_MONGO_ERROR_CODES = frozenset({91, 116})
-TRANSIENT_MONGO_EXCEPTION_NAMES = frozenset(
-    {"MongoNodeIsRecoveringException", "MongoConnectionPoolClearedException"}
-)
-
-MONGO_RETRY_ATTEMPTS = 4
-MONGO_RETRY_BASE_DELAY_SECONDS = 5.0
-MONGO_RETRY_BACKOFF_FACTOR = 2.0
-MONGO_RETRY_MAX_DELAY_SECONDS = 60.0
-
 
 def feature_doc_id(city, timestamp_epoch_seconds):
     """Stable ``weather_features`` ``_id``: ``{city}_{epoch_seconds}``.
@@ -376,69 +362,6 @@ def prune_filter(cutoff):
     a rolling snapshot, so the scan is small and bounded by the retained window.
     """
     return {"timestamp": {"$lt": cutoff}}
-
-
-def _error_code(exc):
-    code = getattr(exc, "code", None)
-    if code is None:
-        details = getattr(exc, "details", None)
-        if isinstance(details, dict):
-            code = details.get("code")
-    return code
-
-
-def is_transient_mongo_error(exc):
-    """True for Atlas failures worth retrying (code 91/116 or recovering/pool)."""
-    code = _error_code(exc)
-    if code is not None:
-        try:
-            if int(code) in TRANSIENT_MONGO_ERROR_CODES:
-                return True
-        except (TypeError, ValueError):
-            pass
-
-    return any(cls.__name__ in TRANSIENT_MONGO_EXCEPTION_NAMES for cls in type(exc).__mro__)
-
-
-def retry_delay_seconds(
-    attempt,
-    base=MONGO_RETRY_BASE_DELAY_SECONDS,
-    factor=MONGO_RETRY_BACKOFF_FACTOR,
-    cap=MONGO_RETRY_MAX_DELAY_SECONDS,
-):
-    """Exponential backoff delay for a zero-based *attempt*, capped."""
-    return min(cap, base * (factor**attempt))
-
-
-def run_with_mongo_retries(
-    fn,
-    *,
-    label="mongo operation",
-    attempts=MONGO_RETRY_ATTEMPTS,
-    sleep=time.sleep,
-):
-    """Run *fn* with bounded exponential backoff on transient Mongo errors.
-
-    Non-transient errors (and the final attempt) re-raise immediately. Every
-    Mongo phase here is idempotent (upsert on ``_id``, range delete), so
-    retrying the whole phase is safe: it never duplicates or corrupts rows.
-    """
-    for attempt in range(attempts):
-        try:
-            return fn()
-        except Exception as exc:
-            if attempt == attempts - 1 or not is_transient_mongo_error(exc):
-                raise
-            delay = retry_delay_seconds(attempt)
-            logger.warning(
-                "%s failed with a transient error (%s); retry %d/%d in %.1fs",
-                label,
-                exc,
-                attempt + 1,
-                attempts - 1,
-                delay,
-            )
-            sleep(delay)
 
 
 def add_feature_id(df):
