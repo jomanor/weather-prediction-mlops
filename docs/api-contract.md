@@ -204,7 +204,7 @@ through from the registry document (also nullable).
 
 ## Refresh (optional, rate-limited)
 
-### `POST /api/refresh`
+### `POST /api/v1/refresh` (alias: `POST /api/refresh`)
 
 Server-side Open-Meteo fetch for one registered station. Writes one `raw_weather`
 document; never runs Spark, so features and predictions are not refreshed.
