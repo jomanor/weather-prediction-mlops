@@ -93,9 +93,16 @@ export function OverviewPage() {
   }, [cities, stations, summaryQuery.data])
 
   const refreshedAt = predictionsQuery.data?.generated_at ?? stationsQuery.dataUpdatedAt
-  /* U7: pulse keyed on the data's own age (newest observation / prediction run). */
-  const freshnessAt =
-    predictionsQuery.data?.generated_at ?? stations[0]?.observed_at ?? null
+  /* U7: the pulse follows the newest *observation* on the network, not the
+     prediction payload's generated_at; the freshness window matches the real
+     ingest cadence (see `useFreshness`). */
+  const freshnessAt = useMemo(() => {
+    const newest = stations.reduce<string | null>((latest, station) => {
+      if (!latest) return station.observed_at
+      return new Date(station.observed_at) > new Date(latest) ? station.observed_at : latest
+    }, null)
+    return newest ?? predictionsQuery.data?.generated_at ?? null
+  }, [stations, predictionsQuery.data])
   const { isFresh } = useFreshness(freshnessAt)
   const reducedMotion = usePrefersReducedMotion()
 

@@ -39,6 +39,52 @@ export function temperatureUnit(units: UnitSystem): string {
   return units === 'imperial' ? '°F' : '°C'
 }
 
+export function windUnit(units: UnitSystem): string {
+  return units === 'imperial' ? 'mph' : 'km/h'
+}
+
+/** "22,1°" — a chart value already converted to the chosen unit system. */
+export function formatDegrees(value: number | null | undefined, digits = 0): string {
+  return isNum(value) ? `${fixed(value, digits)}°` : EMPTY
+}
+
+/** "22,1 °C" — a chart value already converted to the chosen unit system. */
+export function formatWithUnit(
+  value: number | null | undefined,
+  unit: string,
+  digits = 1,
+): string {
+  return isNum(value) ? `${fixed(value, digits)} ${unit}` : EMPTY
+}
+
+/** Signed value with its unit: "+1,5 °C" / "−0,8 °C". */
+export function formatSignedWithUnit(
+  value: number | null | undefined,
+  unit: string,
+  digits = 2,
+): string {
+  return isNum(value) ? `${formatSigned(value, digits)} ${unit}` : EMPTY
+}
+
+/** Whole hours elapsed since an ISO timestamp, or null when absent/invalid. */
+export function ageInHours(
+  iso: string | null | undefined,
+  now = Date.now(),
+): number | null {
+  if (!iso) return null
+  const parsed = new Date(iso).getTime()
+  if (!Number.isFinite(parsed)) return null
+  return Math.max(0, (now - parsed) / 3_600_000)
+}
+
+/** Human age of a timestamp: "hace 34 min" / "hace 3 h". */
+export function formatAgeHours(iso: string | null | undefined, now = Date.now()): string {
+  const hours = ageInHours(iso, now)
+  if (hours === null) return EMPTY
+  if (hours < 1) return `hace ${formatNumber(Math.max(1, Math.round(hours * 60)), 0)} min`
+  return `hace ${formatNumber(Math.round(hours), 0)} h`
+}
+
 export function formatWind(kmh: number | null | undefined, units: UnitSystem = 'metric'): string {
   if (!isNum(kmh)) return EMPTY
   const value = units === 'imperial' ? kmh * 0.621371 : kmh

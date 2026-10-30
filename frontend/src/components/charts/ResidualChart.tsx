@@ -1,12 +1,36 @@
 import { useMemo } from 'react'
-import { Bar, BarChart, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 
 import type { SeriesPoint } from '@/api/schemas'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
 import { useChartSync } from '@/hooks/useChartSync'
-import { formatDateTimeMs, formatSigned, isNum } from '@/lib/format'
-import type { ChartPalette } from '@/lib/chart-theme'
+import { EmptyState } from '@/components/ui/Feedback'
+import {
+  CHART_MARGIN,
+  chartAxisLabel,
+  chartAxisProps,
+  chartBarCursor,
+  chartGridProps,
+  type ChartPalette,
+} from '@/lib/chart-theme'
+import {
+  formatDateTimeMs,
+  formatSigned,
+  formatSignedWithUnit,
+  isNum,
+  temperatureUnit,
+} from '@/lib/format'
 
 interface ResidualChartProps {
   points: SeriesPoint[]
@@ -19,40 +43,48 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
   const { units } = usePreferences()
   const { domain } = useChartSync()
 
-  const data = useMemo(
-    () =>
-      points
-        .map((point) => ({
-          ts: new Date(point.timestamp).getTime(),
-          residual: isNum(point.residual_model)
-            ? units === 'imperial'
-              ? point.residual_model * 1.8
-              : point.residual_model
-            : null,
-        }))
-        .filter((row) => Number.isFinite(row.ts)),
-    [points, units],
-  )
+  const { data, bound, hasValues } = useMemo(() => {
+    const rows = points
+      .map((point) => ({
+        ts: new Date(point.timestamp).getTime(),
+        residual: isNum(point.residual_model)
+          ? units === 'imperial'
+            ? point.residual_model * 1.8
+            : point.residual_model
+          : null,
+      }))
+      .filter((row) => Number.isFinite(row.ts))
 
-  const bound = useMemo(() => {
-    const values = data
+    const values = rows
       .map((row) => row.residual)
       .filter((value): value is number => value !== null)
       .map(Math.abs)
-    return values.length ? Math.max(...values) * 1.15 : 1
-  }, [data])
+    return {
+      data: rows,
+      bound: values.length ? Math.max(...values) * 1.15 : 1,
+      hasValues: values.length > 0,
+    }
+  }, [points, units])
 
+  const unitLabel = temperatureUnit(units)
   const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
+  const axisProps = chartAxisProps(palette)
 
-  const axisProps = {
-    stroke: palette.axis,
-    tick: { fill: palette.textMuted, fontSize: 10, fontFamily: 'JetBrains Mono Variable, monospace' },
-    tickLine: false,
+  if (!hasValues) {
+    return (
+      <div style={{ minHeight: height }} className="flex items-center justify-center">
+        <EmptyState
+          title="Sin residuos que mostrar"
+          description="No hay pares observado/modelo en esta ventana temporal para calcular el error."
+        />
+      </div>
+    )
   }
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
+      <BarChart data={data} margin={CHART_MARGIN}>
+        <CartesianGrid {...chartGridProps(palette)} />
         <ReferenceLine y={0} stroke={palette.axis} />
         <XAxis
           dataKey="ts"
@@ -65,29 +97,26 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
         />
         <YAxis
           domain={[-bound, bound]}
-          width={52}
+          width={46}
           tickCount={5}
           tickFormatter={(value: number) => formatSigned(value, 1)}
+          label={chartAxisLabel(palette, unitLabel, 'insideLeft')}
           {...axisProps}
         />
         <Tooltip
-          cursor={{ fill: palette.grid }}
+          cursor={chartBarCursor(palette)}
           content={
             <ChartTooltip
               title={(label) => formatDateTimeMs(Number(label))}
               format={(entry) =>
                 entry.value === null
                   ? '—'
-                  : `${formatSigned(entry.value as number)} ${units === 'imperial' ? '°F' : '°C'}`
+                  : formatSignedWithUnit(entry.value as number, unitLabel, 1)
               }
             />
           }
         />
-        <Bar
-          dataKey="residual"
-          name={`Error (observado − modelo, ${units === 'imperial' ? '°F' : '°C'})`}
-          isAnimationActive={false}
-        >
+        <Bar dataKey="residual" name={`Error (observado − modelo, ${unitLabel})`} isAnimationActive={false}>
           {data.map((row, index) => (
             <Cell
               key={index}

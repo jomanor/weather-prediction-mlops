@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 
 /**
- * Default freshness window. Real cadence: inference runs hourly (around :05)
- * and features rebuild roughly every 6 h; L1's 15-min ingest is deferred.
- * 120 min tolerates one missed hourly cycle and still flags a stale feed.
+ * Default freshness window, aligned with the cadence the pipeline actually
+ * achieves: GitHub Actions throttles the declared hourly crons to ~4–7 runs a
+ * day, so observations arrive 6–7 h apart (see docs/roadmap.md). A 12 h window
+ * matches the quality meter's `ok` age gate — the earlier 120 min assumed an
+ * hourly ingest that does not exist and painted healthy data as stale.
  */
-export const FRESH_WINDOW_SECONDS = 120 * 60
+export const FRESH_WINDOW_SECONDS = 12 * 60 * 60
 const TICK_MS = 60_000
 
 export interface Freshness {

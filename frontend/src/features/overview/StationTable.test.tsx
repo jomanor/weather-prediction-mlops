@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
@@ -83,5 +83,61 @@ describe('StationTable cross-filtering', () => {
       'href',
       '/stations?tab=estaciones&city=Madrid',
     )
+  })
+})
+
+
+describe('StationTable data age and sorting', () => {
+  const older = {
+    ...STATION,
+    city: 'Sevilla',
+    temperature: 25,
+    observed_at: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+  }
+  const newer = {
+    ...STATION,
+    city: 'Madrid',
+    temperature: 20,
+    observed_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+  }
+
+  function renderRows() {
+    return render(
+      <MemoryRouter>
+        <PreferencesProvider>
+          <StationSelectionProvider>
+            <StationTable
+              rows={[
+                { name: 'Sevilla', station: older },
+                { name: 'Madrid', station: newer },
+              ]}
+              predictions={new Map<string, Prediction>()}
+            />
+          </StationSelectionProvider>
+        </PreferencesProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  it('surfaces the age of each row from its own observed_at', () => {
+    renderRows()
+    const sevilla = screen.getByRole('row', { name: /Sevilla/ })
+    expect(within(sevilla).getByText(/hace 3 h/)).toBeInTheDocument()
+    const madrid = screen.getByRole('row', { name: /Madrid/ })
+    expect(within(madrid).getByText(/hace 10 min/)).toBeInTheDocument()
+  })
+
+  it('sorts by temperature and keeps the selection working', async () => {
+    renderRows()
+    const before = screen.getAllByRole('row').slice(1).map((row) => row.textContent)
+    expect(before[0]).toContain('Madrid')
+
+    await userEvent.click(screen.getByRole('button', { name: /Temp/ }))
+
+    const after = screen.getAllByRole('row').slice(1).map((row) => row.textContent)
+    expect(after[0]).toContain('Sevilla')
+
+    await userEvent.click(screen.getByRole('row', { name: /Sevilla/ }))
+    expect(screen.getByRole('row', { name: /Sevilla/ })).toHaveAttribute('aria-selected', 'true')
   })
 })

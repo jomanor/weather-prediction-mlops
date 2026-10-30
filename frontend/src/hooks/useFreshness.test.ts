@@ -42,13 +42,20 @@ describe('useFreshness', () => {
 
     rerender({ iso: '2026-09-25T09:00:00Z' })
     expect(result.current.ageSeconds).toBe(10800)
-    expect(result.current.isFresh).toBe(false)
+    expect(result.current.isFresh).toBe(true)
   })
 
   it('tolerates one missed hourly inference cycle', () => {
     vi.setSystemTime(NOW)
     const { result } = renderHook(() => useFreshness('2026-09-25T10:30:00Z'))
     expect(result.current.ageSeconds).toBe(5400)
+    expect(result.current.isFresh).toBe(true)
+  })
+
+  it('keeps a 6 h observation fresh, matching the real ingest cadence', () => {
+    vi.setSystemTime(NOW)
+    const { result } = renderHook(() => useFreshness('2026-09-25T06:00:00Z'))
+    expect(result.current.ageSeconds).toBe(6 * 3600)
     expect(result.current.isFresh).toBe(true)
   })
 

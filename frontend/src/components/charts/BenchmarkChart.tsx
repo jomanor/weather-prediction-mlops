@@ -14,8 +14,23 @@ import { ChartBrush } from '@/components/charts/ChartBrush'
 import { ChartTooltip } from '@/components/charts/ChartTooltip'
 import { usePreferences } from '@/app/preferences'
 import { useChartSync } from '@/hooks/useChartSync'
-import { convertTemperature, formatDateTimeMs, formatNumber, isNum } from '@/lib/format'
-import type { ChartPalette } from '@/lib/chart-theme'
+import { EmptyState } from '@/components/ui/Feedback'
+import {
+  CHART_MARGIN,
+  chartAxisLabel,
+  chartAxisProps,
+  chartGridProps,
+  chartLineCursor,
+  type ChartPalette,
+} from '@/lib/chart-theme'
+import {
+  convertTemperature,
+  formatDateTimeMs,
+  formatDegrees,
+  formatWithUnit,
+  isNum,
+  temperatureUnit,
+} from '@/lib/format'
 
 interface BenchmarkChartProps {
   points: SeriesPoint[]
@@ -28,7 +43,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
   const { units } = usePreferences()
   const { domain } = useChartSync()
 
-  const { data, domain: valueDomain } = useMemo(() => {
+  const { data, valueDomain, hasValues } = useMemo(() => {
     const rows = points
       .map((point) => ({
         ts: new Date(point.timestamp).getTime(),
@@ -41,26 +56,37 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
     const values = rows.flatMap((row) =>
       [row.observed, row.model, row.aemet].filter((value): value is number => value !== null),
     )
-    if (!values.length) return { data: rows, domain: [0, 1] as [number, number] }
+    if (!values.length) return { data: rows, valueDomain: [0, 1] as [number, number], hasValues: false }
 
     const min = Math.min(...values)
     const max = Math.max(...values)
     const pad = Math.max((max - min) * 0.15, 1)
-    return { data: rows, domain: [Math.floor(min - pad), Math.ceil(max + pad)] as [number, number] }
+    return {
+      data: rows,
+      valueDomain: [Math.floor(min - pad), Math.ceil(max + pad)] as [number, number],
+      hasValues: true,
+    }
   }, [points, units])
 
+  const unitLabel = temperatureUnit(units)
   const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
+  const axisProps = chartAxisProps(palette)
 
-  const axisProps = {
-    stroke: palette.axis,
-    tick: { fill: palette.textMuted, fontSize: 10, fontFamily: 'JetBrains Mono Variable, monospace' },
-    tickLine: false,
+  if (!hasValues) {
+    return (
+      <div style={{ minHeight: height }} className="flex items-center justify-center">
+        <EmptyState
+          title="Sin datos comparables"
+          description="No hay observaciones ni predicciones con temperatura en esta ventana temporal."
+        />
+      </div>
+    )
   }
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
-        <CartesianGrid stroke={palette.grid} strokeDasharray="2 4" vertical={false} />
+      <LineChart data={data} margin={CHART_MARGIN}>
+        <CartesianGrid {...chartGridProps(palette)} />
         <XAxis
           dataKey="ts"
           type="number"
@@ -72,18 +98,23 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
         />
         <YAxis
           domain={valueDomain}
-          width={44}
-          tickFormatter={(value: number) => `${formatNumber(value, 0)}°`}
+          width={46}
+          tickFormatter={(value: number) => formatDegrees(value, 0)}
+          label={chartAxisLabel(palette, unitLabel, 'insideLeft')}
           {...axisProps}
         />
         <Tooltip
           content={
             <ChartTooltip
               title={(label) => formatDateTimeMs(Number(label))}
-              format={(entry) => (entry.value === null ? '—' : `${formatNumber(entry.value as number)}°`)}
+              format={(entry) =>
+                entry.value === null
+                  ? '—'
+                  : formatWithUnit(entry.value as number, unitLabel, 1)
+              }
             />
           }
-          cursor={{ stroke: palette.axis, strokeDasharray: '3 3' }}
+          cursor={chartLineCursor(palette)}
         />
         <Line
           type="monotone"
