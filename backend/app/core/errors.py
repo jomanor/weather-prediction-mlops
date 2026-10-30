@@ -70,6 +70,26 @@ MAX_VALIDATION_FIELDS = 20
 MAX_VALIDATION_MESSAGE_LENGTH = 200
 
 
+class APIError(StarletteHTTPException):
+    """An ``HTTPException`` that carries an explicit stable envelope code.
+
+    The status -> code map below covers the generic failures; routes whose
+    contract names a more specific code (``city_not_found``,
+    ``refresh_rate_limited``, ...) raise this instead of a bare HTTPException.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=message, headers=headers)
+        self.code = code
+
+
 def request_id_of(request: Request) -> str:
     """The id assigned by ``RequestContextMiddleware``, or a fresh one.
 
@@ -131,7 +151,8 @@ def _validation_fields(exc: RequestValidationError) -> list[dict[str, Any]]:
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Any ``HTTPException`` raised by a handler or by Starlette's router."""
     status_code = exc.status_code
-    code = STATUS_CODES.get(status_code, UNMAPPED_STATUS_CODE)
+    # ``APIError`` names its own code; anything else falls back to the status map.
+    code = getattr(exc, "code", None) or STATUS_CODES.get(status_code, UNMAPPED_STATUS_CODE)
     # Our own handlers pass human-readable strings; anything else (a status
     # raised by the framework) falls back to the status phrase.
     message = (

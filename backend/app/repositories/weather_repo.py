@@ -221,6 +221,15 @@ class WeatherRepository:
     def _raw(self):
         return self._db["raw_weather"]
 
+    async def save_raw_observation(self, document: dict[str, Any]) -> None:
+        """Upsert one ``raw_weather`` document on its ``_id``.
+
+        ``_id`` is ``{city}_{observation epoch}`` (see
+        ``app.services.openmeteo.build_document``), so a re-fetch of the same
+        observation replaces the row instead of appending a duplicate.
+        """
+        await self._raw.replace_one({"_id": document["_id"]}, document, upsert=True)
+
     @property
     def _features(self):
         return self._db["weather_features"]
