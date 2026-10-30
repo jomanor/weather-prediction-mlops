@@ -23,10 +23,17 @@ Semantics (frozen in Batch 5):
   to production (clearing ``superseded_at``/``superseded_by``) and marks the
   current production document in that slot superseded.
 - Re-running the same command is a no-op: an already-production target keeps its
-  original ``promoted_at``, and superseded documents are never re-staged.
-- Exit code is non-zero with a clear message when nothing matches, when the
-  target has no ``gridfs_file_id`` (an unloadable model must never become
-  production) and when ``--rollback`` finds no superseded candidate.
+  original ``promoted_at``, and superseded documents are never re-staged.  When
+  selecting by prefix, an incumbent whose ``timestamp`` is >= the newest staging
+  candidate (including "only production exists") returns ``changed=False`` and
+  exits 0 with an explicit "already production, nothing to do" message.
+- Exit code is non-zero with a clear message only when *neither* a staging
+  candidate nor a production incumbent matches, when the target has no
+  ``gridfs_file_id`` / its GridFS artifact is missing (an unloadable model must
+  never become production) and when ``--rollback`` finds no superseded candidate.
+- Slot peers are demoted *before* the target is promoted, so a crash between the
+  two writes leaves zero production (inference falls back to staging) rather
+  than two production documents.
 
 The selector prefix comes from :mod:`model_selection` — the same module
 ``inference.py`` uses — so "what production means" has exactly one definition.
@@ -50,6 +57,7 @@ if SPARK_JOBS_DIR not in sys.path:
     sys.path.insert(0, SPARK_JOBS_DIR)
 
 import model_selection as ms  # noqa: E402
+from gridfs import GridFS  # noqa: E402
 from pymongo import MongoClient  # noqa: E402
 
 DEFAULT_DB = "weather_db"
@@ -165,11 +173,18 @@ def _production_in_slot(
     the set a single ``temp_prediction_1h_*`` model can serve. Ordering is
     ``[("timestamp", -1)]`` so the printed table is deterministic.
     """
+    horizon = target.get("horizon_hours")
     query: dict = {
         "_id": {"$ne": target["_id"]},
         "stage": ms.STAGE_PRODUCTION,
-        "horizon_hours": target.get("horizon_hours"),
     }
+    if horizon is None:
+        # A legacy target with no horizon must not match peers that *do* carry
+        # one: ``horizon_hours: None`` in Mongo also matches nothing useful, and
+        # it silently let a horizon-less promote demote other horizons.
+        query["horizon_hours"] = {"$exists": False}
+    else:
+        query["horizon_hours"] = horizon
     slot = slot_prefix(target, prefix)
     if slot:
         query["model_name"] = {"$regex": f"^{re.escape(slot)}"}
@@ -191,11 +206,24 @@ def _rollback_candidates(prefix: str) -> dict:
     return query
 
 
-def _require_loadable(doc: dict) -> None:
-    if not doc.get("gridfs_file_id"):
+def _require_loadable(doc: dict, fs=None) -> None:
+    """Refuse a document whose artifact cannot be loaded from GridFS.
+
+    A set ``gridfs_file_id`` is not enough: a failed ``fs.delete`` during prune
+    (or a manual cleanup) leaves a dead id behind, and promoting it makes the
+    next hourly inference abort on ``NoFile``.  When a GridFS handle is supplied
+    (``main`` always does) the artifact is checked with ``fs.exists``.
+    """
+    file_id = doc.get("gridfs_file_id")
+    if not file_id:
         raise PromotionError(
             f"model_registry doc {doc.get('_id')} ('{doc.get('model_name')}') has no "
             "gridfs_file_id; refusing to put an unloadable model in production."
+        )
+    if fs is not None and not fs.exists(file_id):
+        raise PromotionError(
+            f"model_registry doc {doc.get('_id')} ('{doc.get('model_name')}') points at "
+            f"GridFS file {file_id} that does not exist; refusing to promote a dead artifact."
         )
 
 
@@ -221,6 +249,7 @@ def promote(
     actor: str | None = None,
     now: datetime | None = None,
     dry_run: bool = False,
+    fs=None,
 ) -> dict:
     """Promote one registry document to production and supersede its slot peers.
 
@@ -236,17 +265,40 @@ def promote(
         target = coll.find_one({"_id": doc_id})
         if target is None:
             raise PromotionError(f"No model_registry document with _id={doc_id}.")
+        _require_loadable(target, fs)
     else:
         if not prefix:
             raise PromotionError("A --model-name prefix or an --id is required.")
-        target = ms.newest_matching(db, prefix, ms.STAGE_STAGING)
-        if target is None:
+        # Prefix selection is newest-first.  If the incumbent production model is
+        # already at least as new as the newest staging candidate, a retried
+        # command must be a clean no-op instead of reshuffling stages (QA repro:
+        # promote v3, retry, v2 gets promoted and v3 superseded).
+        incumbent = ms.production_entry(db, prefix)
+        candidate = ms.newest_matching(db, prefix, ms.STAGE_STAGING)
+        if candidate is None and incumbent is None:
             raise PromotionError(
                 f"No staging model matches prefix '{prefix}'. "
                 "Train one first (spark/spark-jobs/ml_training.py) or pass --id."
             )
-
-    _require_loadable(target)
+        incumbent_ts = incumbent.get("timestamp") if incumbent is not None else None
+        candidate_ts = candidate.get("timestamp") if candidate is not None else None
+        if candidate is None or (
+            incumbent_ts is not None and candidate_ts is not None and incumbent_ts >= candidate_ts
+        ):
+            # Nothing newer to promote.  ``incumbent`` is production already;
+            # ``candidate`` is only reached here when it is older than it.
+            target = incumbent if incumbent is not None else candidate
+            return {
+                "rows": [_record(target, target.get("stage"), target.get("stage"))],
+                "target": target,
+                "changed": False,
+                "dry_run": dry_run,
+                "action": "promote",
+                "actor": actor,
+                "noop": "already production",
+            }
+        target = candidate
+        _require_loadable(target, fs)
 
     peers = _production_in_slot(coll, target, prefix)
     rows = []
@@ -259,10 +311,12 @@ def promote(
 
     changed = target.get("stage") != ms.STAGE_PRODUCTION or bool(peers)
     if not dry_run:
-        if target.get("stage") != ms.STAGE_PRODUCTION:
-            coll.update_one({"_id": target["_id"]}, {"$set": _promotion_fields(actor, now)})
+        # Demote peers BEFORE promoting the target: a crash in between leaves
+        # zero production (staging fallback) instead of two production docs.
         for peer in peers:
             coll.update_one({"_id": peer["_id"]}, {"$set": _supersede_fields(actor, now)})
+        if target.get("stage") != ms.STAGE_PRODUCTION:
+            coll.update_one({"_id": target["_id"]}, {"$set": _promotion_fields(actor, now)})
 
     return {
         "rows": rows,
@@ -282,6 +336,7 @@ def rollback(
     actor: str | None = None,
     now: datetime | None = None,
     dry_run: bool = False,
+    fs=None,
 ) -> dict:
     """Restore the most recently superseded document in the slot to production.
 
@@ -313,13 +368,20 @@ def rollback(
                 f"No superseded model matches prefix '{prefix}'; nothing to roll back to."
             )
 
-    _require_loadable(target)
+    _require_loadable(target, fs)
 
     peers = _production_in_slot(coll, target, prefix)
     rows = [_record(target, target.get("stage"), ms.STAGE_PRODUCTION)]
     rows.extend(_record(peer, peer.get("stage"), ms.STAGE_SUPERSEDED) for peer in peers)
 
     if not dry_run:
+        # Same ordering rule as promote: never leave two production docs behind a
+        # crash partway through the stage flip.
+        for peer in peers:
+            coll.update_one(
+                {"_id": peer["_id"]},
+                {"$set": _supersede_fields(actor, now, via="rollback")},
+            )
         coll.update_one(
             {"_id": target["_id"]},
             {
@@ -329,11 +391,6 @@ def rollback(
                 "$unset": {"superseded_at": "", "superseded_by": ""},
             },
         )
-        for peer in peers:
-            coll.update_one(
-                {"_id": peer["_id"]},
-                {"$set": _supersede_fields(actor, now, via="rollback")},
-            )
 
     return {
         "rows": rows,
@@ -434,10 +491,17 @@ def main(argv: list[str] | None = None) -> int:
 
         client = MongoClient(uri)
         try:
+            db = client[args.db]
             # With only --id the slot is derived from the document itself (no
             # name filter), which is why the prefix stays None here.
             prefix = resolve_prefix(args.model_name, args.horizon) if args.model_name else None
-            result = action(client[args.db], prefix=prefix, doc_id=doc_id, dry_run=args.dry_run)
+            result = action(
+                db,
+                prefix=prefix,
+                doc_id=doc_id,
+                dry_run=args.dry_run,
+                fs=GridFS(db),
+            )
         finally:
             client.close()
 
@@ -446,7 +510,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     verb = result["action"] + (" (dry run)" if result["dry_run"] else "")
-    print(f"{verb} by {result['actor']}" + ("" if result["changed"] else " — nothing to change"))
+    if result.get("noop"):
+        target = result.get("target") or {}
+        print(
+            f"{verb}: '{target.get('model_name')}' (version {target.get('version')}) "
+            f"is already production, nothing to do by {result['actor']}"
+        )
+    else:
+        print(
+            f"{verb} by {result['actor']}" + ("" if result["changed"] else " — nothing to change")
+        )
     print(format_table(result["rows"]))
     return 0
 

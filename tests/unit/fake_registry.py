@@ -23,6 +23,8 @@ def _match_value(actual, expected) -> bool:
             return actual != expected["$ne"]
         if "$lt" in expected:
             return actual is not None and actual < expected["$lt"]
+        if "$gt" in expected:
+            return actual is not None and actual > expected["$gt"]
         if "$gte" in expected:
             return actual is not None and actual >= expected["$gte"]
         if "$regex" in expected:
@@ -35,6 +37,10 @@ def _match_value(actual, expected) -> bool:
 
 def _matches(doc: dict, query: dict) -> bool:
     for key, expected in query.items():
+        if isinstance(expected, dict) and "$exists" in expected:
+            if (key in doc) != bool(expected["$exists"]):
+                return False
+            continue
         if key not in doc and not (isinstance(expected, dict) and "$ne" in expected):
             return False
         if not _match_value(doc.get(key), expected):
@@ -48,6 +54,8 @@ class FakeRegistryCollection:
     def __init__(self, docs: list[dict] | None = None):
         self.docs = [copy.deepcopy(doc) for doc in (docs or [])]
         self.unsets: list[tuple[dict, dict]] = []
+        #: ``(query, update)`` in order — lets a test assert write ordering.
+        self.updates: list[tuple[dict, dict]] = []
 
     # -- reads ---------------------------------------------------------
     def _sorted(self, matches: list[dict], sort) -> list[dict]:
@@ -77,6 +85,7 @@ class FakeRegistryCollection:
         return None
 
     def update_one(self, query: dict, update: dict, **kwargs):
+        self.updates.append((copy.deepcopy(query), copy.deepcopy(update)))
         doc = self._find_ref(query)
         if doc is None:
             return _UpdateResult(0, 0)

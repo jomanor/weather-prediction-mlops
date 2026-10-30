@@ -96,24 +96,59 @@ def test_shadow_entry_picks_newest_staging_excluding_production():
         make_entry("temp_prediction_1h_New", doc_id="03", stage="staging", timestamp=dt(3)),
         make_entry("temp_prediction_1h_Gone", doc_id="04", stage="superseded", timestamp=dt(4)),
     )
-    shadow = ms.shadow_entry(db, "temp_prediction_1h_", "01")
+    shadow = ms.shadow_entry(db, "temp_prediction_1h_", production)
     assert shadow["_id"] == "03"
     assert shadow["stage"] == "staging"
 
 
-def test_shadow_entry_none_without_challenger():
+def test_shadow_entry_requires_a_challenger_newer_than_production():
+    # Docs say "newer staging": an older staging artifact is not a challenger.
+    production = make_entry(
+        "temp_prediction_1h_Prod", doc_id="01", stage="production", timestamp=dt(9)
+    )
     db = _db(
-        make_entry("temp_prediction_1h_Prod", doc_id="01", stage="production"),
+        production,
+        make_entry("temp_prediction_1h_Old", doc_id="02", stage="staging", timestamp=dt(2)),
+    )
+    assert ms.shadow_entry(db, "temp_prediction_1h_", production) is None
+
+
+def test_shadow_entry_returns_a_newer_staging_challenger():
+    production = make_entry(
+        "temp_prediction_1h_Prod", doc_id="01", stage="production", timestamp=dt(9)
+    )
+    db = _db(
+        production,
+        make_entry("temp_prediction_1h_New", doc_id="02", stage="staging", timestamp=dt(10)),
+    )
+    shadow = ms.shadow_entry(db, "temp_prediction_1h_", production)
+    assert shadow is not None and shadow["_id"] == "02"
+
+
+def test_shadow_entry_none_without_challenger():
+    production = make_entry("temp_prediction_1h_Prod", doc_id="01", stage="production")
+    db = _db(
+        production,
         make_entry("temp_prediction_1h_Gone", doc_id="02", stage="superseded"),
     )
-    assert ms.shadow_entry(db, "temp_prediction_1h_", "01") is None
+    assert ms.shadow_entry(db, "temp_prediction_1h_", production) is None
 
 
 def test_shadow_entry_never_returns_the_production_doc():
     # Belt-and-braces: even a doc that matches the staging filter but shares the
     # production _id must be excluded (a shadow is always a different model).
-    db = _db(make_entry("temp_prediction_1h_Prod", doc_id="01", stage="staging"))
-    assert ms.shadow_entry(db, "temp_prediction_1h_", "01") is None
+    production = make_entry("temp_prediction_1h_Prod", doc_id="01", stage="staging")
+    db = _db(production)
+    assert ms.shadow_entry(db, "temp_prediction_1h_", production) is None
+
+
+def test_shadow_entry_accepts_a_bare_timestamp():
+    db = _db(
+        make_entry("temp_prediction_1h_New", doc_id="02", stage="staging", timestamp=dt(10)),
+    )
+    shadow = ms.shadow_entry(db, "temp_prediction_1h_", dt(9))
+    assert shadow is not None and shadow["_id"] == "02"
+    assert ms.shadow_entry(db, "temp_prediction_1h_", dt(10)) is None
 
 
 # ---------------------------------------------------------------------------

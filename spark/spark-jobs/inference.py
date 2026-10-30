@@ -562,7 +562,7 @@ def run_shadow_ab(
         return None
 
     try:
-        challenger = model_selection.shadow_entry(db, prefix, production_entry.get("_id"))
+        challenger = model_selection.shadow_entry(db, prefix, production_entry)
         if challenger is None or not challenger.get("gridfs_file_id"):
             return None
 

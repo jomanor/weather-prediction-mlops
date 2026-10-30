@@ -44,17 +44,26 @@ both ``raw_weather`` (TTL) and ``weather_features`` (window) saturate, so net
 growth falls to index churn plus the small ``weather_predictions``/``weather_data``
 reservoirs.
 
-Conclusion at the current constants: **≈368.7 MiB of 512 MiB**, under the 75%
-(384 MiB) safety budget with ≈15 MiB headroom, and ``weather_features`` the
+**Batch 5 / L6 (refresh endpoint):** ``POST /api/refresh`` writes one
+``raw_weather`` document per accepted attempt, globally capped at
+``REFRESH_DOCS_PER_DAY = 48`` (see ``backend/app/services/*refresh*`` and the
+900 s/6-per-min/48-per-day limiter). Unlike the hourly producer, these rows are
+not tied to the observation cadence, so they are charged separately against the
+same 180-day raw TTL at the measured ``raw_weather`` bytes/row (1362 B):
+``180 × 48 × 1362 = 11,767,680 B ≈ 11.2 MiB`` at saturation.
+
+Conclusion at the current constants: **≈380.5 MiB of 512 MiB**, under the 75%
+(384 MiB) safety budget with ≈3.5 MiB headroom, and ``weather_features`` the
 largest single collection (≈238 MiB, ~47% of the cap). The tripwire is the
-feature-rebuild rate: **the first breaching rate is 14 rebuilds/day** (13/day
-projects ≈383.5 MiB, just under the budget; 14/day ≈386.4 MiB, over — the
-contract states the same 14/day boundary). Any cadence change (e.g. the deferred L1
-15-min ingest) requires a re-measure and re-triggers this check. If the raw
-window is extended (e.g. its TTL grows past ~250 days), ``weather_features`` is
-the first axis to breach — the snapshot scales linearly with the raw window and
-there is no TTL on the collection itself. Update ``MEASURED_AVG_OBJ_SIZE`` and
-``LIVE_CITY_COUNT`` when the schema or the live data move.
+feature-rebuild rate: **the first breaching rate is 10 rebuilds/day** (9/day
+projects ≈383.4 MiB, just under the budget; 10/day ≈386.4 MiB, over). The
+refresh contribution moved the boundary down from 14/day before Batch 5; any
+cadence change (e.g. the deferred L1 15-min ingest) requires a re-measure and
+re-triggers this check. If the raw window is extended (e.g. its TTL grows past
+~250 days), ``weather_features`` is the first axis to breach — the snapshot
+scales linearly with the raw window and there is no TTL on the collection
+itself. Update ``MEASURED_AVG_OBJ_SIZE`` and ``LIVE_CITY_COUNT`` when the schema
+or the live data move.
 """
 
 from __future__ import annotations
@@ -112,6 +121,9 @@ LIVE_CITY_COUNT = 15
 FROZEN_M2_HORIZONS: tuple[int, ...] = (1, 3, 6, 12, 24)
 #: Feature-rebuild cadence: 2× the declared ``20 */6`` = 4/day, for jitter.
 FEATURE_REBUILDS_PER_DAY = 8
+#: L6 refresh endpoint: one ``raw_weather`` doc per accepted attempt, globally
+#: capped at 48/day (900 s per city, 6/min, 48/day limiter).
+REFRESH_DOCS_PER_DAY = 48
 
 #: Measured index size was ~2-6% of collection size per collection; budget 5%.
 INDEX_OVERHEAD_FRACTION = 0.05
@@ -142,6 +154,11 @@ def rows_per_day() -> int:
     return HOURS_PER_DAY * LIVE_CITY_COUNT
 
 
+def raw_weather_rows_per_day() -> int:
+    """Scheduled observations plus the L6 refresh endpoint's daily allowance."""
+    return rows_per_day() + REFRESH_DOCS_PER_DAY
+
+
 def prediction_rows_per_day(rebuilds: int | None = None, horizons: int | None = None) -> int:
     """Rows added per day: feature rebuilds × cities × horizons.
 
@@ -164,8 +181,12 @@ def steady_state_bytes(rebuilds: int | None = None, horizons: int | None = None)
     predictions_per_day = prediction_rows_per_day(rebuilds, horizons)
     raw_days = RETENTION_DAYS["raw_weather"]
     rows = {
-        # raw_weather accumulates for its full TTL window.
-        "raw_weather": (raw_days * per_day, MEASURED_AVG_OBJ_SIZE["raw_weather"]),
+        # raw_weather accumulates for its full TTL window: producer rows plus the
+        # refresh endpoint's 48/day (measured raw bytes/row for both).
+        "raw_weather": (
+            raw_days * raw_weather_rows_per_day(),
+            MEASURED_AVG_OBJ_SIZE["raw_weather"],
+        ),
         # weather_features is a single upsert-maintained snapshot bounded by the
         # raw window (see test_weather_features_write_is_an_idempotent_upsert).
         "weather_features": (raw_days * per_day, MEASURED_AVG_OBJ_SIZE["weather_features"]),
@@ -234,6 +255,20 @@ def test_steady_state_is_under_cap_with_safety_margin():
     ), f"{total / MB:.1f} MiB exceeds the {SAFETY_MARGIN:.0%} budget {budget / MB:.1f} MiB"
 
 
+def test_raw_weather_includes_the_refresh_endpoint_allowance():
+    """The L6 refresh endpoint is part of the steady-state raw_weather volume."""
+    assert REFRESH_DOCS_PER_DAY == 48
+    assert raw_weather_rows_per_day() == rows_per_day() + 48
+    expected = (
+        RETENTION_DAYS["raw_weather"]
+        * (rows_per_day() + REFRESH_DOCS_PER_DAY)
+        * MEASURED_AVG_OBJ_SIZE["raw_weather"]
+    )
+    assert steady_state_bytes()["raw_weather"] == expected
+    # 11.2 MiB of the projection is refresh rows, not silently missing.
+    assert expected - (RETENTION_DAYS["raw_weather"] * rows_per_day() * 1362) == 11767680
+
+
 def test_prediction_volume_uses_the_structural_rebuild_bound():
     """5 horizons per rebuild, bounded by the rebuild cadence — not hourly."""
     assert prediction_rows_per_day() == FEATURE_REBUILDS_PER_DAY * LIVE_CITY_COUNT * len(HORIZONS)
@@ -249,17 +284,24 @@ def test_prediction_volume_uses_the_structural_rebuild_bound():
 
 
 def test_budget_tripwire_is_the_feature_rebuild_rate():
-    """Sensitivity: the model fails at 14 rebuilds/day, not vacuously.
+    """Sensitivity: the model fails at 10 rebuilds/day, not vacuously.
 
-    Documents the exact boundary — 13/day still fits (≈383.5 MiB), 14/day
-    breaches the 75% budget (≈386.4 MiB).
+    Documents the exact boundary after the refresh rows were added — 9/day
+    still fits (≈383.4 MiB), 10/day breaches the 75% budget (≈386.4 MiB).
     """
     budget = ATLAS_M0_CAP_BYTES * SAFETY_MARGIN
     assert total_bytes() < budget
-    assert total_bytes(rebuilds=13) < budget
+    assert total_bytes(rebuilds=9) < budget
     assert (
-        total_bytes(rebuilds=14) > budget
-    ), f"14 rebuilds/day must breach: {total_bytes(rebuilds=14) / MB:.1f} MiB"
+        total_bytes(rebuilds=10) > budget
+    ), f"10 rebuilds/day must breach: {total_bytes(rebuilds=10) / MB:.1f} MiB"
+
+
+def test_projection_stays_under_the_safety_budget_with_refresh_rows():
+    """The recomputed projection must not be loosened to fit the budget."""
+    assert round(total_bytes() / MB, 1) == 380.5
+    budget = ATLAS_M0_CAP_BYTES * SAFETY_MARGIN
+    assert budget - total_bytes() == 3682500  # ≈3.5 MiB headroom
 
 
 def test_weather_features_is_the_largest_collection():

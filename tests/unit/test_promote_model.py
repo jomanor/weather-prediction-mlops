@@ -175,6 +175,95 @@ def test_promote_dry_run_writes_nothing():
     assert result["rows"][0]["model_name"] == "temp_prediction_1h_New"
 
 
+def test_prefix_rerun_with_older_staging_left_is_a_noop():
+    # QA repro: promote v3, then v1/v2 remain staging; a retried command used to
+    # promote v2 and supersede v3. Now the incumbent wins on timestamp.
+    db = _db(
+        make_entry("temp_prediction_1h_V1", doc_id="01", stage="staging", timestamp=dt(1)),
+        make_entry("temp_prediction_1h_V2", doc_id="02", stage="staging", timestamp=dt(2)),
+        make_entry("temp_prediction_1h_V3", doc_id="03", stage="production", timestamp=dt(3)),
+    )
+
+    result = pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW)
+
+    assert result["changed"] is False
+    assert result["noop"] == "already production"
+    assert _stages(db) == {"01": "staging", "02": "staging", "03": "production"}
+    assert _registry(db).updates == []  # no writes at all
+
+
+def test_prefix_with_only_production_is_a_clean_noop():
+    db = _db(
+        make_entry("temp_prediction_1h_V3", doc_id="03", stage="production", timestamp=dt(3))
+    )
+    result = pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW)
+    assert result["changed"] is False
+    assert result["target"]["_id"] == "03"
+    assert _registry(db).updates == []
+
+
+def test_prefix_promotes_a_newer_staging_candidate():
+    db = _db(
+        make_entry("temp_prediction_1h_V3", doc_id="03", stage="production", timestamp=dt(3)),
+        make_entry("temp_prediction_1h_V4", doc_id="04", stage="staging", timestamp=dt(4)),
+    )
+    result = pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW)
+    assert result["changed"] is True
+    assert _stages(db) == {"03": "superseded", "04": "production"}
+
+
+def test_supersede_is_written_before_the_promotion():
+    # A crash between the two writes must leave zero production (staging
+    # fallback), never two production documents.
+    db = _db(
+        make_entry("temp_prediction_1h_Old", doc_id="01", stage="production", timestamp=dt(1)),
+        make_entry("temp_prediction_1h_New", doc_id="02", stage="staging", timestamp=dt(3)),
+    )
+    pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW)
+
+    updates = _registry(db).updates
+    assert [u[0]["_id"] for u in updates] == ["01", "02"]
+    assert updates[0][1]["$set"]["stage"] == "superseded"
+    assert updates[1][1]["$set"]["stage"] == "production"
+
+
+def test_promote_refuses_a_missing_gridfs_artifact():
+    class _FakeFS:
+        def __init__(self, ids=()):
+            self.ids = set(ids)
+
+        def exists(self, file_id):
+            return file_id in self.ids
+
+    db = _db(
+        make_entry("temp_prediction_1h_New", doc_id="02", stage="staging", timestamp=dt(3))
+    )
+    with pytest.raises(pm.PromotionError, match="does not exist"):
+        pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW, fs=_FakeFS())
+    assert _stages(db) == {"02": "staging"}
+    assert _registry(db).updates == []
+
+    # With the artifact present the same promote succeeds.
+    pm.promote(db, prefix="temp_prediction_1h_", actor="alice", now=NOW, fs=_FakeFS({"gridfs-id"}))
+    assert _stages(db) == {"02": "production"}
+
+
+def test_horizon_less_target_only_supersedes_horizon_less_peers():
+    target = make_entry("temp_prediction_Legacy", doc_id="03", stage="staging")
+    target.pop("horizon_hours")
+    peer = make_entry("temp_prediction_LegacyOld", doc_id="02", stage="production")
+    peer.pop("horizon_hours")
+    db = _db(
+        target,
+        peer,
+        make_entry("temp_prediction_1h_Prod", doc_id="01", stage="production", horizon=1),
+    )
+
+    pm.promote(db, prefix=None, doc_id="03", actor="alice", now=NOW)
+
+    assert _stages(db) == {"01": "production", "02": "superseded", "03": "production"}
+
+
 def test_promote_without_match_raises():
     db = _db(make_entry("rain_prediction_1h_GBT", doc_id="01", stage="staging", target="rain"))
     with pytest.raises(pm.PromotionError, match="No staging model matches"):
@@ -349,6 +438,10 @@ def _run_cli(monkeypatch, db, argv):
     monkeypatch.setenv("MONGO_URI", "mongodb://example.invalid/weather_db")
     monkeypatch.setenv("GITHUB_ACTOR", "ci-actor")
     monkeypatch.setattr(pm, "MongoClient", lambda uri: _FakeClient(db))
+    # The fake database is not a pymongo ``Database``, so the real GridFS
+    # constructor refuses it; the artifact check is exercised directly in
+    # ``test_promote_refuses_a_missing_gridfs_artifact`` instead.
+    monkeypatch.setattr(pm, "GridFS", lambda _db: None)
     return pm.main(argv)
 
 
@@ -384,6 +477,27 @@ def test_cli_rollback_exits_zero(monkeypatch):
     code = _run_cli(monkeypatch, db, ["--model-name", "temp_prediction_1h_", "--rollback"])
     assert code == 0
     assert _stages(db) == {"02": "production"}
+
+
+def test_cli_prefix_rerun_exits_zero_with_explicit_message(monkeypatch, capsys):
+    db = _db(
+        make_entry("temp_prediction_1h_V2", doc_id="02", stage="staging", timestamp=dt(2)),
+        make_entry("temp_prediction_1h_V3", doc_id="03", stage="production", timestamp=dt(3)),
+    )
+    code = _run_cli(monkeypatch, db, ["--model-name", "temp_prediction_1h_"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "already production, nothing to do" in out
+    assert _stages(db) == {"02": "staging", "03": "production"}
+
+
+def test_cli_only_production_exits_zero(monkeypatch, capsys):
+    db = _db(
+        make_entry("temp_prediction_1h_V3", doc_id="03", stage="production", timestamp=dt(3))
+    )
+    code = _run_cli(monkeypatch, db, ["--model-name", "temp_prediction_1h_"])
+    assert code == 0
+    assert "already production, nothing to do" in capsys.readouterr().out
 
 
 def test_cli_nothing_matching_exits_nonzero(monkeypatch, capsys):

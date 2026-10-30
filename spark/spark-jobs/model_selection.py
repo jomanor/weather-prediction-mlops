@@ -76,15 +76,30 @@ def production_entry(db, prefix: str) -> dict | None:
     return newest_matching(db, prefix, STAGE_PRODUCTION)
 
 
-def shadow_entry(db, prefix: str, production_id) -> dict | None:
-    """Newest ``stage="staging"`` document matching ``^prefix`` that is not
-    *production_id* — the shadow A/B challenger, or None when there is none.
+def shadow_entry(db, prefix: str, production) -> dict | None:
+    """Newest ``stage="staging"`` document **newer than production** for ``^prefix``.
 
-    A staging document identical to the production one cannot exist (a promote
-    flips its stage), so the exclusion is belt-and-braces: it guarantees the
-    shadow is always a *different* model.
+    *production* is the production document (or its ``timestamp``).  A challenger
+    must be strictly newer than the incumbent: an older staging artifact was
+    already considered (or predates the promoted model) and shadowing it would
+    report a stale comparison forever.  The production ``_id`` is excluded as
+    belt-and-braces — a shadow is always a *different* model.
+
+    Returns ``None`` when there is no production timestamp to compare against or
+    no newer staging document.
     """
-    return newest_matching(db, prefix, STAGE_STAGING, exclude_id=production_id)
+    if isinstance(production, dict):
+        production_ts = production.get("timestamp")
+        production_id = production.get("_id")
+    else:
+        production_ts = production
+        production_id = None
+    if production_ts is None:
+        return None
+
+    query = prefix_query(prefix, STAGE_STAGING, exclude_id=production_id)
+    query["timestamp"] = {"$gt": production_ts}
+    return registry_collection(db).find_one(query, sort=list(SORT))
 
 
 def select_entry(db, prefix: str) -> tuple[dict | None, bool]:

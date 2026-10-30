@@ -82,34 +82,51 @@ Rules:
    `metrics.skill_score` (must beat persistence; `<= 0` is the degradation
    warning in `scripts/pipeline_summary.py`), `metrics.n_test`,
    `diagnostics.drift_psi` and `interval.coverage` before promoting.
-4. Rollback is a promote of an older `superseded`/`staging` document — stages
-   are fields, history is never destroyed.
+4. Rollback is a promote of an older `superseded` document — stages are fields,
+   history is never destroyed.
+5. **No-op rule (prefix selection):** when no `--id` is given, the script loads
+   the incumbent production document in the slot first. If it exists and its
+   `timestamp` is `>=` the newest staging candidate's, or only production exists,
+   it prints `already production, nothing to do` and exits **0** without writing.
+   A retried promote therefore cannot demote a newer production model back to an
+   older staging one. Only "neither production nor staging matches" is an error.
+   `--id` deliberately pins the given document (even an older one), and
+   `--rollback` is unchanged.
+6. A target is refused (non-zero, no writes) when its `gridfs_file_id` is
+   missing **or the GridFS artifact does not exist** (`fs.exists`): a dead id
+   from a failed delete must never become production, because the next hourly
+   inference would abort on `NoFile`.
+7. Slot peers are demoted **before** the target is promoted, so a crash between
+   the two writes leaves zero production (inference falls back to staging) rather
+   than two production documents.
 
-`scripts/promote_model.py` (owned by the M5 workstream) provides:
+`scripts/promote_model.py` is a single command (there is no `promote`/`rollback`
+subcommand and no `--version` flag); `--rollback` selects the rollback action:
 
 ```bash
-# Promote a specific training run of one model family to production.
-# --dry-run prints the planned stage transitions and writes nothing.
-python scripts/promote_model.py promote --model-name temp_prediction_1h \
-    --version 20260925_021500 --dry-run
-python scripts/promote_model.py promote --model-name temp_prediction_1h \
-    --version 20260925_021500      # staging|superseded -> production
+# Promote the newest staging model for horizon 1 (prefix + --horizon).
+python scripts/promote_model.py --model-name temp_prediction_ --horizon 1
 
-# Omit --version to promote the newest eligible document of that family.
-python scripts/promote_model.py promote --model-name rain_prediction_3h --dry-run
+# Review the plan first: --dry-run prints from_stage -> to_stage, writes nothing.
+python scripts/promote_model.py --model-name temp_prediction_ --horizon 1 --dry-run
 
-# Roll back: re-promote the previous production document (newest superseded).
-python scripts/promote_model.py rollback --model-name temp_prediction_1h --dry-run
-python scripts/promote_model.py rollback --model-name temp_prediction_1h
+# Promote one exact registry document (may deliberately be older).
+python scripts/promote_model.py --id 6512ab... --dry-run
+python scripts/promote_model.py --id 6512ab...
 
-# Repeat per family: temp_prediction_{1,3,6,12,24}h, rain_prediction_{1,3,6,12,24}h.
+# Rolling back the last promote (newest superseded doc in the selector).
+python scripts/promote_model.py --model-name temp_prediction_1h_ --rollback --dry-run
+python scripts/promote_model.py --model-name temp_prediction_1h_ --rollback
+
+# Repeat per family: temp_prediction_{1,3,6,12,24}h_, rain_prediction_{1,3,6,12,24}h_.
 ```
 
 Contract every command must keep: `--dry-run` prints the intended
-`from_stage -> to_stage` transitions and writes nothing; a real run is a single
+`from_stage -> to_stage` transitions and writes nothing; a real run is an
 idempotent transition that leaves exactly one `production` doc per prefix;
-`--version` omitted means "the newest eligible document"; `MONGO_URI` is the
-only required environment variable.
+without `--id` the newest eligible document is selected and a re-run with
+nothing newer is a clean no-op; `MONGO_URI` is the only required environment
+variable (or `--mongo-uri`).
 
 ## Shadow A/B
 
@@ -119,20 +136,26 @@ served by the API:
 | Piece | Where |
 | --- | --- |
 | Shadow comparison | `model_shadow` — exactly **one document per (production, shadow) registry pair** (`model_registry` `_id`s/`version`s), updated in place, not appended per hour |
-| Candidate being shadowed | a `staging` (or `superseded`) `model_registry` doc; nothing about it changes while it is shadowed |
+| Candidate being shadowed | the newest `staging` `model_registry` doc **strictly newer** than production (`shadow_entry` filters `timestamp > production.timestamp`); an older staging doc is never a challenger |
 | Served predictions | `weather_predictions` — production only. A shadow's numbers never reach the API read path. |
 
 Semantics:
 
-- The metric is **disagreement, not accuracy**: count how often the shadow's
-  prediction differs from production's on the same `(city, source_timestamp,
-  horizon)` inputs (a tolerance band per target, e.g. °C and mm, plus the rain
-  class flip rate). Accuracy still comes from the shadow model's own
-  `model_registry.metrics` on the held-out temporal test split — a shadow run
-  cannot measure skill against the future, only divergence from the incumbent.
-- One document per pair means the comparison accumulates into a bounded set of
-  rows that `prune_models.py` / the retention policy can reason about; a new
-  deployment resets the pair doc rather than starting a new collection.
+- The metric is **disagreement, not accuracy**: for temperature it is the mean
+  and max absolute delta in °C; for rain it is the mean probability delta plus a
+  class-flip rate at the **0.5 probability threshold** (`>= 0.5` = rain). It is
+  measured on the same cached `(city, source_timestamp)` rows, and rows where
+  either model is null are excluded. Accuracy still comes from the shadow
+  model's own `model_registry.metrics` on the held-out temporal test split — a
+  shadow run cannot measure skill against the future, only divergence from the
+  incumbent.
+- Exactly **one document per (production `_id`, shadow `_id`) pair**, keyed by
+  `_id = "{production_id}_{shadow_id}"` and `replace_one(..., upsert=True)` each
+  run, so an hourly re-run updates in place. A *new* pair (a new promote or a
+  newly trained challenger) mints a **new** document; old pair docs linger until
+  `prune_models.py` removes them — either because `updated_at` is older than
+  `KEEP_SHADOW_DAYS`, or immediately because one of the referenced model ids no
+  longer exists in `model_registry`.
 - Disagreement is a *review signal*: high disagreement with better test metrics
   is the interesting case (the incumbent may have drifted); disagreement alone
   never promotes anything.
@@ -157,13 +180,20 @@ promotes implicitly and why the warning matters.
 
 - Each model is one zipped `PipelineModel`: **~0.5–2 MB**. The nightly retrain
   writes 10 models (5 horizons × 2 targets), i.e. roughly **1–2 MB/day**.
-- `scripts/prune_models.py` (`KEEP_MODELS`, default **2** per algorithm-agnostic
-  family) keeps the newest artifacts and deletes the rest **plus** their
-  `model_registry` rows. It runs after every train stage, including a failed or
-  partial one, so a bad night cannot accumulate artifacts.
+- `scripts/prune_models.py` is **stage-aware**: per algorithm-agnostic family it
+  always keeps every artifact referenced by a `production` or `superseded`
+  registry doc (production is served, superseded is rollback history), and
+  applies `KEEP_MODELS` (default **2**) only to the remaining staging/unstaged
+  artifacts, newest-first. It deletes an artifact's GridFS file and **only that
+  artifact's** `model_registry` row. It runs after every train stage, including a
+  failed or partial one, so a bad night cannot accumulate artifacts.
+- It also prunes `model_shadow`: a doc whose `(production, shadow)` pair
+  references a model id no longer in `model_registry` is deleted immediately,
+  and a pair untouched for `KEEP_SHADOW_DAYS` (default **30**) is aged out.
 - The `model_registry` index is `{model_name: 1, timestamp: -1}` — there is no
-  TTL; deletes come from `prune_models.py` only. Keep the newest-but-one so a
-  rollback target survives a run.
+  TTL; deletes come from `prune_models.py` only. Because production and
+  superseded are retained unconditionally, a rollback target survives a run
+  regardless of `KEEP_MODELS`.
 - GridFS counts against the Atlas M0 512 MB budget (see the DB row in
   `docs/handoff.md`); artifacts are the easiest axis to trim if headroom shrinks.
 - `weather_features` retention (`WEATHER_FEATURES_RETENTION_DAYS`, 180 d) is
@@ -176,7 +206,8 @@ promotes implicitly and why the warning matters.
 | `MONGO_URI` | training, inference, feature job, `promote_model.py`, `prune_models.py` | — (**required**) | Atlas connection string. Never commit or print it. `MONGO_URL` is accepted as a fallback by the Spark jobs only. |
 | `MONGO_DB` | backend only | `weather_db` | Database name the API reads. The Spark jobs hard-code `weather_db`. |
 | `MLFLOW_TRACKING_URI` | nothing (optional) | unset = MLflow off | Opt-in MLflow logging. `file://…` is ephemeral and is **not** a registry. Unset in CI on purpose. |
-| `KEEP_MODELS` | `scripts/prune_models.py` | `2` | Artifacts kept per model family. |
+| `KEEP_MODELS` | `scripts/prune_models.py` | `2` | Newest staging/unstaged artifacts kept per family; production and superseded artifacts are always kept. |
+| `KEEP_SHADOW_DAYS` | `scripts/prune_models.py` | `30` | Age after which an unrefreshed `model_shadow` pair doc is deleted (orphaned pairs are deleted sooner). |
 | `SPARK_TMP_DIR` | training, inference | `/opt/spark-tmp` | Scratch dir for the zipped/unzipped model; CI points it at the workspace. |
 | `WEATHER_FEATURES_RETENTION_DAYS` | `batch_processing.py` | `180` | `weather_features` prune window, aligned with `raw_weather`'s TTL. |
 | `GITHUB_SHA` | `ml_training.save_model` | `unknown` | Recorded as `model_registry.commit`. |
