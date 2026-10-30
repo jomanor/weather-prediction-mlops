@@ -15,6 +15,10 @@ const TONES: Record<Tone, string> = {
   obs: 'border-line-strong text-fg',
 }
 
+/**
+ * A short status chip. Tone is decorative reinforcement only — the label always
+ * carries the meaning (never colour alone).
+ */
 export function Badge({
   children,
   tone = 'neutral',
@@ -30,7 +34,7 @@ export function Badge({
     <span
       title={title}
       className={cn(
-        'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider',
+        'inline-flex items-center gap-1 rounded-control border px-2 py-1 font-mono text-badge leading-none font-medium uppercase tracking-wider',
         TONES[tone],
         className,
       )}
@@ -60,7 +64,7 @@ export function StatusDot({
     obs: 'bg-fg',
   }
   return (
-    <span className={cn('relative inline-flex h-1.5 w-1.5', className)}>
+    <span className={cn('relative inline-flex h-1.5 w-1.5', className)} aria-hidden="true">
       {pulse ? (
         <span
           className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', colors[tone])}

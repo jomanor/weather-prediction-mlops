@@ -9,14 +9,11 @@ interface PanelProps {
   flush?: boolean
 }
 
+/** The only container primitive: hairline edge, 4 px radius, 16 px padding. */
 export function Panel({ children, className, flush = false }: PanelProps) {
   return (
     <section
-      className={cn(
-        'rounded-[var(--radius-panel)] border border-line bg-panel',
-        !flush && 'p-4',
-        className,
-      )}
+      className={cn('rounded-panel border border-line bg-panel', !flush && 'p-4', className)}
     >
       {children}
     </section>
@@ -39,10 +36,12 @@ export function PanelHeader({ title, subtitle, actions, className }: PanelHeader
       )}
     >
       <div className="min-w-0">
-        <h2 className="text-[13px] font-semibold leading-tight text-fg">{title}</h2>
-        {subtitle ? <p className="mt-1 text-xs leading-tight text-fg-3">{subtitle}</p> : null}
+        <h2 className="text-title font-semibold leading-tight text-fg">{title}</h2>
+        {subtitle ? (
+          <p className="mt-1 text-body leading-tight text-fg-3">{subtitle}</p>
+        ) : null}
       </div>
-      {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
+      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </header>
   )
 }

@@ -11,7 +11,10 @@ import { cn } from '@/lib/cn'
 export function Skeleton({ className }: { className?: string }) {
   const reduced = usePrefersReducedMotion()
   return (
-    <div aria-hidden="true" className={cn('rounded bg-panel-2', !reduced && 'shimmer', className)} />
+    <div
+      aria-hidden="true"
+      className={cn('rounded-chip bg-panel-2', !reduced && 'shimmer', className)}
+    />
   )
 }
 
@@ -39,7 +42,7 @@ export function TableSkeleton({ rows = 6, className }: { rows?: number; classNam
   return (
     <div aria-hidden="true" className={cn('space-y-2 p-4', className)}>
       {Array.from({ length: rows }, (_, index) => (
-        <Skeleton key={index} className="h-6 w-full" />
+        <Skeleton key={index} className="h-8 w-full" />
       ))}
     </div>
   )
@@ -61,8 +64,12 @@ export function MapSkeleton({ className }: { className?: string }) {
 
 export function LoadingBlock({ label = 'Cargando…' }: { label?: string }) {
   return (
-    <div className="flex items-center justify-center gap-2 py-10 text-xs text-fg-3">
-      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-center justify-center gap-2 py-10 text-body text-fg-3"
+    >
+      <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
       {label}
     </div>
   )
@@ -79,10 +86,10 @@ interface StateProps {
 export function EmptyState({ icon: Icon = Inbox, title, description, action, className }: StateProps) {
   return (
     <div className={cn('flex flex-col items-center justify-center px-6 py-12 text-center', className)}>
-      <Icon className="h-5 w-5 text-fg-3" />
-      <p className="mt-3 text-sm font-medium text-fg-2">{title}</p>
+      <Icon aria-hidden="true" className="h-5 w-5 text-fg-3" />
+      <p className="mt-3 text-value font-medium text-fg-2">{title}</p>
       {description ? (
-        <p className="mt-1 max-w-sm text-xs leading-relaxed text-fg-3">{description}</p>
+        <p className="mt-1 max-w-sm text-body leading-relaxed text-fg-3">{description}</p>
       ) : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>

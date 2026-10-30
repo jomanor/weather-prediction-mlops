@@ -55,7 +55,7 @@ export function SeriesLegend({ items, className, onToggle, label }: SeriesLegend
                 strokeLinecap="round"
               />
             </svg>
-            <span className={cn('text-[11px]', active ? 'text-fg-2' : 'text-fg-3 line-through')}>
+            <span className={cn('text-label', active ? 'text-fg-2' : 'text-fg-3 line-through')}>
               {item.label}
             </span>
           </>
@@ -69,15 +69,15 @@ export function SeriesLegend({ items, className, onToggle, label }: SeriesLegend
                 aria-pressed={active}
                 onClick={() => onToggle(id)}
                 className={cn(
-                  'flex items-center gap-1.5 rounded-[3px] px-1 py-0.5 text-left transition-colors',
-                  'hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                  'motion-ui flex items-center gap-2 rounded-chip px-1 py-1 text-left',
+                  'hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent',
                   !active && 'opacity-80',
                 )}
               >
                 {content}
               </button>
             ) : (
-              <span className="flex items-center gap-1.5 px-1 py-0.5">{content}</span>
+              <span className="flex items-center gap-2 px-1 py-1">{content}</span>
             )}
           </li>
         )

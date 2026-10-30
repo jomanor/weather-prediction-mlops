@@ -3,7 +3,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -26,10 +25,10 @@ import {
 } from '@/lib/chart-theme'
 import {
   formatDateTimeMs,
+  formatError,
   formatSigned,
-  formatSignedWithUnit,
   isNum,
-  temperatureUnit,
+  metricUnit,
 } from '@/lib/format'
 
 interface ResidualChartProps {
@@ -38,7 +37,12 @@ interface ResidualChartProps {
   palette: ChartPalette
 }
 
-/** Model error per hour, diverging around zero, on the shared time axis. */
+/**
+ * Model error per hour, diverging around zero, on the shared time axis.
+ *
+ * One hue for both signs: the zero rule and the signed value carry direction,
+ * so the chart never relies on a red/green pair to say which way the error went.
+ */
 export function ResidualChart({ points, height = 160, palette }: ResidualChartProps) {
   const { units } = usePreferences()
   const { domain } = useChartSync()
@@ -66,7 +70,7 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
     }
   }, [points, units])
 
-  const unitLabel = temperatureUnit(units)
+  const unitLabel = metricUnit('temperature', units)
   const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
   const axisProps = chartAxisProps(palette)
 
@@ -109,22 +113,19 @@ export function ResidualChart({ points, height = 160, palette }: ResidualChartPr
             <ChartTooltip
               title={(label) => formatDateTimeMs(Number(label))}
               format={(entry) =>
-                entry.value === null
-                  ? '—'
-                  : formatSignedWithUnit(entry.value as number, unitLabel, 1)
+                entry.value === null ? '—' : formatError(entry.value as number, unitLabel)
               }
             />
           }
         />
-        <Bar dataKey="residual" name={`Error (observado − modelo, ${unitLabel})`} isAnimationActive={false}>
-          {data.map((row, index) => (
-            <Cell
-              key={index}
-              fill={row.residual !== null && row.residual >= 0 ? palette.bad : palette.accent}
-              fillOpacity={0.75}
-            />
-          ))}
-        </Bar>
+        <Bar
+          dataKey="residual"
+          name={`Error (observado − modelo, ${unitLabel})`}
+          fill={palette.model}
+          fillOpacity={0.75}
+          isAnimationActive={false}
+          maxBarSize={14}
+        />
       </BarChart>
     </ResponsiveContainer>
   )

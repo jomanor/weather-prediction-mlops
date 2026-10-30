@@ -21,15 +21,16 @@ import {
   chartAxisProps,
   chartGridProps,
   chartLineCursor,
+  seriesStyle,
   type ChartPalette,
 } from '@/lib/chart-theme'
 import {
   convertTemperature,
   formatDateTimeMs,
-  formatDegrees,
-  formatWithUnit,
+  formatMetric,
+  formatMetricTick,
   isNum,
-  temperatureUnit,
+  metricUnit,
 } from '@/lib/format'
 
 interface BenchmarkChartProps {
@@ -68,7 +69,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
     }
   }, [points, units])
 
-  const unitLabel = temperatureUnit(units)
+  const unitLabel = metricUnit('temperature', units)
   const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain ?? ['dataMin', 'dataMax']
   const axisProps = chartAxisProps(palette)
 
@@ -99,7 +100,7 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
         <YAxis
           domain={valueDomain}
           width={46}
-          tickFormatter={(value: number) => formatDegrees(value, 0)}
+          tickFormatter={(value: number) => formatMetricTick(value, 'temperature')}
           label={chartAxisLabel(palette, unitLabel, 'insideLeft')}
           {...axisProps}
         />
@@ -110,40 +111,35 @@ export function BenchmarkChart({ points, height = 280, palette }: BenchmarkChart
               format={(entry) =>
                 entry.value === null
                   ? '—'
-                  : formatWithUnit(entry.value as number, unitLabel, 1)
+                  : formatMetric(entry.value as number, 'temperature', units)
               }
             />
           }
           cursor={chartLineCursor(palette)}
         />
         <Line
-          type="monotone"
+          type="linear"
           dataKey="observed"
           name="Observado"
-          stroke={palette.observed}
-          strokeWidth={1.5}
+          {...seriesStyle('observed', palette)}
           dot={false}
           connectNulls={false}
           isAnimationActive={false}
         />
         <Line
-          type="monotone"
+          type="linear"
           dataKey="model"
           name="Spark GBT"
-          stroke={palette.model}
-          strokeWidth={1.25}
-          strokeDasharray="6 3"
+          {...seriesStyle('model', palette)}
           dot={false}
           connectNulls={false}
           isAnimationActive={false}
         />
         <Line
-          type="monotone"
+          type="linear"
           dataKey="aemet"
           name="AEMET"
-          stroke={palette.aemet}
-          strokeWidth={1.5}
-          strokeDasharray="2 3"
+          {...seriesStyle('aemet', palette)}
           dot={false}
           connectNulls={false}
           isAnimationActive={false}

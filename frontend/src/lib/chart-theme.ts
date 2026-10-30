@@ -15,6 +15,8 @@ export interface ChartPalette {
   warn: string
   bad: string
   accent: string
+  /** Quantitative rain magnitude (`--rain-3`); never a series identity. */
+  rain: string
 }
 
 const FALLBACK: ChartPalette = {
@@ -32,6 +34,7 @@ const FALLBACK: ChartPalette = {
   warn: '#e0a11a',
   bad: '#f2604f',
   accent: '#48b7f3',
+  rain: '#4ea3d4',
 }
 
 function readVar(name: string, fallback: string): string {
@@ -72,20 +75,52 @@ export function readChartPalette(isDark: boolean): ChartPalette {
     warn: readVar('--warn', FALLBACK.warn),
     bad: readVar('--bad', FALLBACK.bad),
     accent: readVar('--accent', FALLBACK.accent),
+    rain: readVar('--rain-3', FALLBACK.rain),
   }
 }
 
-/** One margin for line/area charts; bar charts add room for their labels. */
+/**
+ * Chart conventions — one source for every plot in the app.
+ *
+ *  - time on x, oldest → newest, linear (no splines: honest gaps beat invented
+ *    curvature), `connectNulls={false}` on every series
+ *  - one margin, one tick font/size, one dotted horizontal grid
+ *  - series identity is fixed: observed solid, model `4 3`, AEMET `2 3`
+ *  - the unit lives in the axis title and in the tooltip, never in the ticks
+ */
 export const CHART_MARGIN = { top: 8, right: 10, bottom: 0, left: 0 } as const
 
 /** Axis tick type shared by every chart, so the scale reads as one system. */
-const TICK_FONT = 'JetBrains Mono Variable, monospace'
+export const CHART_FONT = 'JetBrains Mono Variable, monospace'
+
+/** Tick size is the 10 px step of the type scale, not a chart-local value. */
+export const CHART_TICK_SIZE = 10
+
+/** Fixed dash per series identity. Observed stays solid. */
+export const SERIES_DASH = {
+  observed: undefined,
+  model: '4 3',
+  aemet: '2 3',
+} as const
+
+export const SERIES_WIDTH = 1.5
+
+export type SeriesKey = 'observed' | 'model' | 'aemet'
+
+/** Stroke props for one series identity, identical in every chart. */
+export function seriesStyle(key: SeriesKey, palette: ChartPalette) {
+  return {
+    stroke: palette[key],
+    strokeWidth: SERIES_WIDTH,
+    strokeDasharray: SERIES_DASH[key],
+  }
+}
 
 /** Stroke/tick props for a Recharts axis, read from the design tokens. */
-export function chartAxisProps(palette: ChartPalette) {
+export function chartAxisProps(palette: ChartPalette, tickSize: number = CHART_TICK_SIZE) {
   return {
     stroke: palette.axis,
-    tick: { fill: palette.textMuted, fontSize: 10, fontFamily: TICK_FONT },
+    tick: { fill: palette.textMuted, fontSize: tickSize, fontFamily: CHART_FONT },
     tickLine: false as const,
   }
 }
@@ -101,8 +136,8 @@ export function chartAxisLabel(
     position,
     angle: -90,
     fill: palette.textMuted,
-    fontSize: 10,
-    fontFamily: TICK_FONT,
+    fontSize: CHART_TICK_SIZE,
+    fontFamily: CHART_FONT,
   }
 }
 

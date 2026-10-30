@@ -6,16 +6,16 @@ type Variant = 'primary' | 'outline' | 'ghost' | 'danger'
 type Size = 'sm' | 'md' | 'icon'
 
 const VARIANTS: Record<Variant, string> = {
-  primary:
-    'bg-accent text-accent-fg hover:brightness-110 active:brightness-95 border border-transparent',
+  primary: 'border border-transparent bg-accent text-accent-fg hover:bg-accent/90 active:bg-accent/80',
   outline: 'border border-line bg-panel text-fg hover:border-line-strong hover:bg-panel-2',
   ghost: 'border border-transparent text-fg-2 hover:bg-panel-2 hover:text-fg',
   danger: 'border border-bad/40 text-bad hover:bg-bad/10',
 }
 
+/* Padding and gaps stay on the 4 px grid; heights are the control scale. */
 const SIZES: Record<Size, string> = {
-  sm: 'h-7 px-2.5 text-xs gap-1.5',
-  md: 'h-9 px-3.5 text-sm gap-2',
+  sm: 'h-7 gap-1 px-3 text-body',
+  md: 'h-9 gap-2 px-4 text-value',
   icon: 'h-8 w-8 justify-center',
 }
 
@@ -36,7 +36,8 @@ export function Button({
     <button
       type={type}
       className={cn(
-        'inline-flex items-center rounded-[3px] border border-line bg-panel font-medium transition-colors hover:bg-panel-2',
+        'motion-ui inline-flex items-center rounded-control border font-medium',
+        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
         'disabled:pointer-events-none disabled:opacity-45',
         VARIANTS[variant],
         SIZES[size],

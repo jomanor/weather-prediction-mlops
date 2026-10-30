@@ -14,11 +14,16 @@ interface PageHeaderProps {
 export function PageHeader({ title, description, actions, className }: PageHeaderProps) {
   return (
     <header
-      className={cn('flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-4 py-5 sm:px-6', className)}
+      className={cn(
+        'flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-4 py-5 sm:px-6',
+        className,
+      )}
     >
       <div className="min-w-0">
-        <h1 className="text-lg font-semibold leading-tight text-fg">{title}</h1>
-        {description ? <p className="mt-0.5 text-[13px] leading-snug text-fg-2">{description}</p> : null}
+        <h1 className="text-page font-semibold leading-tight text-fg">{title}</h1>
+        {description ? (
+          <p className="mt-1 text-title leading-snug text-fg-2">{description}</p>
+        ) : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </header>
