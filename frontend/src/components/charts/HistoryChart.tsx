@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Minus, Plus } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Area,
   Bar,
@@ -12,12 +13,14 @@ import {
 } from 'recharts'
 
 import type { Prediction, WeatherPoint } from '@/api/schemas'
+import { unionDomain } from '@/components/charts/chart-zoom'
 import { buildHistoryChartData, type HistoryChartRow } from '@/components/charts/history-rows'
-import { ChartBrush } from '@/components/charts/ChartBrush'
 import { ChartTooltip, type TooltipEntry } from '@/components/charts/ChartTooltip'
 import { SeriesLegend, type LegendItem } from '@/components/charts/SeriesLegend'
+import { useChartZoom } from '@/components/charts/useChartZoom'
 import { usePreferences } from '@/app/preferences'
-import { useChartSync } from '@/hooks/useChartSync'
+import { useChartSync, type TimeDomain } from '@/hooks/useChartSync'
+import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/Feedback'
 import {
   CHART_MARGIN,
@@ -40,6 +43,11 @@ import {
 export type HistoryVariable = 'temperature' | 'precipitation' | 'wind'
 
 type SeriesKey = 'temperature' | 'model' | 'precipitation' | 'band' | 'wind'
+
+/* Y-axis gutters. The same widths feed the pointer→time mapping, so a wheel
+   notch zooms around the cursor instead of around the axis edge. */
+const AXIS_LEFT = 46
+const AXIS_RIGHT_RAIN = 42
 
 interface HistoryChartProps {
   points: WeatherPoint[]
@@ -68,7 +76,7 @@ export function HistoryChart({
   intervalLevel = null,
 }: HistoryChartProps) {
   const { units } = usePreferences()
-  const { domain } = useChartSync()
+  const { domain, resetToken, setDomain } = useChartSync()
 
   const {
     rows: data,
@@ -96,6 +104,57 @@ export function HistoryChart({
     () => data.some((row) => row.precipitation !== null),
     [data],
   )
+
+  /* Zoom state. `bounds` is the widest reachable window — the page window
+     (which can end before the last forecast row) unioned with the data extent —
+     latched when the shared window resets so zooming never shrinks the range
+     the user can zoom back out to. `zoomDomain` is the user's selection; it is
+     local because the shared domain is also written by the page window. */
+  const dataBounds = useMemo<TimeDomain | null>(
+    () => (data.length > 0 ? [data[0].ts, data[data.length - 1].ts] : null),
+    [data],
+  )
+  const [base, setBase] = useState<TimeDomain | null>(null)
+  const [zoomDomain, setZoomDomain] = useState<TimeDomain | null>(null)
+
+  const dataStart = dataBounds ? dataBounds[0] : null
+  const dataEnd = dataBounds ? dataBounds[1] : null
+  useEffect(() => {
+    /* `domain` is read when the window resets, not tracked: a zoom writes the
+       shared domain too, and re-latching on it would defeat the zoom. */
+    setBase(unionDomain(domain, dataBounds))
+    setZoomDomain(null)
+  }, [resetToken, dataStart, dataEnd])
+
+  /* Union with the data extent covers the forecast rows that run past the
+     page window, so the last interval is never clipped; before the latch
+     effect runs, the same expression is the correct initial view. */
+  const bounds = base ?? unionDomain(domain, dataBounds)
+  const view = zoomDomain ?? bounds
+
+  const insets = useMemo(
+    () => ({
+      left: AXIS_LEFT + CHART_MARGIN.left,
+      right: (variable === 'temperature' ? AXIS_RIGHT_RAIN : 0) + CHART_MARGIN.right,
+    }),
+    [variable],
+  )
+
+  /* The chart owns the view and publishes it, so every chart on the page that
+     reads the shared domain (benchmark, residuals) follows the same window. */
+  const publishZoom = (next: TimeDomain | null) => {
+    setZoomDomain(next)
+    setDomain(next)
+  }
+  const zoom = useChartZoom({ view, bounds, onChange: publishZoom, insets })
+
+  /* A different series set is a different view: drop the zoom with it. */
+  const previousVariable = useRef(variable)
+  useEffect(() => {
+    if (previousVariable.current === variable) return
+    previousVariable.current = variable
+    publishZoom(null)
+  }, [variable])
 
   const seriesKeys: SeriesKey[] =
     variable === 'temperature'
@@ -149,7 +208,8 @@ export function HistoryChart({
     active: isVisible((item.id ?? 'temperature') as SeriesKey),
   }))
 
-  if (data.length === 0) {
+  /* `view`/`bounds` are only null while there is no data at all. */
+  if (!bounds || !view) {
     return (
       <div style={{ minHeight: height }} className="flex items-center justify-center">
         <EmptyState
@@ -159,13 +219,6 @@ export function HistoryChart({
       </div>
     )
   }
-
-  /* The synced window ends at the last observation; extend it so the final
-     forecast interval is not clipped off the right edge. */
-  const lastTs = data[data.length - 1].ts
-  const xDomain: [number, number] | ['dataMin', 'dataMax'] = domain
-    ? [domain[0], Math.max(domain[1], lastTs)]
-    : ['dataMin', 'dataMax']
 
   const axisProps = chartAxisProps(palette)
 
@@ -187,7 +240,52 @@ export function HistoryChart({
 
   return (
     <div className="space-y-2">
-      <div style={{ height }}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
+        <div className="flex items-center gap-1" role="group" aria-label="Zoom del gráfico">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-11 w-11"
+            aria-label="Alejar"
+            onClick={zoom.zoomOut}
+            disabled={!zoom.zoomed}
+          >
+            <Minus className="h-4 w-4" aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-11 w-11"
+            aria-label="Acercar"
+            onClick={zoom.zoomIn}
+            disabled={!zoom.canZoomIn}
+          >
+            <Plus className="h-4 w-4" aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-11 px-3"
+            onClick={zoom.reset}
+            disabled={!zoom.zoomed}
+          >
+            Restablecer
+          </Button>
+        </div>
+        <p className="text-label text-fg-3">
+          Rueda para zoom · arrastra para mover · doble clic para restablecer
+        </p>
+      </div>
+
+      {/* Pointer surface: touch-action pan-y keeps the page scrolling
+          vertically on touch, horizontal drags pan the chart. */}
+      <div
+        ref={zoom.surfaceRef}
+        data-testid="chart-surface"
+        className="cursor-grab touch-pan-y select-none active:cursor-grabbing"
+        style={{ height }}
+        {...zoom.handlers}
+      >
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={CHART_MARGIN}>
             <CartesianGrid {...chartGridProps(palette)} />
@@ -195,7 +293,8 @@ export function HistoryChart({
               dataKey="ts"
               type="number"
               scale="time"
-              domain={xDomain}
+              domain={view}
+              allowDataOverflow
               minTickGap={48}
               tickFormatter={(value: number) => formatDateTimeMs(value)}
               {...axisProps}
@@ -206,7 +305,7 @@ export function HistoryChart({
                 <YAxis
                   yAxisId="value"
                   domain={temperatureDomain}
-                  width={46}
+                  width={AXIS_LEFT}
                   tickFormatter={(value: number) => formatMetricTick(value, 'temperature')}
                   label={chartAxisLabel(palette, unitLabel, 'insideLeft')}
                   {...axisProps}
@@ -215,7 +314,7 @@ export function HistoryChart({
                   yAxisId="rain"
                   orientation="right"
                   domain={[0, precipitationMax]}
-                  width={42}
+                  width={AXIS_RIGHT_RAIN}
                   tickFormatter={(value: number) => formatMetricTick(value, 'precipitation')}
                   label={chartAxisLabel(palette, metricUnit('precipitation'), 'insideRight')}
                   {...axisProps}
@@ -225,7 +324,7 @@ export function HistoryChart({
               <YAxis
                 yAxisId="value"
                 domain={variable === 'precipitation' ? [0, precipitationMax] : windDomain}
-                width={46}
+                width={AXIS_LEFT}
                 tickFormatter={(value: number) => formatMetricTick(value, variable)}
                 label={chartAxisLabel(palette, metricUnit(variable, units), 'insideLeft')}
                 {...axisProps}
@@ -350,8 +449,6 @@ export function HistoryChart({
                 isAnimationActive={false}
               />
             ) : null}
-
-            <ChartBrush rows={data} palette={palette} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
