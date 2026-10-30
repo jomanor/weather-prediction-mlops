@@ -1,17 +1,18 @@
 import { AlertTriangle, Info } from 'lucide-react'
 
 import type { City } from '@/api/schemas'
+import { isOutsideAemetCoverage } from '@/lib/aemet-coverage'
 import { cn } from '@/lib/cn'
-import { isNum } from '@/lib/format'
+
+/* Re-exported for the surfaces that already import the rule from here. */
+export { isOutsideAemetCoverage }
 
 /**
  * AEMET OpenData only covers Spain. A station on the American continent is not
  * an outage, so the copy must say so and never imply data is merely missing.
+ * Sistema hides those stations before rendering, but the notice stays for any
+ * future uncovered station that still reaches the benchmark.
  */
-export function isOutsideAemetCoverage(city?: Pick<City, 'longitude'>): boolean {
-  return Boolean(city && isNum(city.longitude) && city.longitude < -20)
-}
-
 interface AemetNoticeProps {
   available: boolean
   error?: string | null

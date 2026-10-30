@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -27,7 +27,13 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/queries', () => ({
-  useCities: () => ({ data: [{ name: 'Madrid' }, { name: 'Sevilla' }] }),
+  useCities: () => ({
+    data: [
+      { name: 'Madrid', latitude: 40.42, longitude: -3.7 },
+      { name: 'Sevilla', latitude: 37.39, longitude: -5.98 },
+      { name: 'Pasadena', latitude: 34.15, longitude: -118.14 },
+    ],
+  }),
 }))
 
 vi.mock('@/features/station/queries', () => ({
@@ -123,6 +129,14 @@ describe('StationPage city validation', () => {
   it('keeps a known URL city', () => {
     renderPage('?city=Sevilla')
     expect(screen.getByLabelText('Estación')).toHaveValue('Sevilla')
+  })
+
+  it('keeps the US station selectable: hiding it is a Sistema-only rule', () => {
+    renderPage('?city=Pasadena')
+    expect(screen.getByLabelText('Estación')).toHaveValue('Pasadena')
+    const select = screen.getByLabelText('Estación')
+    expect(within(select).getByRole('option', { name: 'Pasadena' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Pasadena' })).toBeInTheDocument()
   })
 })
 

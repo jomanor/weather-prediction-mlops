@@ -43,12 +43,14 @@ vi.mock('@/api/client', () => ({
       return [
         { name: 'Madrid', latitude: 40.42, longitude: -3.7 },
         { name: 'Sevilla', latitude: 37.39, longitude: -5.98 },
+        /* The US station stays on Resumen; only Sistema filters it out. */
+        { name: 'Pasadena', latitude: 34.15, longitude: -118.14 },
       ]
     }
     if (path === '/weather/current') {
       return {
         generated_at: new Date(NOW).toISOString(),
-        stations: [station('Madrid', 5), station('Sevilla', 65)],
+        stations: [station('Madrid', 5), station('Sevilla', 65), station('Pasadena', 5)],
       }
     }
     if (path === '/map/stations') return null
@@ -105,9 +107,15 @@ describe('Resumen mount budget', () => {
 describe('Resumen content', () => {
   it('shows one freshness line for the observed network', async () => {
     renderOverview()
-    expect(await screen.findByText(/2 estaciones · actualizado a las \d{2}:\d{2}/)).toBeInTheDocument()
+    expect(await screen.findByText(/3 estaciones · actualizado a las \d{2}:\d{2}/)).toBeInTheDocument()
     /* Fresh data, so no stale suffix. */
     expect(screen.queryByText(/datos con más de 12 h/)).not.toBeInTheDocument()
+  })
+
+  it('keeps Pasadena in the station list and its link', async () => {
+    renderOverview()
+    const link = await screen.findByRole('link', { name: 'Pasadena' })
+    expect(link).toHaveAttribute('href', '/stations?city=Pasadena')
   })
 
   it('does not render the data-quality meter, a city manager or the MAE', () => {
