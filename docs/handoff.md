@@ -11,7 +11,7 @@ live in `docs/batch4-contract.md`.
 | --- | --- | --- |
 | Repo | `jomanor/weather-prediction-mlops`, branch `main` | Public repo → standard GitHub Actions minutes are unlimited. |
 | API | Render service `meteoml-api`, deployed from `main` | `render.yaml`: docker, `backend/Dockerfile`, free plan, `autoDeploy: true`, health `GET /api/health`. Dashboard branch was the trap that caused stale deploys; it is now `main`. A deploy hook exists in the Render dashboard to force a deploy; the key is a secret, so it must never be committed to this public repo. |
-| Frontend | Netlify site `weather-mlops-1787759329` | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing must stay enabled. |
+| Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing must stay enabled. |
 | DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** (includes Pasadena). Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL. Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
 | Cron | GitHub Actions | `ingest.yml` declared hourly `:50` (see the live caveat below); `ml-pipeline.yml` inference hourly `:05`, features `20 */6`, train nightly `35 2`; `backfill.yml` manual. |
 
@@ -75,7 +75,7 @@ Do not trust the dashboard. Compare the served asset hashes with a local build:
 
 ```bash
 cd frontend && npm run build && ls dist/assets/*.js | xargs -n1 basename
-curl -s https://weather-mlops-1787759329.netlify.app/ | grep -oE 'assets/[A-Za-z0-9_.-]+\.js' | sort -u
+curl -s https://meteoml.netlify.app/ | grep -oE 'assets/[A-Za-z0-9_.-]+\.js' | sort -u
 ```
 
 Render: `GET /api/health/ready` predates Batch 3, so a 200 does **not** prove the new code
@@ -341,7 +341,7 @@ the cut list live in `docs/app-rethink.md`.
   horizon); the card picks the selected horizon from it; the chart plots the run at
   `source_timestamp + horizon_hours`. Verified: the 48 h chart now spans observations + the +24 h
   forecast, the model line is in the future, and the card reads the latest run.
-- **Netlify**: `weather-mlops-1787759329.netlify.app` returns Netlify's "Site not found" (404) while
+- **Netlify**: `meteoml.netlify.app` returns Netlify's "Site not found" (404) while
   Netlify status is operational and Render is 200. The frontend fixes above were verified against a
   local Vite dev server proxying the live API. The deployed URL must be re-confirmed before trusting
   a live check.
