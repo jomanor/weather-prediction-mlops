@@ -88,6 +88,15 @@ const STATION_POINTS_LAYER = 'meteoml-stations-points'
 const CLUSTERS_LAYER = 'meteoml-stations-clusters'
 const CLUSTER_COUNT_LAYER = 'meteoml-stations-cluster-count'
 const FLAT_BUILDING_LAYERS = ['building', 'building-top']
+
+/* Carto's vector styles rename their source and building layer between
+ * releases: the current tiles ship `protomaps` / `buildings`, the older ones
+ * `carto` / `building`. Both pairs are checked so a style refresh upstream
+ * cannot silently turn the 3D toggle into a no-op. */
+const BUILDING_SOURCES = [
+  { source: 'protomaps', sourceLayer: 'buildings' },
+  { source: 'carto', sourceLayer: 'building' },
+] as const
 const UNCLUSTERED_FILTER: FilterSpecification = ['!', ['has', 'point_count']]
 
 /** Map transitions follow the OS motion preference. */
@@ -310,24 +319,46 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
           if (map.getPitch() > 1) map.easeTo({ pitch: 0, duration: motionDuration(600) })
         }
 
-        /* Building extrusions ride the vector tiles the basemap already ships
-         * (render_height / render_min_height). The raster relief style has no
-         * `carto` source, so the toggle is a no-op there. */
-        if (!map.getLayer(BUILDINGS_LAYER) && map.getSource('carto')) {
-          map.addLayer({
-            id: BUILDINGS_LAYER,
-            type: 'fill-extrusion',
-            source: 'carto',
-            'source-layer': 'building',
-            minzoom: 14,
-            paint: {
-              'fill-extrusion-color': isDark ? MAP_PAINT.building.dark : MAP_PAINT.building.light,
-              'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
-              'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-              'fill-extrusion-opacity': 0.92,
-              'fill-extrusion-vertical-gradient': true,
+        /* Building extrusions ride the vector tiles the basemap already ships.
+         * Current Carto styles expose them as `protomaps`/`buildings` with a
+         * `height` property; older ones used `carto`/`building` and
+         * `render_height`. The raster relief style has no vector source, so the
+         * toggle is a no-op there and the flat layers stay untouched. */
+        const buildingSource = BUILDING_SOURCES.find((candidate) =>
+          map.getSource(candidate.source),
+        )
+        if (buildingSource && !map.getLayer(BUILDINGS_LAYER)) {
+          /* Insert under the basemap's labels, not above them. */
+          const firstSymbolId = map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id
+          map.addLayer(
+            {
+              id: BUILDINGS_LAYER,
+              type: 'fill-extrusion',
+              source: buildingSource.source,
+              'source-layer': buildingSource.sourceLayer,
+              minzoom: 14,
+              paint: {
+                'fill-extrusion-color': isDark
+                  ? MAP_PAINT.building.dark
+                  : MAP_PAINT.building.light,
+                'fill-extrusion-height': [
+                  'coalesce',
+                  ['get', 'height'],
+                  ['get', 'render_height'],
+                  6,
+                ],
+                'fill-extrusion-base': [
+                  'coalesce',
+                  ['get', 'min_height'],
+                  ['get', 'render_min_height'],
+                  0,
+                ],
+                'fill-extrusion-opacity': 0.92,
+                'fill-extrusion-vertical-gradient': true,
+              },
             },
-          })
+            firstSymbolId,
+          )
         }
         if (map.getLayer(BUILDINGS_LAYER)) {
           map.setLayoutProperty(
@@ -335,10 +366,12 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
             'visibility',
             mapLayers.buildings3d ? 'visible' : 'none',
           )
-        }
-        for (const flat of FLAT_BUILDING_LAYERS) {
-          if (!map.getLayer(flat)) continue
-          map.setLayoutProperty(flat, 'visibility', mapLayers.buildings3d ? 'none' : 'visible')
+          /* Only hide the flat footprints once the extrusion exists; otherwise
+           * a basemap change would leave the city with no buildings at all. */
+          for (const flat of FLAT_BUILDING_LAYERS) {
+            if (!map.getLayer(flat)) continue
+            map.setLayoutProperty(flat, 'visibility', mapLayers.buildings3d ? 'none' : 'visible')
+          }
         }
 
         await ensureMapIcons(map)

@@ -10,6 +10,8 @@ import { StationMap } from '@/components/map/StationMap'
 const mocks = vi.hoisted(() => ({
   addSource: vi.fn(),
   addLayer: vi.fn(),
+  /* Toggled per test: false models the raster relief basemap (no vector tiles). */
+  vectorBasemap: { value: true },
 }))
 
 vi.mock('@/components/map/weather-icons', () => ({
@@ -21,7 +23,11 @@ vi.mock('@/components/map/weather-icons', () => ({
 vi.mock('maplibre-gl', () => {
   class FakeMap {
     layers = new Set<string>()
-    sources = new Map<string, unknown>()
+    /* The Carto styles the app ships expose their vector tiles as `protomaps`;
+       the relief basemap has no vector source at all. */
+    sources = new Map<string, unknown>(
+      mocks.vectorBasemap.value ? [['protomaps', {}]] : [],
+    )
     constructor(_options: unknown) {}
     addControl() {}
     on() {}
@@ -42,9 +48,12 @@ vi.mock('maplibre-gl', () => {
       mocks.addSource(id, spec)
       this.sources.set(id, {})
     }
-    addLayer(layer: { id: string }) {
-      mocks.addLayer(layer)
+    addLayer(layer: { id: string }, beforeId?: string) {
+      mocks.addLayer(layer, beforeId)
       this.layers.add(layer.id)
+    }
+    getStyle() {
+      return { layers: [{ id: 'watername', type: 'symbol' }] }
     }
     setLayoutProperty() {}
     setTerrain() {}
@@ -124,6 +133,45 @@ function renderMap() {
     </PreferencesProvider>,
   )
 }
+
+describe('StationMap 3D buildings', () => {
+  it('extrudes the Carto buildings source-layer with its height field', async () => {
+    renderMap()
+    await waitFor(() => expect(mocks.addLayer).toHaveBeenCalled())
+
+    const call = mocks.addLayer.mock.calls.find(
+      ([layer]) => (layer as { id?: string }).id === 'meteoml-buildings-3d',
+    )
+    expect(call).toBeTruthy()
+    const [layer, beforeId] = call as [Record<string, unknown>, string | undefined]
+    expect(layer.source).toBe('protomaps')
+    expect(layer['source-layer']).toBe('buildings')
+    expect(layer.minzoom).toBe(14)
+    expect((layer.paint as Record<string, unknown>)['fill-extrusion-height']).toEqual([
+      'coalesce',
+      ['get', 'height'],
+      ['get', 'render_height'],
+      6,
+    ])
+    /* Inserted under the basemap labels, not on top of them. */
+    expect(beforeId).toBe('watername')
+  })
+
+  it('leaves the raster relief basemap without a 3D layer', async () => {
+    mocks.vectorBasemap.value = false
+    try {
+      renderMap()
+      await waitFor(() => expect(mocks.addSource).toHaveBeenCalled())
+      expect(
+        mocks.addLayer.mock.calls.some(
+          ([layer]) => (layer as { id?: string }).id === 'meteoml-buildings-3d',
+        ),
+      ).toBe(false)
+    } finally {
+      mocks.vectorBasemap.value = true
+    }
+  })
+})
 
 describe('StationMap cluster source (U5)', () => {
   it('adds the stations as a clustered GeoJSON source', async () => {
