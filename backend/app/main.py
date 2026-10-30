@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.cache import TTLCache
 from app.core.config import Settings, get_settings
+from app.core.errors import register_error_handlers
 from app.core.logging import RequestContextMiddleware, configure_logging
 from app.db.mongo import create_client, ensure_indexes, ping
 from app.repositories.city_repo import seed_default_cities
@@ -21,6 +22,15 @@ from app.services.aemet import AemetService
 from app.services.geo import GeocodingService
 
 logger = logging.getLogger(__name__)
+
+#: Canonical mount. Batch 5 R6 froze ``/api/v1`` as the versioned surface every
+#: client should use from now on.
+API_V1_PREFIX = "/api/v1"
+#: Legacy alias, served by the same route objects. It stays until a later batch
+#: removes it; Render's ``healthCheckPath`` is ``/api/health`` and the Netlify
+#: edge proxy plus today's frontend both consume ``/api/*``, so dropping it is a
+#: coordinated change, not a deploy detail.
+API_LEGACY_PREFIX = "/api"
 
 #: Bound on awaiting the background index/seed task during shutdown. A slow
 #: ``create_index`` on a free-tier Atlas cluster must not hold the process open
@@ -40,6 +50,24 @@ async def _prepare_database(db) -> None:
     except Exception:  # noqa: BLE001 - logged loudly, service keeps serving
         logger.exception("ensure_indexes failed; continuing without guaranteed indexes")
     await seed_default_cities(db)
+
+
+def _api_routes() -> APIRouter:
+    """Every application route, unversioned.
+
+    One aggregate router mounted twice, so the two prefixes can never drift
+    apart; the handlers themselves know nothing about the prefix.
+    """
+    api = APIRouter()
+    api.include_router(health.router)
+    api.include_router(cities.router)
+    api.include_router(weather.router)
+    api.include_router(map_router)
+    api.include_router(predictions.router)
+    api.include_router(benchmark.router)
+    api.include_router(models.router)
+    api.include_router(analytics.router)
+    return api
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -108,7 +136,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # future multi-app embedding never share state across instances.
     app.state.ttl_cache = TTLCache()
 
-    app.add_middleware(RequestContextMiddleware)
+    # Order matters: middleware added last is outermost. RequestContext must wrap
+    # CORS so that preflights are logged too and so the id/access line covers
+    # every response. X-Request-Id is in ``expose_headers`` for the same reason
+    # ETag is: the frontend is cross-origin and must be able to read it.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
@@ -117,19 +148,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
         # The frontend is cross-origin (Netlify -> Render); without this JS
         # cannot read the ETag or show the X-Data-Age-Seconds freshness badge.
-        expose_headers=["ETag", "Cache-Control", "X-Data-Age-Seconds"],
+        expose_headers=["ETag", "Cache-Control", "X-Data-Age-Seconds", "X-Request-Id"],
     )
+    app.add_middleware(RequestContextMiddleware)
 
-    api = APIRouter(prefix="/api")
-    api.include_router(health.router)
-    api.include_router(cities.router)
-    api.include_router(weather.router)
-    api.include_router(map_router)
-    api.include_router(predictions.router)
-    api.include_router(benchmark.router)
-    api.include_router(models.router)
-    api.include_router(analytics.router)
-    app.include_router(api)
+    register_error_handlers(app)
+
+    api = _api_routes()
+    app.include_router(api, prefix=API_V1_PREFIX)
+    # Legacy alias, marked deprecated in the OpenAPI schema. Same route objects;
+    # ``/api/health`` keeps answering 200 because Render's health check depends
+    # on it.
+    app.include_router(api, prefix=API_LEGACY_PREFIX, deprecated=True)
 
     return app
 

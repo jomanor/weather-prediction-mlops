@@ -1,11 +1,16 @@
 """Single-process TTL cache + HTTP validators (ETag / Cache-Control / 304).
 
 The API runs on exactly one Render instance, so there is no second process to
-coordinate with: the cache is a plain ``dict`` with an expiry epoch per entry
-and no eviction, locking or invalidation bus. Explicitness matters here — the
-absence of thread-safety is deliberate, not an oversight. FastAPI executes all
-handlers for a given app on a single event loop, so no lock is needed; if the
-deployment ever grows a second worker or a thread pool, this has to change.
+coordinate with: the cache is an ``OrderedDict`` with an expiry epoch per entry
+and no locking or invalidation bus. Explicitness matters here — the absence of
+thread-safety is deliberate, not an oversight. FastAPI executes all handlers for
+a given app on a single event loop, so no lock is needed; if the deployment ever
+grows a second worker or a thread pool, this has to change.
+
+Eviction is LRU with a hard entry bound. Keys are partly caller-controlled (a
+``city`` path segment), so without the bound a client walking names would grow
+the process map without limit on a memory-constrained free instance. Both a
+``get`` hit and a ``set`` mark an entry as most recently used.
 
 Cold misses are single-flighted per key: concurrent callers of ``cached()`` for
 the same key share one loader task instead of each hitting Mongo. The in-flight
@@ -22,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -30,6 +36,12 @@ from fastapi import Request, Response
 from pydantic import BaseModel
 
 T = TypeVar("T")
+
+#: Entry bound for the process-wide cache. Every cached route keys on a bounded
+#: input (window days, a fixed route name) except the per-city ones; 256 covers
+#: all of them several times over at the 15-station registry size, so eviction
+#: is a safety valve rather than a normal path.
+DEFAULT_MAX_ENTRIES = 256
 
 
 @dataclass
@@ -40,12 +52,26 @@ class _Entry:
 
 
 class TTLCache:
-    """dict of key -> (expiry_epoch, value, etag). Single-process, no coordination."""
+    """``OrderedDict`` of key -> (expiry_epoch, value, etag), LRU-bounded.
 
-    def __init__(self) -> None:
-        self._entries: dict[str, _Entry] = {}
+    Insertion order is recency: the oldest entry is at the front and is the one
+    evicted when ``max_entries`` is exceeded.
+    """
+
+    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
+        if max_entries < 1:
+            raise ValueError("max_entries must be >= 1")
+        self._entries: OrderedDict[str, _Entry] = OrderedDict()
         #: key -> running cold-miss loader task, so concurrent callers coalesce.
         self._inflight: dict[str, asyncio.Task[Any]] = {}
+        self._max_entries = max_entries
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
     def get(self, key: str) -> tuple[Any, str] | None:
         """Return ``(value, etag)`` when fresh, else None (expired entries are dropped)."""
@@ -55,10 +81,16 @@ class TTLCache:
         if entry.expires_at <= time.monotonic():
             del self._entries[key]
             return None
+        self._entries.move_to_end(key)
         return entry.value, entry.etag
 
     def set(self, key: str, value: Any, etag: str, ttl_seconds: float) -> None:
         self._entries[key] = _Entry(time.monotonic() + ttl_seconds, value, etag)
+        # Overwriting an existing key keeps its position unless we move it; a
+        # fresh load is by definition the most recently used entry.
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
 
     def clear(self) -> None:
         self._entries.clear()
@@ -165,8 +197,13 @@ async def cached(
     callers share one loader execution and all get its value. Returns a bare
     ``Response(304)`` on a validator match, otherwise the value, with headers
     written onto the injected ``response``.
+
+    Either way ``request.state.cache_hit`` records whether this request was
+    served from the cache, which is the value the access-log line reports. A
+    304 derived from a cached validator counts as a hit, because no loader ran.
     """
     hit = cache.get(key)
+    request.state.cache_hit = hit is not None
     if hit is None:
         value, etag = await _load_once(cache, key, ttl_seconds, loader)
     else:

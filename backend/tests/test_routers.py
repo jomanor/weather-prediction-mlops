@@ -95,7 +95,8 @@ async def test_current_weather_for_city_has_every_contract_field(client):
 async def test_current_weather_unknown_city_is_404(client):
     response = await client.get("/api/weather/current/Atlantis")
     assert response.status_code == 404
-    assert response.json() == {"detail": "City 'Atlantis' not found"}
+    assert response.json()["error"]["code"] == "not_found"
+    assert response.json()["error"]["message"] == "City 'Atlantis' not found"
 
 
 async def test_history_is_chronological(client):
@@ -185,7 +186,7 @@ async def test_predictions_for_city_chronological(client):
 async def test_predictions_for_unknown_city_is_404(client):
     response = await client.get("/api/predictions/Atlantis")
     assert response.status_code == 404
-    assert "Atlantis" in response.json()["detail"]
+    assert "Atlantis" in response.json()["error"]["message"]
 
 
 async def test_predictions_latest_returns_every_horizon(client, app, multi_horizon_predictions):

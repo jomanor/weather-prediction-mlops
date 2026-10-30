@@ -141,3 +141,37 @@ async def test_cached_waiter_cancellation_keeps_the_shared_load_alive():
     release.set()
     assert await first is MADRID
     assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# LRU bound: part of every key is caller-controlled, so the map must never grow
+# past the configured maximum and a ``get`` must refresh recency.
+# ---------------------------------------------------------------------------
+
+
+def test_map_never_exceeds_the_configured_max_entries():
+    cache = TTLCache(max_entries=2)
+
+    for index in range(10):
+        cache.set(f"k{index}", MADRID, f"etag-{index}", 60)
+        assert len(cache) <= cache.max_entries == 2
+
+    assert len(cache) == 2
+
+    # The two newest survive; the rest were evicted from the front.
+    assert cache.get("k8") == (MADRID, "etag-8")
+    assert cache.get("k9") == (MADRID, "etag-9")
+    assert cache.get("k7") is None
+
+
+def test_get_marks_an_entry_as_most_recently_used():
+    cache = TTLCache(max_entries=2)
+    cache.set("a", MADRID, "etag-a", 60)
+    cache.set("b", ALICANTE, "etag-b", 60)
+
+    assert cache.get("a") == (MADRID, "etag-a")  # now "a" is the newest
+    cache.set("c", MADRID, "etag-c", 60)
+
+    assert cache.get("a") == (MADRID, "etag-a")
+    assert cache.get("c") == (MADRID, "etag-c")
+    assert cache.get("b") is None  # least recently used, evicted
