@@ -69,9 +69,13 @@ export function SeriesLegend({ items, className, onToggle, label }: SeriesLegend
                 aria-pressed={active}
                 onClick={() => onToggle(id)}
                 className={cn(
-                  'motion-ui flex items-center gap-2 rounded-chip px-1 py-1 text-left',
-                  'hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent',
-                  !active && 'opacity-80',
+                  'motion-ui flex cursor-pointer items-center gap-2 rounded-chip border px-1.5 py-1 text-left',
+                  'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
+                  /* Pressed series stay readable; a hidden one greys out but the
+                     button keeps its hit area so it can be restored. */
+                  active
+                    ? 'border-line bg-panel-2 hover:border-line-strong'
+                    : 'border-transparent hover:bg-panel-2',
                 )}
               >
                 {content}
