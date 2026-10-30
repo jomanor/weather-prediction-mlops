@@ -1,7 +1,7 @@
 """``POST /refresh``: fetch, document shape, rate limits, failure modes (offline)."""
 
+import ast
 import asyncio
-import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,14 +62,26 @@ def test_refresh_settings_defaults():
     assert settings.refresh_max_per_day == 48
 
 
-def test_current_variables_match_the_ingest_script():
-    path = Path(__file__).parents[2] / "scripts" / "ingest_weather.py"
-    spec = importlib.util.spec_from_file_location("ingest_weather", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def _ingest_script_constant(name: str):
+    """Read a module-level literal from the ingest script without importing it.
 
-    assert module.CURRENT_VARIABLES == CURRENT_VARIABLES
-    assert module.OPEN_METEO_URL == OPEN_METEO_URL
+    Importing the script would drag in ``requests`` (a pipeline dependency the
+    backend image does not install) and execute it; ``ast`` keeps this a pure
+    source-parity check.
+    """
+    path = Path(__file__).parents[2] / "scripts" / "ingest_weather.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} is not a module-level literal in {path}")
+
+
+def test_current_variables_match_the_ingest_script():
+    assert _ingest_script_constant("CURRENT_VARIABLES") == CURRENT_VARIABLES
+    assert _ingest_script_constant("OPEN_METEO_URL") == OPEN_METEO_URL
 
 
 def test_build_document_mirrors_the_ingest_shape():
