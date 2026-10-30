@@ -34,7 +34,10 @@ async def test_create_duplicate_is_case_insensitive_409(client):
     )
 
     assert response.status_code == 409
-    assert response.json() == {"detail": "City 'madrid' already exists"}
+    body = response.json()
+    assert body["error"]["code"] == "conflict"
+    assert body["error"]["message"] == "City 'madrid' already exists"
+    assert body["error"]["request_id"] == response.headers["x-request-id"]
 
 
 @pytest.mark.parametrize(
@@ -52,7 +55,7 @@ async def test_create_invalid_payload_is_400(client, payload):
     response = await client.post("/api/cities", json=payload)
 
     assert response.status_code == 400
-    assert "detail" in response.json()
+    assert response.json()["error"]["code"] == "bad_request"
 
 
 async def test_delete_city_is_204_and_registry_only(client):
@@ -69,7 +72,7 @@ async def test_delete_unknown_city_is_404(client):
     response = await client.delete("/api/cities/Atlantis")
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "City 'Atlantis' not found"}
+    assert response.json()["error"]["message"] == "City 'Atlantis' not found"
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +105,10 @@ class _FakeDb:
 
 
 def test_default_cities_keep_the_producer_names_and_coordinates():
-    assert len(DEFAULT_CITIES) == 14
+    assert len(DEFAULT_CITIES) == 15
     assert ("Malaga", 36.7213, -4.4214) in DEFAULT_CITIES  # unaccented on purpose
+    # Pasadena is the only non-Spanish station (Open-Meteo producer, no AEMET).
+    assert ("Pasadena", 34.1478, -118.1445) in DEFAULT_CITIES
 
 
 async def test_seed_inserts_defaults_when_empty():
@@ -113,7 +118,7 @@ async def test_seed_inserts_defaults_when_empty():
 
     assert seeded is True
     assert collection.inserted is not None
-    assert len(collection.inserted) == 14
+    assert len(collection.inserted) == 15
     assert collection.inserted[0] == {
         "name": "El Ejido",
         "name_key": "el ejido",

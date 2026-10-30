@@ -274,11 +274,11 @@ async def test_quality_report_per_city_queries_are_city_prefixed_and_sorted():
 
     report = await repo.quality_report(days=1, now=OBSERVED_AT)
 
-    # Seeded from the fixed 14-station registry, never ``distinct``: a city
+    # Seeded from the fixed 15-station registry, never ``distinct``: a city
     # with zero feature rows must still appear (see the outage test below).
     expected_cities = sorted(name for name, _, _ in DEFAULT_CITIES)
     assert [city.city for city in report] == expected_cities
-    assert len(expected_cities) == 14
+    assert len(expected_cities) == 15
     # One equality-prefixed query per city: ``city`` is pinned, so the
     # ``{city: 1, timestamp: -1}`` index serves the ascending timestamp sort.
     assert len(features.cursors) == len(expected_cities)
@@ -340,7 +340,7 @@ async def test_quality_report_city_with_zero_features_is_bad():
 
     report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
 
-    assert len(report) == 14
+    assert len(report) == 15
     missing = report["Barcelona"]
     assert missing.observed_hours == 0
     assert missing.completeness == 0.0

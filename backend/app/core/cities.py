@@ -1,8 +1,17 @@
 """Default station registry.
 
-These are the 14 stations the Kafka producer has always ingested. On startup the
-API seeds the ``cities`` collection with them when it is empty. Names are kept
-byte-for-byte as the producer used them, including the unaccented ``"Malaga"``.
+These are the stations the Kafka producer has always ingested, plus Pasadena.
+On startup the API seeds the ``cities`` collection with them when it is empty.
+Names are kept byte-for-byte as the producer used them, including the
+unaccented ``"Malaga"``.
+
+Pasadena is the one US station: it is fed by the Open-Meteo producer (not by
+AEMET, which has no US coverage), so the AEMET benchmark reports no data for it.
+It lives here because several endpoints derive their city set from this tuple
+(``weather_repo.quality_report``, ``analytics_repo.CANONICAL_CITIES``) and would
+otherwise silently omit a station that is present in production. Seeding only
+runs on an empty collection, so this list cannot retro-add rows to an existing
+registry — it only fixes the derived lists.
 """
 
 from typing import Final
@@ -23,4 +32,5 @@ DEFAULT_CITIES: Final[tuple[tuple[str, float, float], ...]] = (
     ("Palma", 39.5696, 2.6502),
     ("Bilbao", 43.2630, -2.9350),
     ("Alicante", 38.3452, -0.4810),
+    ("Pasadena", 34.1478, -118.1445),
 )
