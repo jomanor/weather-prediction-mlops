@@ -112,3 +112,94 @@ class TestStructure:
         assert (
             "archive-api.open-meteo.com" in source or "historical" in source.lower()
         ), "backfill must use the open-meteo historical / archive endpoint"
+
+
+# ---------------------------------------------------------------------------
+# --city argument parsing / registry filtering
+# ---------------------------------------------------------------------------
+
+
+REGISTRY = {
+    "Madrid": (40.4168, -3.7038),
+    "Pasadena": (34.1478, -118.1445),
+    "Almería": (36.8381, -2.4597),
+    "Sevilla": (37.38283, -5.97317),
+}
+
+
+class TestCityFilter:
+    def test_parse_default_is_empty(self):
+        bh = _import_backfill()
+        assert bh.parse_city_filter(None) == []
+        assert bh.parse_city_filter([]) == []
+
+    def test_parse_single_city(self):
+        bh = _import_backfill()
+        assert bh.parse_city_filter(["Pasadena"]) == ["Pasadena"]
+
+    def test_parse_comma_separated(self):
+        bh = _import_backfill()
+        assert bh.parse_city_filter(["Pasadena, Madrid"]) == ["Pasadena", "Madrid"]
+
+    def test_parse_repeated_flags(self):
+        bh = _import_backfill()
+        assert bh.parse_city_filter(["Pasadena", "Madrid"]) == ["Pasadena", "Madrid"]
+
+    def test_parse_mixed_and_deduplicated(self):
+        bh = _import_backfill()
+        assert bh.parse_city_filter(["Pasadena,Madrid", "Madrid"]) == ["Pasadena", "Madrid"]
+        assert bh.parse_city_filter(["Pasadena,"]) == ["Pasadena"]
+
+    def test_select_without_filter_keeps_registry(self):
+        bh = _import_backfill()
+        selected = bh.select_cities(REGISTRY, [])
+        assert selected == REGISTRY
+        assert selected is not REGISTRY  # a copy, not the registry itself
+
+    def test_select_single_city(self):
+        bh = _import_backfill()
+        assert bh.select_cities(REGISTRY, ["Pasadena"]) == {"Pasadena": (34.1478, -118.1445)}
+
+    def test_select_multiple_cities(self):
+        bh = _import_backfill()
+        selected = bh.select_cities(REGISTRY, ["Pasadena", "Madrid"])
+        assert list(selected) == ["Pasadena", "Madrid"]
+
+    def test_select_is_accent_and_case_insensitive(self):
+        bh = _import_backfill()
+        assert list(bh.select_cities(REGISTRY, ["almeria"])) == ["Almería"]
+        assert list(bh.select_cities(REGISTRY, ["PASADENA"])) == ["Pasadena"]
+
+    def test_select_unknown_city_raises(self):
+        bh = _import_backfill()
+        try:
+            bh.select_cities(REGISTRY, ["Pasadina"])
+        except KeyError as exc:
+            assert "Pasadina" in str(exc)
+        else:
+            raise AssertionError("unknown city must raise KeyError")
+
+    def test_parse_args_accepts_repeatable_and_comma_city(self):
+        bh = _import_backfill()
+        argv = ["prog", "--days", "35", "--recent", "5", "--city", "Pasadena,Madrid"]
+        with patch.object(sys, "argv", argv):
+            args = bh.parse_args()
+        assert args.city == ["Pasadena,Madrid"]
+        assert args.days == 35
+        assert args.recent == 5
+        assert bh.parse_city_filter(args.city) == ["Pasadena", "Madrid"]
+
+    def test_parse_args_city_defaults_to_none(self):
+        bh = _import_backfill()
+        with patch.object(sys, "argv", ["prog", "--days", "35"]):
+            args = bh.parse_args()
+        assert args.city is None
+        assert bh.parse_city_filter(args.city) == []
+
+    def test_existing_flags_still_default(self):
+        bh = _import_backfill()
+        with patch.object(sys, "argv", ["prog"]):
+            args = bh.parse_args()
+        assert args.recent == 0
+        assert args.chunk_days == 180
+        assert args.start and args.end
