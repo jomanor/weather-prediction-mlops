@@ -347,6 +347,51 @@ the cut list live in `docs/app-rethink.md`.
   local Vite dev server proxying the live API. The deployed URL must be re-confirmed before trusting
   a live check.
 
+
+## Next session (2026-10-31) — queued, not started
+
+Live frontend: **https://meteoml.netlify.app** (Netlify auto-deploys every push to `main`; base
+`frontend`, `npm ci && npm run build`, publish `dist`). The old `weather-mlops-1787759329` URL was a
+site rename. State at handoff: three surfaces, type scale applied (controls 11 px, titles 13/14, h1 18),
+chart zoom/pan/reset, latest-forecast card/chart, Pasadena hidden from Sistema, CI green.
+
+### 1. Netlify "Made with Netlify" badge / Drawer (user-side, no code)
+- Badge: Netlify dashboard → **Site configuration → General → Netlify badge → Hide** (per-site; the
+  `netlify.toml` has no option for this and CSS hacks are not supported).
+- If the floating pill only appears while logged in, it is the **Netlify Drawer**: open it and choose
+  "Hide Netlify Drawer" (account-level; visitors never see it). A custom domain does not remove either.
+- If the badge toggle is plan-gated on that account, upgrading or hiding the Drawer is the only route.
+
+### 2. Night icons (moon instead of sun)
+- Today `describeWeather(code)` (`frontend/src/lib/weather.ts`) ignores day/night, and the API does
+  not expose Open-Meteo's `is_day` (`backend/app/services/openmeteo.py` fetches it, but
+  `schemas/weather.py` / `weather_repo._from_*` drop it).
+- Work: add `is_day` (0/1, nullable) to `CurrentWeather` and both raw/feature mappings; add it to
+  `currentWeatherSchema`; pass it to `describeWeather` and add moon variants for codes 0/1/2 (and a
+  moon+cloud icon for 3); fall back to local hour only when `is_day` is null. The map has its own SDF
+  glyph set in `components/map/weather-icons.ts` (`iconName(code)`), so it needs the moon glyphs too
+  — reuse the lucide Moon/CloudMoon shapes or add matching SVGs. Pasadena must use its own `is_day`,
+  never the viewer's local time. Tests: `weather.test.ts` (day/night matrix), current conditions,
+  map glyph mapping.
+
+### 3. Mobile map controls cover the map
+- `StationMap.tsx` renders a fixed `w-44` panel (`Capas`: four checkboxes, basemap select and two
+  legends) at `right-2 top-2`, plus `RadarControls` bottom-left. On a 390 px phone it eats the map.
+- Work: on `< sm`, collapse it behind a compact "Capas" button opening a bottom sheet/popover
+  (same content, large rows, closes on selection/backdrop/Escape), keep the legend as a one-line
+  strip or inside the sheet, keep `--nav-h`/`--safe-bottom` respected, and do not regress the tap
+  tolerance/cooperative gestures or the 3D-buildings toggle. Desktop keeps the current panel.
+- "Second tab" (Estación) mobile: review at 390 px — segmented controls wrap, chart toolbar and the
+  prediction card spacing; verify no horizontal scroll and that the zoom controls stay reachable.
+  (If "second tab" meant Sistema → Modelos, confirm before changing it.)
+
+### Verification recipe used today
+`cd frontend && VITE_API_PROXY=https://weather-prediction-mlops.onrender.com npm run dev -- --port 4173`
+then Playwright with the cached Chromium (`~/.cache/ms-playwright/chromium-1247/chrome-linux64/chrome`,
+`playwright-core` installed in `/tmp/pw`). Check computed font sizes, `scrollWidth`, network paths,
+zoom/domain changes and the station forecast timestamps. Deployed hash check:
+`curl -s https://meteoml.netlify.app/ | grep -oE 'assets/index-[^.]+.js'` vs `ls frontend/dist/assets/index-*.js`.
+
 ## Next: Batch 6
 
 No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
