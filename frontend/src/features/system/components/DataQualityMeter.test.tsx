@@ -4,7 +4,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useWeatherQuality } from '@/api/queries'
 import { DataQualityMeter } from '@/features/system/components/DataQualityMeter'
 
-vi.mock('@/api/queries', () => ({ useWeatherQuality: vi.fn() }))
+/* The registry is the only source of coordinates, so it decides coverage. */
+const REGISTRY = [
+  { name: 'Madrid', latitude: 40.42, longitude: -3.7 },
+  { name: 'Vigo', latitude: 42.24, longitude: -8.72 },
+  { name: 'Sevilla', latitude: 37.39, longitude: -5.98 },
+  { name: 'Pasadena', latitude: 34.15, longitude: -118.14 },
+]
+
+vi.mock('@/api/queries', () => ({
+  useWeatherQuality: vi.fn(),
+  useCities: () => ({ data: REGISTRY }),
+}))
 
 const mocked = vi.mocked(useWeatherQuality)
 
@@ -59,6 +70,17 @@ const DATA = {
       age_hours: null,
       status: 'bad' as const,
     },
+    {
+      city: 'Pasadena',
+      expected_hours: 168,
+      observed_hours: 12,
+      completeness: 0.071,
+      max_gap_hours: 96,
+      null_rate: 0.5,
+      last_observed_at: null,
+      age_hours: null,
+      status: 'bad' as const,
+    },
   ],
 }
 
@@ -88,6 +110,24 @@ describe('DataQualityMeter', () => {
     expect(cities[0]).toBe('Sevilla')
     // 345 observed / 504 expected -> 68.5 %
     expect(screen.getByText('68,5%')).toBeInTheDocument()
+  })
+
+  it('leaves Pasadena out of the rows and of every aggregate', () => {
+    mockQuery({ data: DATA })
+    render(<DataQualityMeter />)
+
+    /* Outside AEMET coverage: no row, and it cannot become the worst status. */
+    expect(screen.queryByText('Pasadena')).not.toBeInTheDocument()
+    /* Aggregates are computed over the three Spanish rows only. */
+    expect(screen.getByText('68,5%')).toBeInTheDocument()
+    const readout = (label: string) => screen.getByText(label).parentElement?.textContent ?? ''
+    expect(readout('Estaciones')).toContain('3')
+    expect(readout('Con aviso')).toContain('2')
+    expect(
+      screen.getByText(
+        'Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('renders a retry action on error', () => {

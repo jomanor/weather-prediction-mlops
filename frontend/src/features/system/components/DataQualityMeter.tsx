@@ -1,13 +1,15 @@
 import { Activity, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { useMemo } from 'react'
 
-import { useWeatherQuality } from '@/api/queries'
+import { useCities, useWeatherQuality } from '@/api/queries'
 import type { CityQuality } from '@/api/schemas'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, Skeleton } from '@/components/ui/Feedback'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Readout } from '@/components/ui/Readout'
+import { aemetCoveredNames } from '@/lib/aemet-coverage'
 import { formatNumber, formatPercent, formatRelative, isNum } from '@/lib/format'
 
 const STATUS: Record<
@@ -24,12 +26,22 @@ const SEVERITY: Record<CityQuality['status'], number> = { bad: 0, warn: 1, ok: 2
 /**
  * Data-quality meter (Contract 1). Self-fetching; every row pairs the colour
  * with a label and an icon, so status never depends on colour alone.
+ *
+ * `/weather/quality` has no coordinates, so the AEMET-covered set comes from
+ * the station registry: rows outside Spain are dropped before any aggregate
+ * (coverage, station count, worst status) is computed.
  */
 export function DataQualityMeter({ className }: { className?: string }) {
   const quality = useWeatherQuality(7)
+  const { data: cityList } = useCities()
   const data = quality.data
 
-  const cities = data?.cities ?? []
+  /* `null` while the registry loads: filter once it is known, never hide all. */
+  const covered = useMemo(() => (cityList ? aemetCoveredNames(cityList) : null), [cityList])
+  const cities = useMemo(
+    () => (data?.cities ?? []).filter((city) => !covered || covered.has(city.city)),
+    [data, covered],
+  )
   const worst = cities.reduce<CityQuality | null>(
     (current, city) =>
       !current || SEVERITY[city.status] < SEVERITY[current.status] ? city : current,
@@ -152,6 +164,10 @@ export function DataQualityMeter({ className }: { className?: string }) {
               </tbody>
             </table>
           </div>
+
+          <p className="border-t border-line px-4 py-2 text-[11px] leading-relaxed text-fg-3">
+            Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.
+          </p>
         </>
       )}
     </Panel>

@@ -16,6 +16,7 @@ import { useBenchmark } from '@/features/benchmark/queries'
 import { useChartWindow } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
+import { aemetCoveredCities, aemetCoveredNames } from '@/lib/aemet-coverage'
 import { cn } from '@/lib/cn'
 import { formatNumber, isNum } from '@/lib/format'
 
@@ -35,20 +36,25 @@ const BENCHMARK_SCHEMA: { range: UrlCodec<BenchmarkRange> } = {
 
 /**
  * Benchmark tab: observed vs model vs AEMET for one station and window, plus
- * the national MAE table. The AEMET Spain-only notice stays with the data it
- * explains.
+ * the national MAE table. AEMET only covers Spain, so Sistema offers the
+ * covered stations only — a `?city=Pasadena` link falls back to a Spanish one.
+ * The AEMET notice stays with the data it explains, for any uncovered station.
  */
 export function BenchmarkPanel() {
   const [state, setState] = useUrlState(BENCHMARK_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
   const { data: cityList } = useCities()
-  const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
+  /* The selector and `resolveCity` share the covered list, so the URL can never
+     pin the tab to a station the benchmark cannot compare. */
+  const registry = useMemo(() => aemetCoveredCities(cityList ?? []), [cityList])
+  const cities = useMemo(() => registry.map((entry) => entry.name), [registry])
+  const coveredNames = useMemo(() => aemetCoveredNames(cityList ?? []), [cityList])
 
   const city = resolveCity(selectedCity, cities, cityList !== undefined)
   const cityEntry = useMemo(
-    () => cityList?.find((entry) => entry.name === city),
-    [cityList, city],
+    () => registry.find((entry) => entry.name === city),
+    [registry, city],
   )
   const hours = state.range
   const benchmark = useBenchmark(city, hours)
@@ -70,6 +76,14 @@ export function BenchmarkPanel() {
   }, [benchmark.data])
 
   const hasSeries = Boolean(benchmark.data?.series.length)
+  /* The summary endpoint still lists every station; Sistema shows Spain only. */
+  const summaryRows = useMemo(
+    () =>
+      (summary.data?.cities ?? []).filter(
+        (row) => cityList === undefined || coveredNames.has(row.city),
+      ),
+    [summary.data, cityList, coveredNames],
+  )
 
   return (
     <div className="space-y-5">
@@ -229,7 +243,7 @@ export function BenchmarkPanel() {
             <LoadingBlock />
           ) : summary.isError ? (
             <ErrorState title="Resumen no disponible" description={summary.error.message} />
-          ) : !summary.data?.cities.length ? (
+          ) : !summaryRows.length ? (
             <EmptyState
               title="Sin datos de benchmark"
               description="Ninguna estación tiene todavía observaciones y predicciones solapadas."
@@ -248,7 +262,7 @@ export function BenchmarkPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {summary.data.cities.map((row) => {
+                  {summaryRows.map((row) => {
                     const modelBetter =
                       isNum(row.model.mae) && isNum(row.aemet.mae) && row.model.mae < row.aemet.mae
                     const selected = row.city === city

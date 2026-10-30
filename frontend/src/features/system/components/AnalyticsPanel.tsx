@@ -19,6 +19,7 @@ import {
 import { heatwaveRuns } from '@/features/analytics/transforms'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState } from '@/hooks/useUrlState'
+import { aemetCoveredCities, aemetCoveredNames } from '@/lib/aemet-coverage'
 import { formatInteger } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
@@ -30,20 +31,37 @@ const DAYS_SCHEMA = { days: urlOption(DAY_OPTIONS, 90) }
 
 const DAY_SEGMENTS = DAY_OPTIONS.map((value) => ({ value, label: `${value} d` }))
 
-/** Analytics tab: diurnal cycle, daily anomaly / degree-days and the wind rose. */
+/**
+ * Analytics tab: diurnal cycle, daily anomaly / degree-days and the wind rose.
+ *
+ * AEMET only covers Spain, so the selector offers the covered stations and the
+ * diurnal matrix drops the rest: `/analytics/diurnal` returns the server-side
+ * canonical city list, which still contains the US station.
+ */
 export function AnalyticsPanel() {
   const [state, setState] = useUrlState(DAYS_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
   const { data: cityList } = useCities()
 
-  const cities = useMemo(() => cityList?.map((city) => city.name) ?? [], [cityList])
+  const registry = useMemo(() => aemetCoveredCities(cityList ?? []), [cityList])
+  const cities = useMemo(() => registry.map((entry) => entry.name), [registry])
+  const coveredNames = useMemo(() => aemetCoveredNames(cityList ?? []), [cityList])
   const city = resolveCity(selectedCity, cities, cityList !== undefined)
   const days: DayRange = state.days
 
   const diurnal = useAnalyticsDiurnal(days)
   const daily = useAnalyticsDaily(city, days)
   const wind = useAnalyticsWindRose(city, days)
+
+  /* Filter before the matrix is built so the ramp domain and the counts agree. */
+  const diurnalCells = useMemo(
+    () =>
+      (diurnal.data?.cells ?? []).filter(
+        (cell) => cityList === undefined || coveredNames.has(cell.city),
+      ),
+    [diurnal.data, cityList, coveredNames],
+  )
 
   const runs = useMemo(() => heatwaveRuns(daily.data?.points ?? []), [daily.data])
   const heatwaveDays = runs.reduce((total, run) => total + (run.end - run.start + 1), 0)
@@ -93,7 +111,7 @@ export function AnalyticsPanel() {
             actions={
               diurnal.data ? (
                 <span className="nums text-[10px] text-fg-3">
-                  {formatInteger(diurnal.data.cells.length)} celdas
+                  {formatInteger(diurnalCells.length)} celdas
                 </span>
               ) : null
             }
@@ -106,7 +124,7 @@ export function AnalyticsPanel() {
               description={diurnal.error.message}
               action={<Button onClick={() => diurnal.refetch()}>Reintentar</Button>}
             />
-          ) : !diurnal.data?.cells.length ? (
+          ) : !diurnalCells.length ? (
             <EmptyState
               icon={ChartLine}
               title="Sin observaciones en la ventana"
@@ -114,7 +132,7 @@ export function AnalyticsPanel() {
             />
           ) : (
             <div className="p-4">
-              <DiurnalHeatmap cells={diurnal.data.cells} />
+              <DiurnalHeatmap cells={diurnalCells} />
             </div>
           )}
         </Panel>
