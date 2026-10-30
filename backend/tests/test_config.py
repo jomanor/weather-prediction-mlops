@@ -7,7 +7,13 @@ from app.core.config import Settings
 
 
 def test_defaults(monkeypatch):
-    for key in ("MONGO_URI", "MONGO_URL", "CORS_ORIGINS", "AEMET_API_KEY"):
+    for key in (
+        "MONGO_URI",
+        "MONGO_URL",
+        "CORS_ORIGINS",
+        "AEMET_API_KEY",
+        "CITY_WRITES_TOKEN",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     settings = Settings(_env_file=None)
@@ -18,6 +24,22 @@ def test_defaults(monkeypatch):
     assert settings.aemet_cache_ttl_seconds == 3600
     assert settings.ensure_indexes_on_start is True
     assert settings.prediction_stale_after_hours == 24.0
+    # Shipped default: the registry writes are disabled (503), never open.
+    assert settings.city_writes_token is None
+
+
+def test_empty_city_writes_token_means_disabled(monkeypatch):
+    """``CITY_WRITES_TOKEN=`` in a deploy env disables writes, it does not open them."""
+    monkeypatch.setenv("CITY_WRITES_TOKEN", "")
+    assert Settings(_env_file=None).city_writes_token is None
+
+    monkeypatch.setenv("CITY_WRITES_TOKEN", "   ")
+    assert Settings(_env_file=None).city_writes_token is None
+
+
+def test_city_writes_token_is_read_from_env(monkeypatch):
+    monkeypatch.setenv("CITY_WRITES_TOKEN", "s3cret")
+    assert Settings(_env_file=None).city_writes_token == "s3cret"
 
 
 def test_prediction_stale_after_hours_must_be_non_negative(monkeypatch):

@@ -433,28 +433,36 @@ class FakeCityRepository:
 
     def __init__(self, cities: list[City] | None = None) -> None:
         self.cities = list(cities or [])
+        #: One entry per registry operation, so a test can assert a rejected
+        #: write never reached the repository.
         self.calls: list[str] = []
 
     async def list(self) -> list[City]:
         self.calls.append("list")
         return sorted(self.cities, key=lambda city: city.name)
 
-    async def get(self, name: str) -> City | None:
+    async def _find(self, name: str) -> City | None:
         key = name.strip().casefold()
         for city in self.cities:
             if city.name.strip().casefold() == key:
                 return city
         return None
 
+    async def get(self, name: str) -> City | None:
+        self.calls.append("get")
+        return await self._find(name)
+
     async def upsert(self, city: City) -> City:
-        existing = await self.get(city.name)
+        self.calls.append("upsert")
+        existing = await self._find(city.name)
         if existing is not None:
             self.cities.remove(existing)
         self.cities.append(city)
         return city
 
     async def delete(self, name: str) -> bool:
-        existing = await self.get(name)
+        self.calls.append("delete")
+        existing = await self._find(name)
         if existing is None:
             return False
         self.cities.remove(existing)

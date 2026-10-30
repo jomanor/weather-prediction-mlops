@@ -28,6 +28,10 @@ from tests.fakes import (
     open_meteo_payload,
 )
 
+#: Token the ``settings`` fixture enables the registry writes with. A write test
+#: sends it as ``Authorization: Bearer <token>``.
+CITY_WRITES_TOKEN = "test-city-writes-token"
+
 
 @pytest.fixture
 def settings() -> Settings:
@@ -38,7 +42,16 @@ def settings() -> Settings:
         # Shipped default is off (unauthenticated write surface); tests that need
         # the endpoint opt in here, and the default-off case builds its own app.
         refresh_enabled=True,
+        # The registry writes are gated too: this app has them enabled, and the
+        # unset/default case builds its own app (see ``tests/test_cities.py``).
+        city_writes_token=CITY_WRITES_TOKEN,
     )
+
+
+@pytest.fixture
+def write_auth() -> dict[str, str]:
+    """Authorization header the ``settings`` fixture accepts for a registry write."""
+    return {"Authorization": f"Bearer {CITY_WRITES_TOKEN}"}
 
 
 @pytest.fixture

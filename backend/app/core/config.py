@@ -6,7 +6,7 @@ else in the package.
 
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,13 @@ class Settings(BaseSettings):
 
     geo_timeout_seconds: float = 8.0
 
+    #: Shared secret for the registry writes (``POST /cities``,
+    #: ``DELETE /cities/{name}``). The registry drives ingestion and the quality
+    #: meter, so an anonymous caller must not be able to add or delete a station:
+    #: unset (the default) answers both writes with a 503, and an empty
+    #: ``CITY_WRITES_TOKEN`` means unset, never "no auth". Reads are unaffected.
+    city_writes_token: str | None = None
+
     #: A served prediction whose source observation is older than this is
     #: flagged ``stale`` (row stays visible, never dropped). The default matches
     #: one ingest/rebuild cycle plus jitter.
@@ -60,6 +67,14 @@ class Settings(BaseSettings):
     refresh_city_cooldown_seconds: int = 900
     refresh_max_per_minute: int = 6
     refresh_max_per_day: int = 48
+
+    @field_validator("city_writes_token", mode="before")
+    @classmethod
+    def _blank_token_is_unset(cls, value: object) -> object:
+        """``CITY_WRITES_TOKEN=`` in a deploy env disables writes, it does not open them."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def cors_origins_list(self) -> list[str]:
