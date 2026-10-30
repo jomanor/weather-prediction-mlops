@@ -90,7 +90,9 @@ export function AppShell() {
         </div>
       </header>
 
-      <main className="min-w-0 flex-1 pb-16 md:pb-0">
+      {/* Same offset as the bottom nav (see `--nav-h`), so the last row of a page
+          is never hidden behind the fixed nav on a phone. */}
+      <main className="min-w-0 flex-1 pb-[calc(var(--nav-h)+var(--safe-bottom)+0.5rem)] md:pb-0">
         <Outlet />
       </main>
 
@@ -104,7 +106,14 @@ export function AppShell() {
       <nav
         aria-label="Secciones"
         className="fixed inset-x-0 bottom-0 z-40 grid border-t border-line bg-panel md:hidden"
-        style={{ gridTemplateColumns: `repeat(${NAV_ITEMS.length}, minmax(0, 1fr))` }}
+        style={{
+          gridTemplateColumns: `repeat(${NAV_ITEMS.length}, minmax(0, 1fr))`,
+          /* `--nav-h` is the nav's own height and the home indicator is added
+             on top, so the station sheet can sit exactly above it. Each row is
+             a full-width touch target at least 48 px tall. */
+          height: 'calc(var(--nav-h) + var(--safe-bottom))',
+          paddingBottom: 'var(--safe-bottom)',
+        }}
       >
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon
@@ -115,7 +124,7 @@ export function AppShell() {
               end={item.to === '/'}
               className={({ isActive }) =>
                 cn(
-                  'flex flex-col items-center gap-1 py-2 text-[10px]',
+                  'flex flex-col items-center justify-center gap-1 text-[10px]',
                   isActive ? 'text-fg' : 'text-fg-3',
                 )
               }

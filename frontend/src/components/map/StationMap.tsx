@@ -52,6 +52,28 @@ export function basemapStyle(basemap: BasemapId): string | StyleSpecification {
 
 const IBERIA_CENTER: [number, number] = [-3.9, 39.9]
 
+/** Finger-sized hit tolerance around a tap, in CSS px (the minimum touch target). */
+const TAP_TOLERANCE_PX = 22
+
+/* MapLibre ships English strings; the app is Spanish. Only the ones this map
+   renders (zoom pair, and the cooperative-gesture hint on touch) are patched. */
+const MAP_LOCALE: Record<string, string> = {
+  'CooperativeGesturesHandler.MobileHelpText': 'Usa dos dedos para mover el mapa',
+  'NavigationControl.ZoomIn': 'Acercar',
+  'NavigationControl.ZoomOut': 'Alejar',
+}
+
+/* A touch device drags the page with one finger: on the map, that drag would
+   otherwise pan the map and trap the page, so touches use cooperative gestures
+   (two fingers to move the map) while the 44 px zoom pair stays one-finger. */
+function usesCooperativeGestures(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
+  )
+}
+
 const DEM_SOURCE = 'meteoml-dem-hillshade'
 const TERRAIN_DEM_SOURCE = 'meteoml-dem-terrain'
 const HILLSHADE_LAYER = 'meteoml-hillshade'
@@ -131,6 +153,8 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
       center: IBERIA_CENTER,
       zoom: 5.1,
       attributionControl: { compact: true },
+      locale: MAP_LOCALE,
+      cooperativeGestures: usesCooperativeGestures(),
     })
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
@@ -155,7 +179,28 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
         }
       }
       const pointLayers = [STATION_POINTS_LAYER].filter((id) => map.getLayer(id))
-      const city = map.queryRenderedFeatures(event.point, { layers: pointLayers })[0]?.properties?.city
+      if (!pointLayers.length) return
+
+      /* A weather glyph is ~24px: query a finger-sized box around the tap and
+         keep the nearest station, instead of the one the fingertip landed on. */
+      const point = event.point
+      const box: [{ x: number; y: number }, { x: number; y: number }] = [
+        { x: point.x - TAP_TOLERANCE_PX, y: point.y - TAP_TOLERANCE_PX },
+        { x: point.x + TAP_TOLERANCE_PX, y: point.y + TAP_TOLERANCE_PX },
+      ]
+      const candidates = map.queryRenderedFeatures(box as never, { layers: pointLayers })
+      if (!candidates.length) return
+
+      const distance = (candidate: (typeof candidates)[number]) => {
+        const geometry = candidate.geometry
+        if (geometry.type !== 'Point' || typeof map.project !== 'function') return 0
+        const projected = map.project(geometry.coordinates as [number, number])
+        return Math.hypot(projected.x - point.x, projected.y - point.y)
+      }
+      const nearest = candidates.reduce((best, candidate) =>
+        distance(candidate) < distance(best) ? candidate : best,
+      )
+      const city = nearest.properties?.city
       if (typeof city === 'string') onSelectRef.current(city)
     }
 

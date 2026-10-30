@@ -59,6 +59,12 @@
 
   --grid: rgb(15 20 26 / 0.08);
   --shadow: 0 1px 2px rgb(15 20 26 / 0.05);
+
+  /* Mobile shell. `--nav-h` is the bottom navigation's own height; the
+     safe-area inset (iOS home indicator) is added on top, so the nav, the
+     station sheet and the page's bottom padding all agree on one offset. */
+  --nav-h: 3.25rem;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .dark {
@@ -268,6 +274,15 @@
 }
 
 /* MapLibre: fold the canvas into the design system. */
+@media (pointer: coarse) {
+  /* MapLibre's built-in controls are 29px squares — below the 44px touch
+     minimum, and the zoom pair is the primary map control on a phone. */
+  .maplibregl-ctrl-group button {
+    width: 44px !important;
+    height: 44px !important;
+  }
+}
+
 .maplibregl-canvas {
   outline: none;
 }
