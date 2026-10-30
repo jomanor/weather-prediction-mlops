@@ -1,0 +1,135 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
+
+import { describe, expect, it } from 'vitest'
+
+/**
+ * Guards the anti-vibe-code contract in `docs/app-rethink.md` §3.
+ *
+ * The design system is only real if it cannot silently regress, so this test
+ * reads the token sheet and the primitive sources and fails on the generated
+ * look: gradients, glows, oversized type, stacked shadows, one-off spacing.
+ *
+ * Scope: `styles/index.css`, `components/ui`, `components/charts`. The feature
+ * pages are being restructured by another owner and join the guard afterwards.
+ */
+const ROOT = process.cwd()
+const CSS_PATH = path.join(ROOT, 'src/styles/index.css')
+
+/** The only allowed type steps, in px. */
+const TYPE_STEPS = [10, 11, 12, 13, 14, 16, 18, 22]
+/** Nothing above this may exist in the scale, whatever a consumer writes. */
+const TYPE_CEILING = 22
+const RADIUS_CEILING = 6
+
+const BANNED: { pattern: RegExp; why: string }[] = [
+  { pattern: /\bbg-gradient-to-/, why: 'gradients' },
+  { pattern: /\bbackdrop-blur\b/, why: 'blurred overlays' },
+  { pattern: /\bdrop-shadow\b/, why: 'glows/drop shadows' },
+  { pattern: /\bshadow-(sm|md|lg|xl|2xl)\b/, why: 'one shadow token (`shadow-ui`)' },
+  { pattern: /\brounded-(sm|md|lg|xl|2xl|3xl)\b/, why: 'use rounded-chip/-control/-panel' },
+  { pattern: /\btext-(xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl)\b/, why: 'display type is banned' },
+  { pattern: /text-\[[^\]]*px\]/, why: 'use a step of the type scale' },
+  { pattern: /\btransition-all\b/, why: 'animate specific properties only' },
+  { pattern: /\banimate-pulse\b/, why: 'use the reduced-motion-gated shimmer' },
+]
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = path.join(dir, entry)
+    if (statSync(full).isDirectory()) return sourceFiles(full)
+    return /\.tsx?$/.test(entry) && !entry.includes('.test.') ? [full] : []
+  })
+}
+
+/** Token declarations of one `@theme` namespace, in px. */
+function tokensInPx(css: string, prefix: string): { name: string; px: number }[] {
+  const pattern = new RegExp(`--${prefix}-([a-z0-9-]+):\\s*([\\d.]+)(rem|px);`, 'g')
+  return [...css.matchAll(pattern)].map(([, name, raw, unit]) => ({
+    name,
+    px: unit === 'rem' ? Number(raw) * 16 : Number(raw),
+  }))
+}
+
+describe('design tokens', () => {
+  const css = readFileSync(CSS_PATH, 'utf8')
+
+  it('declares the eight-step type scale and nothing above 22 px', () => {
+    const sizes = tokensInPx(css, 'text')
+    expect(sizes.length).toBeGreaterThanOrEqual(8)
+    for (const token of sizes) {
+      expect(token.px, `--text-${token.name} is above the 22 px ceiling`).toBeLessThanOrEqual(
+        TYPE_CEILING,
+      )
+      expect(TYPE_STEPS, `--text-${token.name} is off the type scale`).toContain(token.px)
+    }
+  })
+
+  it('keeps every radius at 6 px or below', () => {
+    for (const token of tokensInPx(css, 'radius')) {
+      expect(token.px, `--radius-${token.name} is above 6 px`).toBeLessThanOrEqual(RADIUS_CEILING)
+    }
+  })
+
+  it('defines the single shadow scale, motion ladder and reduced-motion gate', () => {
+    for (const required of [
+      '--shadow:',
+      '--shadow-sheet:',
+      '--motion-fast:',
+      '--motion-slow:',
+      '--ease-ui:',
+      '--nav-h:',
+      '--safe-bottom:',
+      'prefers-reduced-motion: reduce',
+    ]) {
+      expect(css, `${required} missing from index.css`).toContain(required)
+    }
+    /* The sheet/elevation pair is the whole scale: no third shadow token. */
+    const shadowTokens = new Set([...css.matchAll(/(--shadow[a-z-]*):/g)].map(([, name]) => name))
+    expect([...shadowTokens].sort()).toEqual(['--shadow', '--shadow-sheet'])
+  })
+
+  it('keeps light and dark tokens in parity', () => {
+    const declarations = (selector: string) => {
+      const block = css.split(selector)[1] ?? ''
+      return new Set(
+        [...block.slice(0, block.indexOf('}')).matchAll(/(--[a-z0-9-]+):/g)].map(([, name]) => name),
+      )
+    }
+    const light = declarations(':root {')
+    const dark = declarations('.dark {')
+    const themeOnly = new Set(['--radius-panel'])
+    for (const name of dark) {
+      expect(light.has(name) || themeOnly.has(name), `${name} has no light-theme value`).toBe(true)
+    }
+  })
+})
+
+describe('primitives and charts', () => {
+  const files = [
+    ...sourceFiles(path.join(ROOT, 'src/components/ui')),
+    ...sourceFiles(path.join(ROOT, 'src/components/charts')),
+  ]
+
+  it('finds the primitive sources', () => {
+    expect(files.length).toBeGreaterThan(8)
+  })
+
+  it('contains no banned generated-look utility', () => {
+    for (const file of files) {
+      const code = readFileSync(file, 'utf8')
+      for (const { pattern, why } of BANNED) {
+        expect(pattern.test(code), `${path.relative(ROOT, file)}: ${why}`).toBe(false)
+      }
+    }
+  })
+
+  it('formats numbers through lib/format instead of ad-hoc literals', () => {
+    for (const file of files) {
+      const code = readFileSync(file, 'utf8')
+      /* `toFixed`/`Intl` in a chart or primitive means a second precision. */
+      expect(/\.toFixed\(/.test(code), `${path.relative(ROOT, file)}: .toFixed()`).toBe(false)
+      expect(/new Intl\./.test(code), `${path.relative(ROOT, file)}: inline Intl`).toBe(false)
+    }
+  })
+})

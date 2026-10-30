@@ -21,6 +21,7 @@ import { useChartSync } from '@/hooks/useChartSync'
 import { EmptyState } from '@/components/ui/Feedback'
 import {
   CHART_MARGIN,
+  SERIES_DASH,
   chartAxisLabel,
   chartAxisProps,
   chartGridProps,
@@ -29,12 +30,11 @@ import {
 } from '@/lib/chart-theme'
 import {
   formatDateTimeMs,
-  formatDegrees,
-  formatNumber,
+  formatMetric,
+  formatMetricTick,
   formatPercent,
-  formatWithUnit,
-  temperatureUnit,
-  windUnit,
+  metricForSeries,
+  metricUnit,
 } from '@/lib/format'
 
 export type HistoryVariable = 'temperature' | 'precipitation' | 'wind'
@@ -123,14 +123,16 @@ export function HistoryChart({
     })
   }
 
-  const unitLabel = temperatureUnit(units)
+  const unitLabel = metricUnit('temperature', units)
 
   const legend: LegendItem[] = []
   if (variable === 'temperature') {
-    legend.push({ id: 'temperature', label: 'Temperatura', color: palette.aemet })
-    if (hasModel) legend.push({ id: 'model', label: 'Modelo', color: palette.model, dash: '4 3' })
+    legend.push({ id: 'temperature', label: 'Temperatura', color: palette.observed })
+    if (hasModel) {
+      legend.push({ id: 'model', label: 'Modelo', color: palette.model, dash: SERIES_DASH.model })
+    }
     if (hasPrecipitation) {
-      legend.push({ id: 'precipitation', label: 'Precipitación', color: palette.accent })
+      legend.push({ id: 'precipitation', label: 'Precipitación', color: palette.rain })
     }
     if (hasInterval) {
       const level =
@@ -138,7 +140,7 @@ export function HistoryChart({
       legend.push({ id: 'band', label: `Banda${level}`, color: palette.model })
     }
   } else if (variable === 'precipitation') {
-    legend.push({ id: 'precipitation', label: 'Precipitación', color: palette.accent })
+    legend.push({ id: 'precipitation', label: 'Precipitación', color: palette.rain })
   } else {
     legend.push({ id: 'wind', label: 'Viento', color: palette.observed })
   }
@@ -174,9 +176,10 @@ export function HistoryChart({
     const upper = row.band_base + row.band_size
     return (
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] text-fg-2">Banda</span>
-        <span className="nums text-[11px] font-medium text-fg">
-          {formatWithUnit(row.band_base, unitLabel, 1)} – {formatWithUnit(upper, unitLabel, 1)}
+        <span className="text-label text-fg-2">Banda</span>
+        <span className="nums text-label font-medium text-fg">
+          {formatMetric(row.band_base, 'temperature', units)} –{' '}
+          {formatMetric(upper, 'temperature', units)}
         </span>
       </div>
     )
@@ -204,7 +207,7 @@ export function HistoryChart({
                   yAxisId="value"
                   domain={temperatureDomain}
                   width={46}
-                  tickFormatter={(value: number) => formatDegrees(value, 0)}
+                  tickFormatter={(value: number) => formatMetricTick(value, 'temperature')}
                   label={chartAxisLabel(palette, unitLabel, 'insideLeft')}
                   {...axisProps}
                 />
@@ -213,8 +216,8 @@ export function HistoryChart({
                   orientation="right"
                   domain={[0, precipitationMax]}
                   width={42}
-                  tickFormatter={(value: number) => formatNumber(value, 0)}
-                  label={chartAxisLabel(palette, 'mm', 'insideRight')}
+                  tickFormatter={(value: number) => formatMetricTick(value, 'precipitation')}
+                  label={chartAxisLabel(palette, metricUnit('precipitation'), 'insideRight')}
                   {...axisProps}
                 />
               </>
@@ -223,14 +226,8 @@ export function HistoryChart({
                 yAxisId="value"
                 domain={variable === 'precipitation' ? [0, precipitationMax] : windDomain}
                 width={46}
-                tickFormatter={(value: number) =>
-                  formatNumber(value, variable === 'precipitation' ? 1 : 0)
-                }
-                label={chartAxisLabel(
-                  palette,
-                  variable === 'precipitation' ? 'mm' : windUnit(units),
-                  'insideLeft',
-                )}
+                tickFormatter={(value: number) => formatMetricTick(value, variable)}
+                label={chartAxisLabel(palette, metricUnit(variable, units), 'insideLeft')}
                 {...axisProps}
               />
             )}
@@ -242,14 +239,14 @@ export function HistoryChart({
                   title={(label) => formatDateTimeMs(Number(label))}
                   format={(entry) => {
                     if (entry.value === null) return '—'
-                    const value = entry.value as number
-                    if (entry.dataKey === 'precipitation') {
-                      return formatWithUnit(value, 'mm', 1)
-                    }
-                    if (entry.dataKey === 'wind') {
-                      return formatWithUnit(value, windUnit(units), 1)
-                    }
-                    return formatWithUnit(value, unitLabel, 1)
+                    const metric = metricForSeries(entry.dataKey)
+                    /* Precipitation rows stay in mm: history is not converted
+                       on build, so the label must not claim inches. */
+                    return formatMetric(
+                      entry.value as number,
+                      metric,
+                      metric === 'precipitation' ? 'metric' : units,
+                    )
                   }}
                   extra={intervalRow}
                 />
@@ -290,12 +287,12 @@ export function HistoryChart({
             {variable === 'temperature' && hasModel && isVisible('model') ? (
               <Line
                 yAxisId="value"
-                type="monotone"
+                type="linear"
                 dataKey="model"
                 name="Modelo"
                 stroke={palette.model}
                 strokeWidth={1.5}
-                strokeDasharray="4 3"
+                strokeDasharray={SERIES_DASH.model}
                 dot={false}
                 connectNulls={false}
                 isAnimationActive={false}
@@ -307,7 +304,7 @@ export function HistoryChart({
                 yAxisId="rain"
                 dataKey="precipitation"
                 name="Precipitación"
-                fill={palette.accent}
+                fill={palette.rain}
                 fillOpacity={0.45}
                 isAnimationActive={false}
                 maxBarSize={14}
@@ -319,7 +316,7 @@ export function HistoryChart({
                 yAxisId="value"
                 dataKey="precipitation"
                 name="Precipitación"
-                fill={palette.accent}
+                fill={palette.rain}
                 fillOpacity={0.6}
                 isAnimationActive={false}
                 maxBarSize={14}
@@ -329,10 +326,10 @@ export function HistoryChart({
             {variable === 'temperature' && isVisible('temperature') ? (
               <Line
                 yAxisId="value"
-                type="monotone"
+                type="linear"
                 dataKey="temperature"
                 name="Temperatura"
-                stroke={palette.aemet}
+                stroke={palette.observed}
                 strokeWidth={1.5}
                 dot={false}
                 connectNulls={false}
@@ -343,7 +340,7 @@ export function HistoryChart({
             {variable === 'wind' && isVisible('wind') ? (
               <Line
                 yAxisId="value"
-                type="monotone"
+                type="linear"
                 dataKey="wind"
                 name="Viento"
                 stroke={palette.observed}

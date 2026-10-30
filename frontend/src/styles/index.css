@@ -10,6 +10,18 @@
  * A meteorological instrument panel: graphite surfaces, hairline rules and a
  * single signal colour for interaction. Data colour is reserved for data —
  * observed is the silver reference line, the ML model is violet, AEMET is amber.
+ *
+ * The contract (docs/app-rethink.md §3), enforced by `src/test/design-system`:
+ *
+ *   type    10/11/12/13/14/16/18/22 px only — `text-badge` … `text-hero`
+ *   spacing 4 px grid: 4/8/12/16/20/24/32 (Tailwind's default `--spacing`)
+ *   radius  `rounded-chip` 2 · `rounded-control` 3 · `rounded-panel` 4 · max 6
+ *   border  hairline `--line`, strong `--line-strong`, on every container edge
+ *   shadow  `shadow-ui` (0 1px 2px) and `shadow-sheet` — nothing else
+ *   motion  120/180/240 ms on `--ease-ui`, all gated by reduced-motion
+ *
+ * Banned: gradients, glows, `backdrop-blur`, `rounded-2xl`, `shadow-lg`,
+ * display sizes above 22 px, icon soup, and colour as the only signal.
  */
 :root {
   color-scheme: light;
@@ -58,7 +70,11 @@
   --wind-4: #33445f;
 
   --grid: rgb(15 20 26 / 0.08);
+
+  /* The whole shadow scale: one hairline lift for every raised surface, plus
+     the single bottom-sheet elevation. No glows, no stacked shadows. */
   --shadow: 0 1px 2px rgb(15 20 26 / 0.05);
+  --shadow-sheet: 0 -8px 24px rgb(15 20 26 / 0.12);
 
   /* Mobile shell. `--nav-h` is the bottom navigation's own height; the
      safe-area inset (iOS home indicator) is added on top, so the nav, the
@@ -113,6 +129,7 @@
 
   --grid: rgb(233 236 240 / 0.07);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-sheet: 0 -8px 24px rgb(0 0 0 / 0.45);
 }
 
 @theme inline {
@@ -154,7 +171,62 @@
   --color-wind-3: var(--wind-3);
   --color-wind-4: var(--wind-4);
 
-  --radius-panel: 0.25rem;
+  /* ------------------------------------------------------------------
+   * Type scale — eight steps, 10 px → 22 px, and nothing above.
+   *
+   *   text-badge 10  badges, map-pin city
+   *   text-label 11  field labels, hints, chart legend, axis title
+   *   text-body  12  body copy, table cells, tooltip rows
+   *   text-title 13  panel title, page description
+   *   text-value 14  readout, empty/error title
+   *   text-lead  16  prose blocks (rare; not a hero)
+   *   text-page  18  page title (h1)
+   *   text-hero  22  a single emphasised readout
+   *
+   * The stock `text-xl`…`text-5xl` steps are clamped to the 22 px ceiling so
+   * a stray display class cannot re-introduce the generated hero look.
+   * ------------------------------------------------------------------ */
+  --text-badge: 0.625rem;
+  --text-badge--line-height: 1.2;
+  --text-label: 0.6875rem;
+  --text-label--line-height: 1.25;
+  --text-body: 0.75rem;
+  --text-body--line-height: 1.45;
+  --text-title: 0.8125rem;
+  --text-title--line-height: 1.3;
+  --text-value: 0.875rem;
+  --text-value--line-height: 1.25;
+  --text-lead: 1rem;
+  --text-lead--line-height: 1.4;
+  --text-page: 1.125rem;
+  --text-page--line-height: 1.25;
+  --text-hero: 1.375rem;
+  --text-hero--line-height: 1.1;
+
+  --text-xl: 1.375rem;
+  --text-xl--line-height: 1.1;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.1;
+  --text-3xl: 1.375rem;
+  --text-3xl--line-height: 1.1;
+  --text-4xl: 1.375rem;
+  --text-4xl--line-height: 1.1;
+  --text-5xl: 1.375rem;
+  --text-5xl--line-height: 1.1;
+
+  /* Radii: three steps, 6 px is the ceiling. */
+  --radius-chip: 2px; /* chart cells, ramp bars, skeleton blocks */
+  --radius-control: 3px; /* buttons, inputs, tabs, tooltips */
+  --radius-panel: 0.25rem; /* 4 px: panels, popovers, sheets */
+
+  /* Motion: one duration ladder (120–240 ms) and one easing curve. Nothing
+     animates layout — only colour, opacity and a ≤4 px fade-rise. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-ui: cubic-bezier(0.22, 1, 0.36, 1);
+  --default-transition-duration: 120ms;
+  --default-transition-timing-function: var(--ease-ui);
 }
 
 @layer base {
@@ -202,6 +274,21 @@
   }
 }
 
+@utility motion-ui {
+  transition-property:
+    color, background-color, border-color, outline-color, fill, stroke, opacity, transform;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-ui);
+}
+
+@utility shadow-ui {
+  box-shadow: var(--shadow);
+}
+
+@utility shadow-sheet {
+  box-shadow: var(--shadow-sheet);
+}
+
 @layer utilities {
   /* Tabular figures for every number that sits in a column or a readout. */
   .nums {
@@ -210,20 +297,16 @@
     letter-spacing: -0.01em;
   }
 
-  .hairline {
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
-  }
-
   /* Field label: plain, small, quiet. */
   .label {
-    font-size: 0.6875rem;
-    line-height: 1.1;
+    font-size: var(--text-label);
+    line-height: 1.25;
     letter-spacing: 0.01em;
     color: var(--fg-3);
   }
 
   .animate-in {
-    animation: fade-rise 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: fade-rise var(--motion-slow) var(--ease-ui) both;
   }
 
   /* U7 shimmer skeleton; the component only applies it when motion is allowed. */

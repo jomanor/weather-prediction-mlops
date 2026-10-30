@@ -195,3 +195,102 @@ export function formatLongitude(value: number | null | undefined, digits = 2): s
   const hemisphere = value >= 0 ? 'E' : 'W'
   return `${fixed(Math.abs(value), digits)}° ${hemisphere}`
 }
+
+/* ------------------------------------------------------------------------- *
+ * Canonical precision and chart metric formatting (docs/app-rethink.md §3).
+ *
+ * One number of decimals per quantity, held everywhere: temperature 1 dp,
+ * error 2 dp, skill 2 dp, percentages 0–1 dp. Charts round their axis ticks
+ * (the unit and the precision live in the readout/tooltip, once) but never
+ * invent their own precision.
+ * ------------------------------------------------------------------------- */
+
+export const PRECISION = {
+  temperature: 1,
+  error: 2,
+  skill: 2,
+  /** Humidity, coverage, completeness: whole percent. */
+  percent: 0,
+  /** Probability / confidence / interval level: 1 dp. */
+  probability: 1,
+  wind: 1,
+  precipitation: 1,
+  pressure: 1,
+} as const
+
+/** The metrics the charts can plot. */
+export type Metric = 'temperature' | 'wind' | 'precipitation'
+
+export const METRIC_DIGITS: Record<Metric, number> = {
+  temperature: PRECISION.temperature,
+  wind: PRECISION.wind,
+  precipitation: PRECISION.precipitation,
+}
+
+/** Axis ticks round for legibility; the axis title carries the unit. */
+export const METRIC_TICK_DIGITS: Record<Metric, number> = {
+  temperature: 0,
+  wind: 0,
+  precipitation: 1,
+}
+
+export function precipitationUnit(units: UnitSystem = 'metric'): string {
+  return units === 'imperial' ? 'in' : 'mm'
+}
+
+/** Unit label of a metric in the active unit system: "°C" / "km/h" / "mm". */
+export function metricUnit(metric: Metric, units: UnitSystem = 'metric'): string {
+  if (metric === 'temperature') return temperatureUnit(units)
+  if (metric === 'wind') return windUnit(units)
+  return precipitationUnit(units)
+}
+
+/**
+ * Value + unit for a tooltip, axis label or readout: "21,4 °C".
+ *
+ * The value is expected already in the display unit system — chart rows convert
+ * when they are built, so render-time formatting never converts twice.
+ */
+export function formatMetric(
+  value: number | null | undefined,
+  metric: Metric,
+  units: UnitSystem = 'metric',
+  digits: number = METRIC_DIGITS[metric],
+): string {
+  return isNum(value) ? `${fixed(value, digits)} ${metricUnit(metric, units)}` : EMPTY
+}
+
+/** Axis tick without its unit: "21" / "1,2". */
+export function formatMetricTick(
+  value: number | null | undefined,
+  metric: Metric,
+  digits: number = METRIC_TICK_DIGITS[metric],
+): string {
+  return isNum(value) ? fixed(value, digits) : EMPTY
+}
+
+/** Celsius in, display unit out, with the unit: "21,4 °C" / "70,5 °F". */
+export function formatTemperatureWithUnit(
+  celsius: number | null | undefined,
+  units: UnitSystem = 'metric',
+  digits: number = PRECISION.temperature,
+): string {
+  if (!isNum(celsius)) return EMPTY
+  return formatMetric(convertTemperature(celsius, units), 'temperature', units, digits)
+}
+
+/** Signed model error with its unit at the canonical 2 dp: "+0,42 °C". */
+export function formatError(
+  value: number | null | undefined,
+  unit: string,
+  digits: number = PRECISION.error,
+): string {
+  return formatSignedWithUnit(value, unit, digits)
+}
+
+/** Chart data key → metric: the one place the mapping lives. */
+export function metricForSeries(dataKey: string | number | undefined): Metric {
+  if (dataKey === 'precipitation') return 'precipitation'
+  if (dataKey === 'wind') return 'wind'
+  return 'temperature'
+}

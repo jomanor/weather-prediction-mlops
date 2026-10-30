@@ -58,7 +58,7 @@ export function Segmented<T extends string | number>({
       role="radiogroup"
       aria-label={label}
       className={cn(
-        'inline-flex items-stretch rounded-[3px] border border-line bg-panel p-0',
+        'inline-flex items-stretch rounded-control border border-line bg-panel p-0',
         className,
       )}
     >
@@ -78,7 +78,8 @@ export function Segmented<T extends string | number>({
             onClick={() => onChange(option.value)}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              'nums rounded px-2 py-1 text-[11px] font-medium transition-colors',
+              'nums motion-ui rounded-chip px-2 py-1 text-label font-medium',
+              'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
               active ? 'bg-panel-2 font-medium text-fg' : 'text-fg-3 hover:text-fg-2',
             )}
           >
