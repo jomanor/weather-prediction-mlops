@@ -956,8 +956,19 @@ class TestRunShadowAb:
             {
                 "model_registry": FakeRegistryCollection(
                     [
-                        make_entry("temp_prediction_1h_Prod", doc_id="p1", stage="production"),
-                        make_entry("temp_prediction_1h_New", doc_id="s1", stage="staging"),
+                        make_entry(
+                            "temp_prediction_1h_Prod",
+                            doc_id="p1",
+                            stage="production",
+                            timestamp=dt(1),
+                        ),
+                        # A challenger must be strictly newer than production.
+                        make_entry(
+                            "temp_prediction_1h_New",
+                            doc_id="s1",
+                            stage="staging",
+                            timestamp=dt(2),
+                        ),
                     ]
                 )
             }
