@@ -1,11 +1,11 @@
 """Default station registry.
 
-These are the stations the Kafka producer has always ingested, plus Pasadena.
-On startup the API seeds the ``cities`` collection with them when it is empty.
-Names are kept byte-for-byte as the producer used them, including the
+These are the stations the original Open-Meteo ingest has always covered, plus
+Pasadena. On startup the API seeds the ``cities`` collection with them when it
+is empty. Names are kept byte-for-byte as that writer used them, including the
 unaccented ``"Malaga"``.
 
-Pasadena is the one US station: it is fed by the Open-Meteo producer (not by
+Pasadena is the one US station: it is fed by the Open-Meteo ingest (not by
 AEMET, which has no US coverage), so the AEMET benchmark reports no data for it.
 It lives here because several endpoints derive their city set from this tuple
 (``weather_repo.quality_report``, ``analytics_repo.CANONICAL_CITIES``) and would

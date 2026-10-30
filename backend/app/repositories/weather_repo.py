@@ -2,10 +2,11 @@
 
 Two writers produce observations:
 
-* ``weather_data`` — the Kafka consumer's current-conditions snapshot, nested
-  under ``data.main`` / ``data.wind`` / ``data.clouds`` / ``data.weather``.
-* ``raw_weather`` — the full Open-Meteo payload (consumer *and* the historical
-  backfill script), with the per-hour values under ``payload.current``.
+* ``weather_data`` — the legacy current-conditions snapshot, nested under
+  ``data.main`` / ``data.wind`` / ``data.clouds`` / ``data.weather``.
+* ``raw_weather`` — the full Open-Meteo payload written by the ingest script
+  *and* the historical backfill, with the per-hour values under
+  ``payload.current``.
 
 ``weather_data`` is preferred; ``raw_weather`` is the fallback so historical
 backfills are queryable too. One mapping helper per collection, no duplication.
@@ -25,7 +26,7 @@ from app.schemas.quality import CityQuality, QualityStatus
 from app.schemas.weather import CurrentWeather
 
 #: Both writers request ``wind_speed_unit=ms`` (see ``scripts/ingest_weather.py``
-#: and ``kafka/kafka-producer/producer.py``), so stored wind speeds are m/s;
+#: and ``scripts/backfill_historical_data.py``), so stored wind speeds are m/s;
 #: the API contract (``CurrentWeather.wind_speed``) is km/h. Convert here, at
 #: the boundary, and nowhere else.
 MS_TO_KMH = 3.6

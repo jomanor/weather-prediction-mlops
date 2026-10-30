@@ -7,7 +7,6 @@ notes.md
 *.nc
 pruebas.py
 uv.lock
-torchcast/
 *.pdf
 # Local Netlify folder
 .netlify

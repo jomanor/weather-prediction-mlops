@@ -1,6 +1,6 @@
 """Coercion helpers shared by the repository mappers.
 
-MongoDB documents come from three writers (Kafka consumer, backfill script,
+MongoDB documents come from three writers (the ingest script, backfill script,
 Spark jobs) and are not fully consistent: numbers may be strings, timestamps
 may be naive or aware, optional keys may be missing or empty. These helpers
 turn any of those into the strict types the API contract promises.

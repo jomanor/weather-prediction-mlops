@@ -10,10 +10,10 @@ steady-state model from *derived* inputs and measured document sizes:
   (M2 ``target_horizons``; ``int | list`` is accepted). If the key is not there
   yet the frozen M2 set is used, so the model never silently reverts to the
   1-horizon volume.
-* The *live* station count is **measured** (15, incl. Pasadena). The producer's
-  ``FALLBACK_CITIES`` still lists 14 — a known registry gap (separate follow-up,
-  not Batch 4) — so it is only checked as a lower bound, never used as the
-  budget input.
+* The *live* station count is **measured** (15, incl. Pasadena) and must equal
+  the station registry parsed from ``backend/app/core/cities.py:DEFAULT_CITIES``
+  — the budget input and the registry are pinned to each other, so a station
+  added to the registry without re-measuring fails this module.
 * Bytes/row are **measured** from the production Atlas ``weather_db`` on
   2026-09-25 via read-only ``collStats.avgObjSize``:
   ``raw_weather=1362 B``, ``weather_features=3856 B``,
@@ -47,7 +47,7 @@ reservoirs.
 **Batch 5 / L6 (refresh endpoint):** ``POST /api/refresh`` writes one
 ``raw_weather`` document per accepted attempt, globally capped at
 ``REFRESH_DOCS_PER_DAY = 48`` (see ``backend/app/services/*refresh*`` and the
-900 s/6-per-min/48-per-day limiter). Unlike the hourly producer, these rows are
+900 s/6-per-min/48-per-day limiter). Unlike the hourly ingest, these rows are
 not tied to the observation cadence, so they are charged separately against the
 same 180-day raw TTL at the measured ``raw_weather`` bytes/row (1362 B):
 ``180 × 48 × 1362 = 11,767,680 B ≈ 11.2 MiB`` at saturation.
@@ -78,7 +78,7 @@ from tests.conftest import REPO_ROOT, eval_python_constant
 # ---------------------------------------------------------------------------
 
 MONGO_SOURCE = REPO_ROOT / "backend" / "app" / "db" / "mongo.py"
-PRODUCER_SOURCE = REPO_ROOT / "kafka" / "kafka-producer" / "producer.py"
+CITIES_SOURCE = REPO_ROOT / "backend" / "app" / "core" / "cities.py"
 SPARK_CONFIG_SOURCE = REPO_ROOT / "spark" / "config" / "spark_config.py"
 BATCH_PROCESSING_SOURCE = (
     Path(__file__).resolve().parents[2] / "spark" / "spark-jobs" / "batch_processing.py"
@@ -90,8 +90,8 @@ RETENTION_DAYS: dict[str, int] = {
     for collection, spec in eval_python_constant(MONGO_SOURCE, "TTL_INDEXES").items()
 }
 
-#: Producer registry — the live count is higher (Pasadena is missing there).
-PRODUCER_CITY_COUNT: int = len(eval_python_constant(PRODUCER_SOURCE, "FALLBACK_CITIES"))
+#: Station registry — the budget input and the write path share this list.
+DEFAULT_CITY_COUNT: int = len(eval_python_constant(CITIES_SOURCE, "DEFAULT_CITIES"))
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -114,7 +114,7 @@ MEASURED_AVG_OBJ_SIZE: dict[str, int] = {
 #: snapshot, estimated between the raw payload and a prediction document.
 WEATHER_DATA_BYTES_PER_ROW_ESTIMATE = 600
 
-#: Measured live station count (includes Pasadena, absent from FALLBACK_CITIES).
+#: Measured live station count (includes Pasadena); must match the registry.
 LIVE_CITY_COUNT = 15
 
 #: M2 ``target_horizons`` if ``spark_config`` predates the WS-A change.
@@ -181,7 +181,7 @@ def steady_state_bytes(rebuilds: int | None = None, horizons: int | None = None)
     predictions_per_day = prediction_rows_per_day(rebuilds, horizons)
     raw_days = RETENTION_DAYS["raw_weather"]
     rows = {
-        # raw_weather accumulates for its full TTL window: producer rows plus the
+        # raw_weather accumulates for its full TTL window: ingest rows plus the
         # refresh endpoint's 48/day (measured raw bytes/row for both).
         "raw_weather": (
             raw_days * raw_weather_rows_per_day(),
@@ -231,11 +231,17 @@ def test_retention_days_track_mongo_ttl_indexes():
     assert RETENTION_DAYS["weather_predictions"] == 90
 
 
-def test_live_city_count_covers_the_producer_registry():
-    """The budget uses the measured 15 live stations, not the 14 seeded ones."""
-    assert PRODUCER_CITY_COUNT == len(eval_python_constant(PRODUCER_SOURCE, "FALLBACK_CITIES"))
-    assert LIVE_CITY_COUNT == 15
-    assert LIVE_CITY_COUNT > PRODUCER_CITY_COUNT  # Pasadena gap, separate follow-up
+def test_live_city_count_matches_the_station_registry():
+    """The budget uses the measured 15 live stations, which is the whole registry."""
+    registry = eval_python_constant(CITIES_SOURCE, "DEFAULT_CITIES")
+    assert DEFAULT_CITY_COUNT == len(registry) == 15
+    # Exact equality, not a bound: the registry and the measured count must agree,
+    # so adding or dropping a station fails here until the budget is re-measured.
+    assert LIVE_CITY_COUNT == DEFAULT_CITY_COUNT
+    names = [entry[0] for entry in registry]
+    assert len(names) == len(set(names))  # no duplicate stations
+    assert "Pasadena" in names  # the US station the AEMET benchmark cannot cover
+    assert all(isinstance(name, str) and name for name in names)
 
 
 def test_horizons_come_from_spark_config():

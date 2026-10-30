@@ -3,7 +3,7 @@ backfill_historical_data.py
 ============================
 Standalone script that backfills historical weather data from the
 Open-Meteo Historical API directly into MongoDB (raw_weather collection),
-bypassing Kafka.
+independently of the live ingest cron.
 
 Usage
 -----
@@ -215,7 +215,7 @@ def already_exists(collection, city: str, unix_ts: int) -> bool:
 def build_documents(city: str, payload: dict) -> list[dict]:
     """
     Expand an Open-Meteo historical response into one document per hour.
-    Each document mirrors the same shape used by the live consumer so that
+    Each document mirrors the same shape used by the live ingest script so that
     batch_processing.py can read from a single collection.
     """
     hourly = payload.get("hourly", {})

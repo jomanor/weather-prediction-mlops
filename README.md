@@ -17,12 +17,8 @@ interface says so.
                        [ Open-Meteo API ]
                                │
                                ▼
-                    [ Kafka weather producer ]
-                               │
-                        ( Kafka broker )
-                               │
-                               ▼
-                    [ Kafka weather consumer ]
+                 [ scripts/ingest_weather.py ]
+                  (hourly GitHub Actions cron)
                                │
                   ┌────────────┴────────────┐
                   ▼                         ▼
@@ -81,9 +77,8 @@ weather-prediction-mlops/
 │   │   └── lib/                # formatting, units, derived physics, theme
 │   ├── nginx.conf              # SPA fallback + /api reverse proxy
 │   └── Dockerfile
-├── kafka/                      # producer + consumer
 ├── spark/                      # feature engineering, training, inference, scheduler
-├── scripts/                    # backfill, Atlas sync, Supabase sync
+├── scripts/                    # ingest, backfill, Atlas sync, Supabase sync
 ├── tests/                      # pipeline unit + integration tests
 ├── docs/api-contract.md        # single source of truth for backend ⇄ frontend
 ├── docker-compose.yml          # full local stack
@@ -150,7 +145,7 @@ always uses the same relative base URL it uses in production.
 
 | Variable          | Used by  | Default                 | Notes                                        |
 | ----------------- | -------- | ----------------------- | -------------------------------------------- |
-| `MONGO_URI`       | backend, consumer, spark | `mongodb://localhost:27017` | `MONGO_URL` accepted for compatibility |
+| `MONGO_URI`       | backend, ingest, spark | `mongodb://localhost:27017` | `MONGO_URL` accepted for compatibility |
 | `MONGO_DB`        | backend  | `weather_db`            |                                              |
 | `CORS_ORIGINS`    | backend  | `http://localhost:5173` | comma separated                              |
 | `AEMET_API_KEY`   | backend  | —                       | required for the benchmark                   |

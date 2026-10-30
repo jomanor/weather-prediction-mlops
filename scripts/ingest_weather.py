@@ -1,18 +1,25 @@
 """Ingest current observations from Open-Meteo into ``raw_weather``.
 
-Locally the data path is Kafka producer -> consumer -> ``raw_weather``. Neither
-a broker nor a long-lived worker fits the free hosting tiers the app deploys
-to, so this script stands in for both: it fetches the same Open-Meteo payload
-and writes the same document the consumer writes, straight to Mongo.
+This script is the live write path: it fetches the Open-Meteo payload for every
+station in the ``cities`` registry and stores one document per observation in
+``raw_weather``, keyed on the deterministic ``_id`` ``{city}_{unix_ts}`` so a
+re-run is an idempotent upsert rather than a duplicate. Neither a broker nor a
+long-lived worker fits the free hosting tiers the app deploys to, which is why
+this is a cron-invoked script instead of a resident process.
 
 Only ``payload.current`` is fetched. That is all the Spark batch job reads
 (``payload.current.*`` plus ``payload.latitude`` / ``payload.longitude``); the
-producer additionally ships 24h of hourly and six pressure levels, which made
-each document roughly fifty times larger and would push ``raw_weather`` through
-Atlas's 512 MB free tier within months.
+full Open-Meteo response also carries 24h of hourly and six pressure levels per
+station, which made each document roughly fifty times larger and would push
+``raw_weather`` through Atlas's 512 MB free tier within months.
 
 The document shape below is deliberately identical to
-``kafka/kafka-consumer/consumer.py`` so both writers stay interchangeable.
+``scripts/backfill_historical_data.py`` so the live and historical writers stay
+interchangeable.
+
+Exit codes: ``0`` when at least one observation was stored (a partial outage is
+reported, not fatal), ``1`` when nothing could be stored or the registry is
+empty.
 
 Usage::
 
@@ -37,7 +44,8 @@ CITIES_COLLECTION = "cities"
 MAX_WORKERS = 5
 
 #: Current-conditions variables: what the API maps for the UI plus the fields
-#: the Spark batch job reads. Mirrors the producer's list.
+#: the Spark batch job reads. Mirrors the backend's ``services/openmeteo.py``
+#: list, which a test asserts.
 CURRENT_VARIABLES = [
     "temperature_2m",
     "relative_humidity_2m",

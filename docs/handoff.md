@@ -18,6 +18,10 @@ live in `docs/batch4-contract.md`.
 Deleted branch: `rebuild/v2` is gone (it caused a stale Render deploy). `main` is the
 only branch that matters.
 
+Removed 2026-10-30: the legacy Kafka pipeline (`kafka/`, its compose services and CI
+jobs) and the `torchcast/` notes folder — `scripts/ingest_weather.py` is the live
+`raw_weather` writer.
+
 ## Commands
 
 ```bash

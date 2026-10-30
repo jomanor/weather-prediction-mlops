@@ -1,8 +1,8 @@
 name: Ingest
 
-# The deployed stack runs no Kafka, so nothing writes fresh observations and
-# every now-relative view (history, stats, benchmark) has nothing to show.
-# This fills raw_weather on the cadence the producer used to.
+# Nothing outside the Ingest cron writes fresh observations, so every
+# now-relative view (history, stats, benchmark) has nothing to show without it.
+# This fills raw_weather hourly.
 on:
   schedule:
     # Runs before the ML workflow's hourly inference (":05"), so each

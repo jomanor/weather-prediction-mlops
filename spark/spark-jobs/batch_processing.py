@@ -3,7 +3,7 @@ batch_processing.py
 ====================
 Spark feature-engineering job.
 
-Reads from raw_weather (both live consumer records and historical backfill),
+Reads from raw_weather (both live ingest records and historical backfill),
 builds atmospheric + time-series features, and **upserts** the rebuilt snapshot
 into weather_features, keyed on a deterministic ``_id`` of
 ``{city}_{epoch_seconds(timestamp)}``. Rows outside the retention window are
@@ -92,7 +92,7 @@ def extract_weather_data(spark):
     """
     Read from raw_weather and flatten into a tidy per-row DataFrame.
 
-    The raw_weather documents written by the consumer / backfill script
+    The raw_weather documents written by the ingest / backfill scripts
     follow two slightly different shapes (live vs historical), but both
     expose the relevant fields under payload.current.
     """
