@@ -75,6 +75,11 @@ jobs:
             mlflow==2.19.0 \
             httpx \
             mongomock
+          # mlflow stays for one reason only: tests/unit/test_inference.py
+          # patches ``mlflow.spark.load_model`` to pin the MLflow-first artifact
+          # path. The training job (ml_training.py) imports it lazily and needs
+          # it for nothing — there is no MLflow server or registry in CI, and
+          # GridFS + model_registry are canonical (docs/model-lifecycle.md).
       - name: Run pipeline unit tests
         run: |
           pytest tests/unit/ \

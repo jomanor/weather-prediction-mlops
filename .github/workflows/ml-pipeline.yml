@@ -89,10 +89,11 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 300 || 120 }}
     env:
       MONGO_URI: ${{ secrets.MONGO_URI }}
-      # There is no MLflow server on a runner, and ml_training falls back to
-      # http://localhost:5000, where start_run() would hang and fail the job.
-      # Log to a throwaway local store instead; the models themselves go to GridFS.
-      MLFLOW_TRACKING_URI: file://${{ github.workspace }}/mlruns
+      # No MLFLOW_TRACKING_URI here on purpose. This job used to export
+      # file://$GITHUB_WORKSPACE/mlruns, a throwaway directory destroyed with
+      # the runner — it was being read as a model registry. GridFS (artifact) +
+      # model_registry (metadata) are canonical; MLflow logging is opt-in and
+      # stays off in CI. See docs/model-lifecycle.md.
       # The jobs import spark_config, which lives at /opt/config inside the
       # image. Outside it, put spark/config on the path.
       PYTHONPATH: ${{ github.workspace }}/spark/config
@@ -133,8 +134,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r spark/requirements.txt -r spark/spark-scheduler/requirements.txt
           # pyspark is not in requirements.txt because the docker image already
-          # ships Spark; mlflow is pinned to the version docker compose runs.
-          pip install pyspark==3.5.5 mlflow==2.19.0
+          # ships Spark, so it is pinned here. mlflow is deliberately NOT
+          # installed: it is an optional, opt-in side channel in ml_training.py
+          # and nothing in this job needs it.
+          pip install pyspark==3.5.5
 
       - name: Feature engineering
         if: needs.resolve.outputs.features == '1'

@@ -9,6 +9,7 @@ All DB read/writes are stubbed out.
 
 import ast
 import inspect
+import logging
 import os
 import sys
 import unittest.mock as mock
@@ -500,3 +501,90 @@ class TestWriteIsUpsertNotOverwrite:
     def test_save_adds_the_stable_id_column(self):
         body = inspect.getsource(bp.save_features_to_mongodb)
         assert "add_feature_id" in body
+
+
+# ---------------------------------------------------------------------------
+# Index repair after the feature write (the analytics endpoints need it)
+# ---------------------------------------------------------------------------
+
+MONGO_SOURCE = os.path.join(
+    os.path.dirname(__file__), "..", "..", "backend", "app", "db", "mongo.py"
+)
+
+
+class TestEnsureFeaturesIndexAfterWrite:
+    """The feature write must repair the ``{city:1,timestamp:-1}`` index.
+
+    ``ensure_indexes`` only runs at backend startup, and the pre-upsert
+    ``mode("overwrite")`` write dropped the index on every rebuild — so a
+    rebuilt ``weather_features`` made every city-prefixed sort (the analytics
+    endpoints) a COLLSCAN until a restart. The job now recreates the index
+    itself, idempotently and non-fatally.
+    """
+
+    def test_index_spec_matches_the_backend_declaration(self):
+        from tests.conftest import eval_python_constant
+
+        declared = eval_python_constant(MONGO_SOURCE, "INDEXES")["weather_features"]
+        assert bp.FEATURES_SORT_INDEX == declared[0]
+        assert bp.FEATURES_SORT_INDEX == [("city", 1), ("timestamp", -1)]
+
+    def test_never_adds_a_global_timestamp_index(self):
+        # Hard rule: sorts are city-prefixed; a global {timestamp:-1} index is
+        # never created (the prune is a range delete with no sort).
+        assert bp.FEATURES_SORT_INDEX[0][0] == "city"
+
+    def test_ensure_features_index_creates_the_city_sort_index(self):
+        collection = mock.MagicMock()
+        collection.create_index.return_value = "city_1_timestamp_-1"
+        client = mock.MagicMock()
+        client.__getitem__.return_value.__getitem__.return_value = collection
+
+        with mock.patch("pymongo.MongoClient", return_value=client):
+            name = bp.ensure_features_index("mongodb://example")
+
+        collection.create_index.assert_called_once_with(bp.FEATURES_SORT_INDEX)
+        assert name == "city_1_timestamp_-1"
+        client.close.assert_called_once()
+
+    def test_index_is_recreated_after_a_successful_write(self, sample_df, monkeypatch):
+        calls = []
+
+        def fake_retry(fn, **kwargs):
+            # Record the retried operations without touching Spark-on-Mongo or
+            # a real Atlas connection.
+            calls.append(kwargs.get("label"))
+            return None
+
+        monkeypatch.setattr(bp, "run_with_mongo_retries", fake_retry)
+        monkeypatch.setattr(bp, "prune_old_features", lambda *a, **k: calls.append("prune"))
+        monkeypatch.setattr(bp, "ensure_features_index", lambda *a, **k: calls.append("index"))
+
+        bp.save_features_to_mongodb(sample_df, [1, 3])
+
+        assert "weather_features write" in calls
+        write_at = calls.index("weather_features write")
+        assert "index" in calls
+        assert calls.index("index") > write_at
+        # The prune keeps running first; the index repair is the last step.
+        assert calls.index("prune") > write_at
+
+    def test_index_failure_is_logged_not_raised(self, sample_df, monkeypatch, caplog):
+        monkeypatch.setattr(bp, "run_with_mongo_retries", lambda fn, **kw: None)
+        monkeypatch.setattr(bp, "prune_old_features", lambda *a, **k: 0)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("not authorized on weather_features")
+
+        monkeypatch.setattr(bp, "ensure_features_index", boom)
+
+        with caplog.at_level(logging.WARNING, logger=bp.logger.name):
+            result = bp.save_features_to_mongodb(sample_df, [1, 3])
+
+        # The write result is still returned: a failed index repair must not fail
+        # the rebuild (a backend restart repairs the index).
+        assert result is not None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "COLLSCAN" in warnings[0].getMessage()
+        assert "weather_features" in warnings[0].getMessage()

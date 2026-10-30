@@ -9,8 +9,11 @@ the ``save_model`` registry document, all on a tiny synthetic Spark DataFrame
 with a local master. No MongoDB, no MLflow, no cluster.
 """
 
+import ast
 import importlib.util
+import inspect
 import io
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
@@ -1218,3 +1221,95 @@ class TestMainPerHorizonIsolation:
         assert sleeps == [5.0]
         assert list(trained) == [1] and len(trained[1]) == 1
         assert sorted(saved) == [("rain_prediction_1h_GBT", 1), ("temp_prediction_1h_GBT", 1)]
+
+
+# ---------------------------------------------------------------------------
+# MLflow is opt-in and never fatal (M6: GridFS + model_registry are canonical)
+# ---------------------------------------------------------------------------
+
+ML_TRAINING_SOURCE = os.path.join(SPARK_JOBS_DIR, "ml_training.py")
+
+
+def _mlflow_log_args(**overrides):
+    kwargs = {
+        "run_name": "temp_GBT_20260101_000000",
+        "model_type": "temperature",
+        "model_name": "GBT",
+        "params": {"maxDepth": 3},
+        "metrics": {"rmse": 1.0},
+        "important_features": [("temperature", 0.5)],
+        "model": MagicMock(),
+        "horizon": 1,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+class TestMlflowIsOptIn:
+    """``_log_to_mlflow`` is a best-effort side channel, not the system of record.
+
+    The CI runner no longer exports ``MLFLOW_TRACKING_URI`` (the ``file://``
+    store was ephemeral and was being treated as a registry), so logging must be
+    skipped when the variable is absent, must import mlflow lazily, and must turn
+    any failure into a warning — the GridFS artifact and the registry document
+    are already written by then.
+    """
+
+    def test_no_top_level_mlflow_import(self):
+        tree = ast.parse(inspect.getsource(ml_training))
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                assert all(alias.name != "mlflow" for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert node.module != "mlflow"
+
+    def test_module_imports_with_mlflow_unavailable(self, monkeypatch):
+        # None in sys.modules makes ``import mlflow`` raise ImportError.
+        monkeypatch.setitem(sys.modules, "mlflow", None)
+        monkeypatch.setitem(sys.modules, "mlflow.spark", None)
+        spec = importlib.util.spec_from_file_location("_ml_training_no_mlflow", ML_TRAINING_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert callable(module.main)
+        assert hasattr(module, "_log_to_mlflow")
+
+    def test_skipped_when_tracking_uri_is_unset(self, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        assert ml_training._mlflow_tracking_uri() is None
+        assert ml_training._log_to_mlflow(**_mlflow_log_args()) is False
+
+    def test_missing_mlflow_package_is_skipped_not_raised(self, monkeypatch, caplog):
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        monkeypatch.setitem(sys.modules, "mlflow", None)
+        monkeypatch.setitem(sys.modules, "mlflow.spark", None)
+        with caplog.at_level(logging.WARNING, logger=ml_training.__name__):
+            assert ml_training._log_to_mlflow(**_mlflow_log_args()) is False
+        assert "MLflow logging failed" in caplog.text
+
+    def test_mlflow_error_is_logged_as_a_warning(self, monkeypatch, caplog):
+        fake_mlflow = MagicMock()
+        fake_mlflow.start_run.side_effect = RuntimeError("tracking server down")
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+        monkeypatch.setitem(sys.modules, "mlflow.spark", fake_mlflow.spark)
+
+        with caplog.at_level(logging.WARNING, logger=ml_training.__name__):
+            result = ml_training._log_to_mlflow(**_mlflow_log_args())
+
+        assert result is False
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+        assert "canonical" in caplog.text
+        # The run never reached the model log: the failure short-circuited it.
+        fake_mlflow.spark.log_model.assert_not_called()
+
+    def test_logged_when_tracking_uri_is_set(self, monkeypatch):
+        fake_mlflow = MagicMock()
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+        monkeypatch.setitem(sys.modules, "mlflow.spark", fake_mlflow.spark)
+
+        assert ml_training._log_to_mlflow(**_mlflow_log_args()) is True
+        fake_mlflow.set_tracking_uri.assert_called_once_with("http://localhost:5000")
+        fake_mlflow.log_param.assert_any_call("horizon_hours", 1)
+        fake_mlflow.log_metric.assert_any_call("rmse", 1.0)
+        fake_mlflow.spark.log_model.assert_called_once()
