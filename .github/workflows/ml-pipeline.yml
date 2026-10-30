@@ -138,6 +138,20 @@ jobs:
           # installed: it is an optional, opt-in side channel in ml_training.py
           # and nothing in this job needs it.
           pip install pyspark==3.5.5
+          # scripts/ingest_weather.py (the step below) is an HTTP client; it is
+          # not a Spark dependency, so it is pinned here rather than in the
+          # image's requirements.
+          pip install requests
+
+      - name: Ingest current observations
+        # Runs once, before the feature rebuild and before inference.
+        # raw_weather used to depend on the throttled hourly cron alone, so
+        # observations landed ~6-7 h apart and inference scored whatever the
+        # last feature rebuild had seen. A non-zero exit is deliberately fatal:
+        # if ingest cannot write a fresh observation, the rest of the run would
+        # score stale data (see docs/handoff.md hard rule 1). ~15 s.
+        if: needs.resolve.outputs.inference == '1' || needs.resolve.outputs.features == '1'
+        run: python scripts/ingest_weather.py
 
       - name: Feature engineering
         if: needs.resolve.outputs.features == '1'
@@ -165,3 +179,12 @@ jobs:
       - name: Score latest features
         if: needs.resolve.outputs.inference == '1'
         run: python spark/spark-jobs/inference.py
+
+      - name: Pipeline summary (inference)
+        # Surfaces prediction coverage (rows/cities per horizon, oldest source
+        # timestamp) and the non-blocking ::warning the hourly run emits. A
+        # shrunken prediction set used to be invisible: 14 of 15 cities were
+        # dropped by the assembler on 2026-10-30 and only a stale row was
+        # written.
+        if: ${{ always() && needs.resolve.outputs.inference == '1' }}
+        run: python scripts/pipeline_summary.py >> "$GITHUB_STEP_SUMMARY" || true

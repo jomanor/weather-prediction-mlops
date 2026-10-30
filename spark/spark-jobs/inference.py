@@ -69,6 +69,14 @@ SHADOW_COLLECTION = "model_shadow"
 #: Rain probability treated as "rain" when counting shadow/production disagreement.
 SHADOW_RAIN_THRESHOLD = 0.5
 
+#: Prediction-coverage tripwires. The write is never blocked (a partial scoring
+#: run still beats no run), but a silently shrunk prediction set must be visible
+#: in the log and as a GitHub annotation: on 2026-10-30 the assembler's
+#: ``handleInvalid="skip"`` dropped 14 of 15 cities and only the oldest row was
+#: written, and nothing said so.
+COVERAGE_WARN_RATIO = 0.9
+STALE_SOURCE_HOURS = 12.0
+
 
 def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:
     """Download a GridFS file, unzip it into *dest_dir*, and return the
@@ -393,6 +401,81 @@ def run_inference(
     return build_output_df(pred_df, temp_meta, rain_meta, horizon)
 
 
+def prediction_coverage(output, df_features) -> dict:
+    """Counts behind the coverage signal (one pass over each frame).
+
+    ``available_cities`` is the number of distinct cities in the cached latest
+    feature frame (the population inference could have scored);
+    ``scored_cities`` is how many cities actually survived the model transform
+    into *output*. ``oldest_behind_hours`` is how far the oldest scored city's
+    ``source_timestamp`` trails the newest one — the staleness signal on its own.
+    """
+    scored_cities = output.select("city").distinct().count()
+    available_cities = df_features.select("city").distinct().count()
+
+    bounds = output.select(
+        F.min("source_timestamp").alias("oldest"), F.max("source_timestamp").alias("newest")
+    ).first()
+    oldest = bounds["oldest"] if bounds else None
+    newest = bounds["newest"] if bounds else None
+    behind = (newest - oldest).total_seconds() / 3600.0 if oldest and newest else None
+
+    return {
+        "scored_cities": scored_cities,
+        "available_cities": available_cities,
+        "oldest_source_timestamp": oldest,
+        "newest_source_timestamp": newest,
+        "oldest_behind_hours": behind,
+    }
+
+
+def coverage_warning(stats: dict) -> str | None:
+    """Warning body when coverage is short or a scored row is stale; else ``None``.
+
+    Fires when fewer than ``COVERAGE_WARN_RATIO`` (90 %) of the available cities
+    were scored, or when the oldest scored ``source_timestamp`` trails the newest
+    by more than ``STALE_SOURCE_HOURS`` (12 h). Pure: no Spark, no I/O.
+    """
+    scored = int(stats.get("scored_cities") or 0)
+    available = int(stats.get("available_cities") or 0)
+    behind = stats.get("oldest_behind_hours")
+
+    reasons = []
+    if available and scored < COVERAGE_WARN_RATIO * available:
+        reasons.append(f"scored {scored}/{available} cities")
+    if behind is not None and behind > STALE_SOURCE_HOURS:
+        reasons.append(f"oldest source_timestamp {behind:.1f} h behind the newest")
+    if not reasons:
+        return None
+    return "; ".join(reasons)
+
+
+def report_prediction_coverage(output, df_features) -> str | None:
+    """Log coverage, print a ``::warning`` annotation when it is short, never raise.
+
+    Always logs ``Scored %d/%d cities`` so a shrunken prediction set is traceable
+    in every run. The annotation goes to stderr (the workflow redirects stdout to
+    ``$GITHUB_STEP_SUMMARY``; only the step log surfaces it). Returns the warning
+    body, or ``None``. Any failure inside the check is logged and swallowed: the
+    write must still happen.
+    """
+    try:
+        stats = prediction_coverage(output, df_features)
+        logger.info("Scored %d/%d cities", stats["scored_cities"], stats["available_cities"])
+        warning = coverage_warning(stats)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail the run
+        logger.warning("Prediction coverage check skipped (%s: %s)", type(exc).__name__, exc)
+        return None
+
+    if warning:
+        logger.warning(
+            "Prediction coverage is short: %s (the write still proceeds).",
+            warning,
+        )
+        print(f"::warning title=Prediction coverage::{warning}", file=sys.stderr)
+    return warning
+
+
 def write_predictions(output, mongo_url: str):
     """Upsert the unioned prediction rows into ``weather_predictions``."""
 
@@ -672,6 +755,10 @@ def main():
         if output is None:
             logger.warning("No horizon produced predictions. Run ml_training.py first.")
             return
+
+        # Coverage signal (never fatal): a shrunken prediction set is logged and
+        # annotated before the write, which still happens.
+        report_prediction_coverage(output, df_features)
 
         # Retrying this write cannot duplicate rows: it is an idempotent upsert
         # keyed on _id (operationType=replace + upsertDocument=true), so a re-run

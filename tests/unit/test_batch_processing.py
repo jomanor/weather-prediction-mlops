@@ -588,3 +588,137 @@ class TestEnsureFeaturesIndexAfterWrite:
         assert len(warnings) == 1
         assert "COLLSCAN" in warnings[0].getMessage()
         assert "weather_features" in warnings[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Rolling std: 0.0 means "no observed variation in the stored window"
+# ---------------------------------------------------------------------------
+
+
+class TestRollingStdZeroFilled:
+    """The six ``*_std_6h`` features coalesce null to ``0.0``.
+
+    Production evidence (2026-10-30): the throttled hourly cron left raw_weather
+    observations ~6-7 h apart, so the 09:00 rebuild's 6 h window held a single
+    observation and ``stddev`` returned null for all six std features in every
+    city. The model's ``VectorAssembler`` (``handleInvalid="skip"``) then dropped
+    14 of 15 cities and only one stale row was written. ``0.0`` is the honest
+    value for a window with no observed variation; it keeps the observation
+    scorable without inventing data.
+    """
+
+    #: The six features named in the contract.
+    STD_6H_COLUMNS = [
+        "temperature_std_6h",
+        "humidity_std_6h",
+        "pressure_std_6h",
+        "specific_humidity_std_6h",
+        "shortwave_radiation_std_6h",
+        "wind_speed_std_6h",
+    ]
+
+    @pytest.fixture()
+    def gappy_df(self, spark):
+        """Madrid at 00:00/01:00 (two obs 1 h apart) then 08:00 then 15:00.
+
+        The 01:00 row's 6 h window holds two observations (std computable); the
+        08:00 and 15:00 rows hold one each after the ~7 h gap (std null before
+        the coalesce). "Lonely" has a single observation ever, and is used to
+        pin that the 12 h window keeps its old (null) semantics.
+        """
+        schema = StructType(
+            [
+                StructField("city", StringType(), True),
+                StructField("timestamp", TimestampType(), True),
+                StructField("temperature", DoubleType(), True),
+                StructField("humidity", DoubleType(), True),
+                StructField("pressure", DoubleType(), True),
+                StructField("wind_speed", DoubleType(), True),
+                StructField("specific_humidity", DoubleType(), True),
+                StructField("shortwave_radiation", DoubleType(), True),
+            ]
+        )
+        hours = [(0, 10.0), (1, 14.0), (8, 22.0), (15, 18.0)]
+        rows = [
+            Row(
+                city="Madrid",
+                timestamp=datetime(2026, 10, 30, hour, 0, 0),
+                temperature=temp,
+                humidity=50.0 + hour,
+                pressure=1000.0 + hour,
+                wind_speed=1.0 + hour,
+                specific_humidity=0.005 + hour / 1000.0,
+                shortwave_radiation=float(hour),
+            )
+            for hour, temp in hours
+        ]
+        rows.append(
+            Row(
+                city="Lonely",
+                timestamp=datetime(2026, 10, 30, 9, 0, 0),
+                temperature=5.0,
+                humidity=80.0,
+                pressure=900.0,
+                wind_speed=2.0,
+                specific_humidity=0.004,
+                shortwave_radiation=100.0,
+            )
+        )
+        return spark.createDataFrame(rows, schema=schema)
+
+    def test_only_the_6h_window_is_zero_filled(self):
+        assert bp.ZERO_FILLED_STD_WINDOW_HOURS == (6,)
+
+    def test_all_six_std_6h_columns_exist_and_are_never_null(self, gappy_df):
+        result = bp.create_rolling_features(gappy_df, window_sizes=[6])
+        for column in self.STD_6H_COLUMNS:
+            assert column in result.columns
+        nulls = result.filter(
+            " OR ".join(f"{column} IS NULL" for column in self.STD_6H_COLUMNS)
+        ).count()
+        assert nulls == 0, "a single-observation window must report 0.0, not null"
+
+    def test_single_observation_window_is_zero(self, gappy_df):
+        result = (
+            bp.create_rolling_features(gappy_df, window_sizes=[6])
+            .filter("city = 'Madrid' AND hour(timestamp) IN (0, 8, 15)")
+            .orderBy("timestamp")
+            .collect()
+        )
+        assert len(result) == 3
+        for row in result:
+            for column in self.STD_6H_COLUMNS:
+                assert row[column] == 0.0, f"{column} at {row['timestamp']}"
+
+    def test_computed_std_is_left_intact(self, gappy_df):
+        row = (
+            bp.create_rolling_features(gappy_df, window_sizes=[6])
+            .filter("city = 'Madrid' AND hour(timestamp) = 1")
+            .first()
+        )
+        # Two observations (10.0 and 14.0) => sample stddev of the window, not 0.
+        assert row["temperature_std_6h"] == pytest.approx(2.8284271, rel=1e-6)
+        assert row["humidity_std_6h"] > 0.0
+        assert row["pressure_std_6h"] > 0.0
+        assert row["wind_speed_std_6h"] > 0.0
+        assert row["specific_humidity_std_6h"] > 0.0
+        assert row["shortwave_radiation_std_6h"] > 0.0
+
+    def test_other_windows_keep_their_null_semantics(self, gappy_df):
+        """Only the 6 h window changed: a lone observation in a 12 h window still
+        has no computable std (the contract freezes the 6 h features only)."""
+        result = bp.create_rolling_features(gappy_df, window_sizes=[6, 12])
+        lonely = result.filter("city = 'Lonely'").first()
+        assert lonely["temperature_std_6h"] == 0.0
+        assert lonely["temperature_std_12h"] is None
+
+    def test_mean_min_max_features_are_untouched(self, gappy_df):
+        baseline = bp.create_rolling_features(gappy_df, window_sizes=[6]).select(
+            "temperature_mean_6h", "temperature_min_6h", "temperature_max_6h"
+        )
+        # A gap-filled std must not leak into the other rolling aggregates: the
+        # mean/min/max of a single-observation window is that observation.
+        row = baseline.filter("temperature_mean_6h == 5.0").first()
+        assert row is not None, "Lonely's mean_6h must stay its own observation"
+        assert row["temperature_min_6h"] == 5.0
+        assert row["temperature_max_6h"] == 5.0

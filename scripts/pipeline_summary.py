@@ -46,6 +46,12 @@ SKILL_SCORE_WARN_THRESHOLD = 0.0
 TOP_DRIFT_FEATURES = 3
 #: Cap on registry docs scanned when resolving the current model per family.
 DRIFT_MODEL_LIMIT = 200
+#: Prediction coverage below this fraction of the cities that have features is
+#: reported as a ``::warning`` (never a failure). Mirrors
+#: ``inference.COVERAGE_WARN_RATIO``; by the time the summary runs the write has
+#: already happened, so this is the only signal that a run scored only part of
+#: the fleet (2026-10-30: 1 of 15 cities, silently).
+PREDICTION_COVERAGE_WARN_RATIO = 0.9
 
 
 def _as_utc(value):
@@ -178,6 +184,106 @@ def drift_report(models) -> tuple[list[str], str | None]:
     return lines, warning
 
 
+def prediction_horizon_stats(db) -> dict[int, dict]:
+    """Per-horizon prediction rows/cities, plus the newest-batch city count.
+
+    One aggregation, no sort (hard rule: Mongo sorts are city-prefixed) and
+    ``allowDiskUse=True``. Grouping by ``(horizon, city)`` bounds the result at
+    #horizons × #cities documents, so the roll-up below is trivial.
+
+    ``cities_at_newest`` is how many cities have a prediction for that horizon's
+    newest ``source_timestamp`` — the number that collapsed to 1 during the
+    2026-10-30 incident, which a lifetime city count would have hidden.
+
+    Any failure returns ``{}``: the summary must never fail the pipeline.
+    """
+    pipeline = [
+        {
+            "$group": {
+                "_id": {"horizon": "$horizon_hours", "city": "$city"},
+                "rows": {"$sum": 1},
+                "oldest": {"$min": "$source_timestamp"},
+                "newest": {"$max": "$source_timestamp"},
+            }
+        }
+    ]
+    try:
+        groups = list(db["weather_predictions"].aggregate(pipeline, allowDiskUse=True))
+    except Exception:  # noqa: BLE001 - a summary must never fail the pipeline
+        return {}
+
+    stats: dict[int, dict] = {}
+    per_horizon_newest: dict[int, list[tuple]] = {}
+    for group in groups:
+        key = group.get("_id") or {}
+        horizon = key.get("horizon")
+        if horizon is None:
+            continue  # legacy row without horizon_hours: not attributable
+        horizon = int(horizon)
+        entry = stats.setdefault(horizon, {"rows": 0, "cities": 0, "oldest": None, "newest": None})
+        entry["rows"] += int(group.get("rows") or 0)
+        entry["cities"] += 1
+        oldest = _as_utc(group.get("oldest"))
+        newest = _as_utc(group.get("newest"))
+        if oldest and (entry["oldest"] is None or oldest < entry["oldest"]):
+            entry["oldest"] = oldest
+        if newest and (entry["newest"] is None or newest > entry["newest"]):
+            entry["newest"] = newest
+        per_horizon_newest.setdefault(horizon, []).append((key.get("city"), newest))
+
+    for horizon, entry in stats.items():
+        entry["cities_at_newest"] = sum(
+            1
+            for _city, newest in per_horizon_newest[horizon]
+            if newest is not None and newest == entry["newest"]
+        )
+    return stats
+
+
+def available_cities(db) -> int:
+    """Distinct cities with stored features — the population inference could score."""
+    try:
+        return len([city for city in db["weather_features"].distinct("city") if city])
+    except Exception:  # noqa: BLE001 - a summary must never fail the pipeline
+        return 0
+
+
+def coverage_warning(scored_cities: int, available: int) -> str | None:
+    """``::warning`` body when *scored_cities* is under 90 % of *available*.
+
+    Pure. Returns ``None`` when coverage is fine or *available* is unknown (0),
+    so an empty/fresh ``weather_features`` cannot produce a false alarm.
+    """
+    if not available or scored_cities >= PREDICTION_COVERAGE_WARN_RATIO * available:
+        return None
+    share = 100.0 * scored_cities / available
+    return (
+        f"prediction coverage {scored_cities}/{available} cities ({share:.0f}%) at the "
+        f"newest source_timestamp is below {PREDICTION_COVERAGE_WARN_RATIO * 100:.0f}%"
+    )
+
+
+def prediction_coverage_lines(stats: dict[int, dict], available: int) -> list[str]:
+    """Summary lines: rows/cities per horizon, oldest source timestamp, coverage."""
+    if not stats:
+        return ["- `weather_predictions` coverage: no prediction rows"]
+
+    per_horizon = "; ".join(
+        f"{horizon}h {entry['rows']} rows / {entry['cities']} cities"
+        for horizon, entry in sorted(stats.items())
+    )
+    oldest_values = [entry["oldest"] for entry in stats.values() if entry["oldest"]]
+    oldest = min(oldest_values) if oldest_values else None
+    scored = min(entry["cities_at_newest"] for entry in stats.values())
+    share = f" ({100.0 * scored / available:.0f}%)" if available else ""
+    return [
+        f"- `weather_predictions` per horizon: {per_horizon}",
+        f"- `weather_predictions` oldest source_timestamp {_iso(oldest)} (age {_age(oldest)})",
+        f"- `weather_predictions` coverage: {scored}/{available or '?'} cities{share} "
+        "at the newest source_timestamp",
+    ]
+
+
 def latest_registry_models(db) -> list[dict]:
     """Newest registry document per ``(model_type, horizon_hours)`` with drift data."""
     cursor = db["model_registry"].find(
@@ -230,13 +336,35 @@ def summary_and_warning(db) -> tuple[list[str], str | None]:
     return lines, warning
 
 
+def summary_and_warnings(db) -> tuple[list[str], list[tuple[str, str]]]:
+    """All summary lines plus every ``(title, body)`` annotation to emit.
+
+    Existing sections are unchanged; the prediction-coverage block follows the
+    prediction line, and its ``::warning`` (below 90 % city coverage) joins the
+    skill-degradation one. Neither ever fails the run.
+    """
+    lines, skill_warning = summary_and_warning(db)
+    stats = prediction_horizon_stats(db)
+    available = available_cities(db)
+    lines.extend(prediction_coverage_lines(stats, available))
+
+    warnings: list[tuple[str, str]] = []
+    if skill_warning:
+        warnings.append(("Model skill degradation", skill_warning))
+    if stats:
+        coverage = coverage_warning(min(e["cities_at_newest"] for e in stats.values()), available)
+        if coverage:
+            warnings.append(("Prediction coverage", coverage))
+    return lines, warnings
+
+
 def summary_lines(db) -> list[str]:
-    """Backwards-compatible summary-only view (the warning goes to stderr)."""
+    """Backwards-compatible summary-only view (warnings go to stderr)."""
     return summary_and_warning(db)[0]
 
 
 def main() -> int:
-    warning = None
+    warnings: list[tuple[str, str]] = []
     try:
         uri = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
         if not uri:
@@ -244,7 +372,7 @@ def main() -> int:
             return 0
         client = MongoClient(uri, serverSelectionTimeoutMS=5_000)
         try:
-            lines, warning = summary_and_warning(client[DB_NAME])
+            lines, warnings = summary_and_warnings(client[DB_NAME])
         finally:
             client.close()
     except Exception as exc:  # noqa: BLE001 - a summary must never fail the pipeline
@@ -254,10 +382,10 @@ def main() -> int:
     print("### Pipeline data snapshot")
     for line in lines:
         print(line)
-    if warning:
+    for title, body in warnings:
         # stderr, not stdout: the workflow redirects stdout to $GITHUB_STEP_SUMMARY,
         # and only the step log surfaces ::warning as an annotation.
-        print(f"::warning title=Model skill degradation::{warning}", file=sys.stderr)
+        print(f"::warning title={title}::{body}", file=sys.stderr)
     return 0
 
 
