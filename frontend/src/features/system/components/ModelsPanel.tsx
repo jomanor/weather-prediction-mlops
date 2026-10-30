@@ -4,7 +4,6 @@ import { useState, type ReactNode } from 'react'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, TableSkeleton } from '@/components/ui/Feedback'
-import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useModels } from '@/features/models/queries'
 import { driftLabel, driftTone, maxDriftPsi } from '@/features/models/diagnostics'
@@ -40,22 +39,22 @@ function DriftBadge({ diagnostics }: { diagnostics: ModelDiagnostics }) {
   )
 }
 
-export function ModelsPage() {
+/** Registry tab: one row per artefact, honest metrics folded into an expander. */
+export function ModelsPanel() {
   const models = useModels()
   const [expanded, setExpanded] = useState<string | null>(null)
 
   return (
-    <div className="space-y-5 pb-8">
-      <PageHeader
-        title="Registro de modelos"
-        description="Artefactos entrenados por el job Spark GBT: partición temporal, baselines de persistencia/climatología, skill score e intervalos de predicción."
-        actions={
-          <Button onClick={() => models.refetch()} disabled={models.isFetching}>
-            <RefreshCw className={cn('h-3.5 w-3.5', models.isFetching && 'animate-spin')} />
-            Actualizar
-          </Button>
-        }
-      />
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6">
+        <p className="text-xs text-fg-3">
+          Partición temporal, baselines de persistencia/climatología y skill score.
+        </p>
+        <Button onClick={() => models.refetch()} disabled={models.isFetching}>
+          <RefreshCw className={cn('h-3.5 w-3.5', models.isFetching && 'animate-spin')} />
+          Actualizar
+        </Button>
+      </div>
 
       <div className="px-4 sm:px-6">
         <Panel flush>

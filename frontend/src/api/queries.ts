@@ -23,7 +23,6 @@ const MINUTE = 60_000
 export const queryKeys = {
   health: ['health'] as const,
   cities: ['cities'] as const,
-  geo: (q: string) => ['geo', q] as const,
   stations: ['stations'] as const,
   mapStations: ['stations', 'map'] as const,
   station: (city: string) => ['station', city] as const,

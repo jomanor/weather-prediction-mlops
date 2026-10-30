@@ -1,12 +1,11 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 
-import type { CurrentWeather, Prediction } from '@/api/schemas'
+import type { CurrentWeather } from '@/api/schemas'
 import { PreferencesProvider } from '@/app/preferences'
-import { StationTable } from '@/features/overview/StationTable'
-import { StationSelectionProvider, useStationSelection } from '@/hooks/useStationSelection'
+import { StationTable, type StationRow } from '@/features/overview/StationTable'
 
 const STATION: CurrentWeather = {
   city: 'Madrid',
@@ -24,68 +23,49 @@ const STATION: CurrentWeather = {
   observed_at: '2026-09-25T10:00:00Z',
 }
 
-/** Stands in for the map and the charts, which read the same selection. */
-function SelectionProbe() {
-  const { selectedCity } = useStationSelection()
-  return <p data-testid="probe">{selectedCity ?? 'none'}</p>
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location">{location.pathname + location.search}</output>
 }
 
-function renderTable() {
+function renderTable(rows: StationRow[] = [{ name: 'Madrid', station: STATION }], search = '/') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[search]}>
       <PreferencesProvider>
-        <StationSelectionProvider>
-          <StationTable
-            rows={[{ name: 'Madrid', station: STATION }]}
-            predictions={new Map<string, Prediction>()}
-          />
-          <SelectionProbe />
-        </StationSelectionProvider>
+        <StationTable rows={rows} />
+        <LocationProbe />
       </PreferencesProvider>
     </MemoryRouter>,
   )
 }
 
-describe('StationTable cross-filtering', () => {
-  it('propagates a row click through the shared station selection', async () => {
+describe('StationTable navigation', () => {
+  it('opens the station page from the row link', async () => {
     renderTable()
-    const row = screen.getByRole('row', { name: /Madrid/ })
-    expect(row).toHaveAttribute('aria-selected', 'false')
+    const link = screen.getByRole('link', { name: 'Madrid' })
+    expect(link).toHaveAttribute('href', '/stations?city=Madrid')
 
-    await userEvent.click(row)
+    await userEvent.click(link)
 
-    expect(row).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByTestId('probe')).toHaveTextContent('Madrid')
+    expect(screen.getByTestId('location')).toHaveTextContent('/stations?city=Madrid')
   })
 
-  it('selects the station from the keyboard', async () => {
+  it('opens the station page from the keyboard', async () => {
     renderTable()
-    const row = screen.getByRole('row', { name: /Madrid/ })
-    row.focus()
+    const link = screen.getByRole('link', { name: 'Madrid' })
+    link.focus()
     await userEvent.keyboard('{Enter}')
-    expect(screen.getByTestId('probe')).toHaveTextContent('Madrid')
+    expect(screen.getByTestId('location')).toHaveTextContent('/stations?city=Madrid')
   })
 
-  it('keeps the surface params when opening a station', () => {
-    render(
-      <MemoryRouter initialEntries={['/overview?tab=estaciones']}>
-        <PreferencesProvider>
-          <StationSelectionProvider>
-            <StationTable
-              rows={[{ name: 'Madrid', station: STATION }]}
-              predictions={new Map<string, Prediction>()}
-            />
-          </StationSelectionProvider>
-        </PreferencesProvider>
-      </MemoryRouter>,
-    )
-    expect(screen.getByRole('link', { name: /Abrir la estación Madrid/ })).toHaveAttribute(
+  it('keeps the params the surface carries', () => {
+    renderTable(undefined, '/?hours=72')
+    expect(screen.getByRole('link', { name: 'Madrid' })).toHaveAttribute(
       'href',
-      '/stations?tab=estaciones&city=Madrid',
+      '/stations?hours=72&city=Madrid',
     )
   })
 })
-
 
 describe('StationTable data age and sorting', () => {
   const older = {
@@ -102,21 +82,10 @@ describe('StationTable data age and sorting', () => {
   }
 
   function renderRows() {
-    return render(
-      <MemoryRouter>
-        <PreferencesProvider>
-          <StationSelectionProvider>
-            <StationTable
-              rows={[
-                { name: 'Sevilla', station: older },
-                { name: 'Madrid', station: newer },
-              ]}
-              predictions={new Map<string, Prediction>()}
-            />
-          </StationSelectionProvider>
-        </PreferencesProvider>
-      </MemoryRouter>,
-    )
+    return renderTable([
+      { name: 'Sevilla', station: older },
+      { name: 'Madrid', station: newer },
+    ])
   }
 
   it('surfaces the age of each row from its own observed_at', () => {
@@ -127,7 +96,7 @@ describe('StationTable data age and sorting', () => {
     expect(within(madrid).getByText(/hace 10 min/)).toBeInTheDocument()
   })
 
-  it('sorts by temperature and keeps the selection working', async () => {
+  it('sorts by temperature', async () => {
     renderRows()
     const before = screen.getAllByRole('row').slice(1).map((row) => row.textContent)
     expect(before[0]).toContain('Madrid')
@@ -136,8 +105,5 @@ describe('StationTable data age and sorting', () => {
 
     const after = screen.getAllByRole('row').slice(1).map((row) => row.textContent)
     expect(after[0]).toContain('Sevilla')
-
-    await userEvent.click(screen.getByRole('row', { name: /Sevilla/ }))
-    expect(screen.getByRole('row', { name: /Sevilla/ })).toHaveAttribute('aria-selected', 'true')
   })
 })

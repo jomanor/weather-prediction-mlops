@@ -8,7 +8,6 @@ import { ResidualChart } from '@/components/charts/ResidualChart'
 import { SeriesLegend } from '@/components/charts/SeriesLegend'
 import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
-import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
 import { AemetNotice } from '@/features/benchmark/AemetNotice'
@@ -34,7 +33,12 @@ const BENCHMARK_SCHEMA: { range: UrlCodec<BenchmarkRange> } = {
   range: urlOption(RANGE_HOURS, 24),
 }
 
-export function BenchmarkPage() {
+/**
+ * Benchmark tab: observed vs model vs AEMET for one station and window, plus
+ * the national MAE table. The AEMET Spain-only notice stays with the data it
+ * explains.
+ */
+export function BenchmarkPanel() {
   const [state, setState] = useUrlState(BENCHMARK_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
   const { palette } = usePreferences()
@@ -68,36 +72,30 @@ export function BenchmarkPage() {
   const hasSeries = Boolean(benchmark.data?.series.length)
 
   return (
-    <div className="space-y-5 pb-8">
-      <PageHeader
-        title="Benchmark de modelos"
-        description="Contraste entre la observación, la predicción del modelo Spark GBT y la predicción oficial de AEMET OpenData sobre la misma ventana temporal."
-        actions={
-          <>
-            <label className="sr-only" htmlFor="benchmark-city">
-              Estación
-            </label>
-            <select
-              id="benchmark-city"
-              value={city}
-              onChange={(event) => selectCity(event.target.value)}
-              className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
-            >
-              {(cities ?? []).map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-            <Segmented
-              value={hours}
-              onChange={(value) => setState({ range: value })}
-              options={RANGES}
-              label="Ventana"
-            />
-          </>
-        }
-      />
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center gap-2 px-4 sm:px-6">
+        <label className="sr-only" htmlFor="benchmark-city">
+          Estación
+        </label>
+        <select
+          id="benchmark-city"
+          value={city}
+          onChange={(event) => selectCity(event.target.value)}
+          className="h-9 rounded-[3px] border border-line bg-panel px-2.5 text-xs text-fg focus:border-accent focus:outline-none"
+        >
+          {(cities ?? []).map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+        <Segmented
+          value={hours}
+          onChange={(value) => setState({ range: value })}
+          options={RANGES}
+          label="Ventana"
+        />
+      </div>
 
       {/* The whole view depends on the benchmark call, so a failure is reported once. */}
       {benchmark.isError ? (

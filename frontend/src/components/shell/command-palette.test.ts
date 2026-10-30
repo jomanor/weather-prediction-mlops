@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { filterPaletteItems, normalizeTerm, type PaletteItem } from '@/components/shell/command-palette'
 
 const ITEMS: PaletteItem[] = [
-  { id: 'route:/', label: 'Red', group: 'Secciones', to: '/' },
+  { id: 'route:/', label: 'Resumen', group: 'Secciones', to: '/' },
   { id: 'route:/stations', label: 'Estación', group: 'Secciones', to: '/stations' },
-  { id: 'route:/models', label: 'Modelos', group: 'Secciones', to: '/models' },
+  { id: 'route:/sistema', label: 'Sistema', group: 'Secciones', to: '/sistema' },
   { id: 'station:Sevilla', label: 'Sevilla', group: 'Estaciones', to: '/stations?city=Sevilla' },
   { id: 'station:Santander', label: 'Santander', group: 'Estaciones', to: '/stations?city=Santander' },
   { id: 'station:Madrid', label: 'Madrid', group: 'Estaciones', to: '/stations?city=Madrid' },
@@ -24,7 +24,7 @@ describe('filterPaletteItems', () => {
     expect(result.map((item) => item.id)).toEqual([
       'route:/',
       'route:/stations',
-      'route:/models',
+      'route:/sistema',
       'station:Sevilla',
       'station:Santander',
       'station:Madrid',

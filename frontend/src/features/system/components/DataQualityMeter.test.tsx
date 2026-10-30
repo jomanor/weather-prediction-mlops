@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWeatherQuality } from '@/api/queries'
-import { DataQualityMeter } from '@/components/DataQualityMeter'
+import { DataQualityMeter } from '@/features/system/components/DataQualityMeter'
 
 vi.mock('@/api/queries', () => ({ useWeatherQuality: vi.fn() }))
 

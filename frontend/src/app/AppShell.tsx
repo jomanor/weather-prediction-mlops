@@ -109,8 +109,8 @@ export function AppShell() {
         style={{
           gridTemplateColumns: `repeat(${NAV_ITEMS.length}, minmax(0, 1fr))`,
           /* `--nav-h` is the nav's own height and the home indicator is added
-             on top, so the station sheet can sit exactly above it. Each row is
-             a full-width touch target at least 48 px tall. */
+             on top. Three items share the row, so each is a full-width touch
+             target well above 44 px at 360 px. */
           height: 'calc(var(--nav-h) + var(--safe-bottom))',
           paddingBottom: 'var(--safe-bottom)',
         }}
