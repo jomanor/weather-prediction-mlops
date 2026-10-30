@@ -35,6 +35,9 @@ def settings() -> Settings:
         _env_file=None,
         mongo_uri="mongodb://localhost:27017",
         cors_origins="http://localhost:5173,http://example.com",
+        # Shipped default is off (unauthenticated write surface); tests that need
+        # the endpoint opt in here, and the default-off case builds its own app.
+        refresh_enabled=True,
     )
 
 
