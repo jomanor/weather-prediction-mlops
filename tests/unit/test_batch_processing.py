@@ -43,6 +43,7 @@ fake_config.create_spark_session = mock.MagicMock()
 sys.modules.setdefault("spark_config", fake_config)
 
 import batch_processing as bp  # noqa: E402
+import mongo_retry as mr  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -373,35 +374,62 @@ class TestPruneCutoff:
         assert bp.prune_filter(cutoff) == {"timestamp": {"$lt": cutoff}}
 
 
-class TestTransientMongoErrors:
-    def test_code_91_shutdown_in_progress_is_transient(self):
-        assert bp.is_transient_mongo_error(_TransientError(code=91)) is True
+class TestSharedMongoRetryHelper:
+    """The retry logic lives in ``mongo_retry``; this job must only reuse it.
 
-    def test_code_116_is_transient(self):
-        assert bp.is_transient_mongo_error(_TransientError(code=116)) is True
+    ``inference.py`` and ``ml_training.py`` already import the shared helper.
+    ``batch_processing`` used to carry its own copy of
+    ``run_with_mongo_retries`` / ``is_transient_mongo_error`` /
+    ``retry_delay_seconds``; a second copy drifts from the first, so the job
+    imports it instead. These tests pin that wiring and the retry behaviour the
+    job relies on (transient Atlas faults absorbed, real bugs fail fast).
+    """
 
-    def test_code_from_details_is_transient(self):
-        assert bp.is_transient_mongo_error(_TransientError(details={"code": 91})) is True
+    def test_run_with_mongo_retries_is_the_shared_function(self):
+        assert bp.run_with_mongo_retries is mr.run_with_mongo_retries
 
-    def test_node_is_recovering_exception_is_transient(self):
-        assert bp.is_transient_mongo_error(MongoNodeIsRecoveringException("x")) is True
+    def test_module_does_not_redefine_the_helper(self):
+        # A local copy would shadow the import again — the exact regression
+        # this refactor removes. Inspect the source, not just the attributes.
+        source = inspect.getsource(bp)
+        for name in ("run_with_mongo_retries", "is_transient_mongo_error", "retry_delay_seconds"):
+            assert f"def {name}(" not in source, f"batch_processing redefines {name}"
 
-    def test_connection_pool_cleared_exception_is_transient(self):
-        assert bp.is_transient_mongo_error(MongoConnectionPoolClearedException("x")) is True
+    def test_transient_atlas_errors_are_retried(self):
+        # 91 = ShutdownInProgress, 116 = InterruptedAtShutdown, plus the two
+        # pymongo classes Atlas surfaces during a primary stepdown / pool clear.
+        transient_errors = [
+            _TransientError(code=91),
+            _TransientError(code=116),
+            MongoNodeIsRecoveringException("quiesce mode"),
+            MongoConnectionPoolClearedException("connection pool cleared"),
+        ]
+        for exc in transient_errors:
+            calls = []
+            delays = []
 
-    def test_other_errors_are_not_transient(self):
-        assert bp.is_transient_mongo_error(ValueError("bad schema")) is False
-        assert bp.is_transient_mongo_error(_TransientError(code=11000)) is False
+            def fn(exc=exc):
+                calls.append(1)
+                if len(calls) < 2:
+                    raise exc
+                return "ok"
 
+            assert bp.run_with_mongo_retries(fn, attempts=4, sleep=delays.append) == "ok", exc
+            assert len(calls) == 2, exc
+            assert delays == [5.0], exc
 
-class TestRetryBackoff:
-    def test_delay_is_exponential(self):
-        assert bp.retry_delay_seconds(0, base=5.0, factor=2.0, cap=60.0) == 5.0
-        assert bp.retry_delay_seconds(1, base=5.0, factor=2.0, cap=60.0) == 10.0
-        assert bp.retry_delay_seconds(2, base=5.0, factor=2.0, cap=60.0) == 20.0
+    def test_non_transient_errors_are_not_retried(self):
+        permanent_errors = [ValueError("bad schema"), _TransientError(code=11000)]
+        for exc in permanent_errors:
+            calls = []
 
-    def test_delay_is_capped(self):
-        assert bp.retry_delay_seconds(10, base=5.0, factor=2.0, cap=60.0) == 60.0
+            def fn(exc=exc):
+                calls.append(1)
+                raise exc
+
+            with pytest.raises(type(exc)):
+                bp.run_with_mongo_retries(fn, attempts=4, sleep=lambda _: None)
+            assert len(calls) == 1, exc
 
     def test_retries_transient_then_succeeds(self):
         calls = []
@@ -415,7 +443,10 @@ class TestRetryBackoff:
 
         assert bp.run_with_mongo_retries(fn, attempts=4, sleep=delays.append) == "ok"
         assert len(calls) == 3
-        assert delays == [bp.retry_delay_seconds(0), bp.retry_delay_seconds(1)]
+        # Shared backoff is one-based: 5 s after the first failure, 10 s after
+        # the second (same wall-clock schedule the job's local copy used).
+        assert delays == [5.0, 10.0]
+        assert delays == [mr.retry_delay_seconds(1), mr.retry_delay_seconds(2)]
 
     def test_non_transient_error_raises_without_retrying(self):
         calls = []
