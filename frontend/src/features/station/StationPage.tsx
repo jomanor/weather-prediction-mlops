@@ -4,9 +4,8 @@ import { useMemo } from 'react'
 import { useCities } from '@/api/queries'
 import { usePreferences } from '@/app/preferences'
 import { HistoryChart, type HistoryVariable } from '@/components/charts/HistoryChart'
-import { SeriesLegend } from '@/components/charts/SeriesLegend'
 import { Button } from '@/components/ui/Button'
-import { EmptyState, ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
+import { ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
@@ -24,7 +23,7 @@ import { useChartWindow } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { cn } from '@/lib/cn'
-import { formatPercent, isNum } from '@/lib/format'
+import { isNum } from '@/lib/format'
 
 const HOURS = [24, 48, 72, 168] as const
 type StationHours = (typeof HOURS)[number]
@@ -60,7 +59,7 @@ const STATION_SCHEMA: {
 export function StationPage() {
   const [state, setState] = useUrlState(STATION_SCHEMA)
   const { selectedCity, selectCity } = useStationSelection()
-  const { palette, units } = usePreferences()
+  const { palette } = usePreferences()
   const { data: cityList } = useCities()
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
@@ -77,19 +76,6 @@ export function StationPage() {
 
   /* Share the observed window with the benchmark charts on the same time axis. */
   const { brushed, resetWindow } = useChartWindow(hours, history.data?.points.at(-1)?.observed_at)
-
-  const legendItems =
-    variable === 'temperature'
-      ? [
-          { label: 'Temperatura', color: palette.aemet },
-          { label: 'Precipitación', color: palette.accent },
-          ...(intervalLevel !== null
-            ? [{ label: `Modelo (nivel ${formatPercent(intervalLevel * 100, 0)})`, color: palette.model }]
-            : []),
-        ]
-      : variable === 'precipitation'
-        ? [{ label: 'Precipitación', color: palette.accent }]
-        : [{ label: `Viento (${units === 'imperial' ? 'mph' : 'km/h'})`, color: palette.observed }]
 
   return (
     <div className="space-y-5 pb-8">
@@ -160,13 +146,12 @@ export function StationPage() {
           </div>
 
           <div className="grid items-start gap-5 px-4 sm:px-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-            <Panel flush>
+            <Panel flush className="order-2 xl:order-1">
               <PanelHeader
                 title="Evolución observada"
-                subtitle={`Últimas ${hours} horas`}
+                subtitle={`Últimas ${hours} horas · modelo a +${horizon} h`}
                 actions={
                   <>
-                    <SeriesLegend className="hidden sm:flex" items={legendItems} />
                     {brushed ? (
                       <Button size="sm" onClick={resetWindow}>
                         Restablecer zoom
@@ -186,29 +171,27 @@ export function StationPage() {
                   <ChartSkeleton />
                 ) : history.isError ? (
                   <ErrorState title="Sin histórico" description={history.error.message} />
-                ) : !history.data?.points.length ? (
-                  <EmptyState
-                    title="Sin observaciones en el rango"
-                    description="Amplía el rango temporal o comprueba que el backfill ha cargado datos históricos."
-                  />
                 ) : (
                   <HistoryChart
-                    points={history.data.points}
+                    points={history.data?.points ?? []}
                     predictions={predictions.data ?? []}
                     palette={palette}
                     variable={variable}
+                    intervalLevel={intervalLevel}
                   />
                 )}
               </div>
             </Panel>
 
-            {predictions.isLoading ? (
-              <Panel>
-                <LoadingBlock />
-              </Panel>
-            ) : (
-              <LatestPrediction predictions={predictions.data ?? []} />
-            )}
+            <div className="order-1 xl:order-2">
+              {predictions.isLoading ? (
+                <Panel>
+                  <LoadingBlock />
+                </Panel>
+              ) : (
+                <LatestPrediction predictions={predictions.data ?? []} />
+              )}
+            </div>
           </div>
 
           <div className="px-4 sm:px-6">

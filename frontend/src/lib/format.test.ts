@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  ageInHours,
   compassPoint,
   convertTemperature,
+  formatAgeHours,
+  formatDegrees,
   formatNumber,
   formatSigned,
   formatTemperature,
+  formatWithUnit,
   isNum,
   normalise,
 } from '@/lib/format'
@@ -80,5 +84,26 @@ describe('normalise', () => {
 
   it('handles a zero-width range', () => {
     expect(normalise(5, 5, 5)).toBe(0.5)
+  })
+})
+
+
+describe('chart formatting helpers', () => {
+  it('formats an already-converted degree value', () => {
+    expect(formatDegrees(21.4, 0)).toBe('21°')
+    expect(formatDegrees(null)).toBe('—')
+  })
+
+  it('appends the unit with a space', () => {
+    expect(formatWithUnit(21.44, '°C', 1)).toBe('21,4 °C')
+    expect(formatWithUnit(2, 'mm', 1)).toBe('2,0 mm')
+  })
+
+  it('derives a human age from an ISO timestamp', () => {
+    const now = new Date('2026-09-25T12:00:00Z').getTime()
+    expect(ageInHours('2026-09-25T09:00:00Z', now)).toBe(3)
+    expect(formatAgeHours('2026-09-25T09:00:00Z', now)).toBe('hace 3 h')
+    expect(formatAgeHours('2026-09-25T11:30:00Z', now)).toBe('hace 30 min')
+    expect(formatAgeHours('nope', now)).toBe('—')
   })
 })

@@ -1,9 +1,9 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { predictionSchema, type Prediction } from '@/api/schemas'
 import { PreferencesProvider } from '@/app/preferences'
-import { LatestPrediction } from '@/features/station/LatestPrediction'
+import { LatestPrediction, PREDICTION_STALE_HOURS } from '@/features/station/LatestPrediction'
 
 function makePrediction(overrides: Record<string, unknown>): Prediction {
   return predictionSchema.parse({
@@ -50,5 +50,36 @@ describe('LatestPrediction interval readout (Contract 2)', () => {
     renderLatest([makePrediction({ temp_lower: 20.1, temp_upper: 24.1 })])
     expect(screen.getByText('Intervalo')).toBeInTheDocument()
     expect(screen.queryByText('Nivel')).not.toBeInTheDocument()
+  })
+})
+
+
+describe('LatestPrediction age and stale badge', () => {
+  const NOW = new Date('2026-09-25T12:00:00Z').getTime()
+
+  afterEach(() => vi.useRealTimers())
+
+  it('shows how old the origin observation is next to the horizon', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    renderLatest([
+      makePrediction({ source_timestamp: '2026-09-25T09:00:00Z', prediction_timestamp: '2026-09-25T10:00:00Z' }),
+    ])
+    expect(screen.getByText('hace 3 h')).toBeInTheDocument()
+    expect(screen.queryByText('Antigua')).not.toBeInTheDocument()
+  })
+
+  it('marks a prediction older than 24 h as "Antigua" without hiding it', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    renderLatest([
+      makePrediction({
+        source_timestamp: new Date(NOW - (PREDICTION_STALE_HOURS + 6) * 3_600_000).toISOString(),
+      }),
+    ])
+    expect(screen.getByText(`hace ${PREDICTION_STALE_HOURS + 6} h`)).toBeInTheDocument()
+    expect(screen.getByText('Antigua')).toBeInTheDocument()
+    // The real prediction values stay visible.
+    expect(screen.getByText('Temp. prevista')).toBeInTheDocument()
   })
 })

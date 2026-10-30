@@ -1,4 +1,4 @@
-import { AlertTriangle, Info } from 'lucide-react'
+import { Info } from 'lucide-react'
 import { useMemo } from 'react'
 
 import { useBenchmarkSummary, useCities } from '@/api/queries'
@@ -11,6 +11,7 @@ import { EmptyState, ErrorState, LoadingBlock, ChartSkeleton } from '@/component
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
+import { AemetNotice } from '@/features/benchmark/AemetNotice'
 import { MetricsCompare } from '@/features/benchmark/MetricsCompare'
 import { useBenchmark } from '@/features/benchmark/queries'
 import { useChartWindow } from '@/hooks/useChartSync'
@@ -41,6 +42,10 @@ export function BenchmarkPage() {
   const cities = useMemo(() => cityList?.map((c) => c.name) ?? [], [cityList])
 
   const city = resolveCity(selectedCity, cities, cityList !== undefined)
+  const cityEntry = useMemo(
+    () => cityList?.find((entry) => entry.name === city),
+    [cityList, city],
+  )
   const hours = state.range
   const benchmark = useBenchmark(city, hours)
   const summary = useBenchmarkSummary()
@@ -115,17 +120,11 @@ export function BenchmarkPage() {
 
       {benchmark.data && !benchmark.data.aemet.available ? (
         <div className="px-4 sm:px-6">
-          <div className="flex items-start gap-2.5 rounded-[var(--radius-panel)] border border-warn/35 bg-warn/5 px-4 py-3">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
-            <div className="text-xs leading-relaxed">
-              <p className="font-medium text-fg">Benchmark AEMET no disponible</p>
-              <p className="mt-0.5 text-fg-2">
-                {benchmark.data.aemet.error ??
-                  'La API de AEMET OpenData no ha devuelto datos para esta estación.'}{' '}
-                Solo se muestra la comparación frente a la observación.
-              </p>
-            </div>
-          </div>
+          <AemetNotice
+            available={benchmark.data.aemet.available}
+            error={benchmark.data.aemet.error}
+            city={cityEntry}
+          />
         </div>
       ) : null}
 
@@ -148,7 +147,9 @@ export function BenchmarkPage() {
                       items={[
                         { label: 'Observado', color: palette.observed },
                         { label: 'Spark GBT', color: palette.model, dash: '6 3' },
-                        { label: 'AEMET', color: palette.aemet, dash: '2 3' },
+                        ...(benchmark.data && !benchmark.data.aemet.available
+                          ? []
+                          : [{ label: 'AEMET', color: palette.aemet, dash: '2 3' }]),
                       ]}
                     />
                   </>
@@ -180,6 +181,12 @@ export function BenchmarkPage() {
                   <MetricsCompare
                     model={benchmark.data.metrics.model}
                     aemet={benchmark.data.metrics.aemet}
+                  />
+                  <AemetNotice
+                    variant="inline"
+                    available={benchmark.data.aemet.available}
+                    error={benchmark.data.aemet.error}
+                    city={cityEntry}
                   />
                   {verdict ? (
                     <p className="flex items-start gap-2 border-t border-line px-4 py-3 text-[11px] leading-relaxed text-fg-2">

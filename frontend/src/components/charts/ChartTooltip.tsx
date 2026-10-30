@@ -16,11 +16,16 @@ export interface TooltipContentProps {
   payload?: TooltipEntry[]
   format?: (entry: TooltipEntry) => ReactNode
   title?: (label: string | number | undefined) => ReactNode
+  /** Extra rows below the series list, e.g. the interval band. */
+  extra?: (payload: TooltipEntry[]) => ReactNode
 }
 
 /** Shared, design-system-styled tooltip for every chart. */
-export function ChartTooltip({ active, label, payload, format, title }: TooltipContentProps) {
+export function ChartTooltip({ active, label, payload, format, title, extra }: TooltipContentProps) {
   if (!active || !payload?.length) return null
+
+  /* Only draw the divider when the chart actually produced extra content. */
+  const extraContent = extra?.(payload)
 
   return (
     <div className="min-w-[9rem] rounded-[3px] border border-line bg-panel px-2.5 py-2">
@@ -45,6 +50,9 @@ export function ChartTooltip({ active, label, payload, format, title }: TooltipC
           </li>
         ))}
       </ul>
+      {extraContent ? (
+        <div className="mt-1.5 border-t border-line pt-1.5">{extraContent}</div>
+      ) : null}
     </div>
   )
 }

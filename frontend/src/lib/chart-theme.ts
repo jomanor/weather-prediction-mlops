@@ -75,6 +75,52 @@ export function readChartPalette(isDark: boolean): ChartPalette {
   }
 }
 
+/** One margin for line/area charts; bar charts add room for their labels. */
+export const CHART_MARGIN = { top: 8, right: 10, bottom: 0, left: 0 } as const
+
+/** Axis tick type shared by every chart, so the scale reads as one system. */
+const TICK_FONT = 'JetBrains Mono Variable, monospace'
+
+/** Stroke/tick props for a Recharts axis, read from the design tokens. */
+export function chartAxisProps(palette: ChartPalette) {
+  return {
+    stroke: palette.axis,
+    tick: { fill: palette.textMuted, fontSize: 10, fontFamily: TICK_FONT },
+    tickLine: false as const,
+  }
+}
+
+/** Rotated axis title: the unit is part of the scale, not a floating caption. */
+export function chartAxisLabel(
+  palette: ChartPalette,
+  value: string,
+  position: 'insideLeft' | 'insideRight' = 'insideLeft',
+) {
+  return {
+    value,
+    position,
+    angle: -90,
+    fill: palette.textMuted,
+    fontSize: 10,
+    fontFamily: TICK_FONT,
+  }
+}
+
+/** Dotted horizontal grid, no vertical rules (time is read from the ticks). */
+export function chartGridProps(palette: ChartPalette) {
+  return { stroke: palette.grid, strokeDasharray: '2 4', vertical: false as const }
+}
+
+/** Vertical guide under the pointer, matching the axis hairline. */
+export function chartLineCursor(palette: ChartPalette) {
+  return { stroke: palette.axis, strokeDasharray: '3 3' }
+}
+
+/** Translucent column highlight for bar charts. */
+export function chartBarCursor(palette: ChartPalette) {
+  return { fill: palette.grid }
+}
+
 export const SERIES_LABELS = {
   observed: 'Observado',
   model: 'Spark GBT',

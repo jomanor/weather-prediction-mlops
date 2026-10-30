@@ -6,13 +6,29 @@ import { Badge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/Feedback'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Readout } from '@/components/ui/Readout'
-import { formatDateTime, formatNumber, formatPercent, formatTemperature, isNum } from '@/lib/format'
+import {
+  ageInHours,
+  formatAgeHours,
+  formatDateTime,
+  formatNumber,
+  formatPercent,
+  formatTemperature,
+  isNum,
+} from '@/lib/format'
+
+/** A prediction whose source observation is older than this is flagged, not hidden. */
+export const PREDICTION_STALE_HOURS = 24
 
 export function LatestPrediction({ predictions }: { predictions: Prediction[] }) {
   const { units } = usePreferences()
   const latest = predictions[0]
   const hasInterval =
     latest !== undefined && isNum(latest.temp_lower) && isNum(latest.temp_upper)
+  /* TODO(stale-api): the prediction API will expose `source_age_hours` and a
+     `stale` flag. Until then the age is derived locally from the origin
+     observation so the badge stays honest without depending on new fields. */
+  const ageHours = latest ? ageInHours(latest.source_timestamp) : null
+  const isStale = ageHours !== null && ageHours > PREDICTION_STALE_HOURS
 
   return (
     <Panel flush>
@@ -21,10 +37,23 @@ export function LatestPrediction({ predictions }: { predictions: Prediction[] })
         subtitle="Salida real del job de inferencia Spark GBT"
         actions={
           latest ? (
-            <Badge tone="model">
-              <Cpu className="h-2.5 w-2.5" />
-              +{latest.horizon_hours} h
-            </Badge>
+            <>
+              <span
+                className="nums text-[10px] text-fg-3"
+                title="Antigüedad de la observación de origen"
+              >
+                {formatAgeHours(latest.source_timestamp)}
+              </span>
+              {isStale ? (
+                <Badge tone="warn" title={`Más de ${PREDICTION_STALE_HOURS} h desde el origen`}>
+                  Antigua
+                </Badge>
+              ) : null}
+              <Badge tone="model">
+                <Cpu className="h-2.5 w-2.5" />
+                +{latest.horizon_hours} h
+              </Badge>
+            </>
           ) : null
         }
       />
