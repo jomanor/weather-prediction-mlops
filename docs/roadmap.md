@@ -1,6 +1,7 @@
 # Meteo platform roadmap
 
 Goal: a **free**, highly customizable, comprehensive weather + ML platform.
+> UI/IA rethink proposal (3 surfaces, mobile-first): `docs/app-rethink.md`.
 Environment, hard rules and deploy-verification steps live in `docs/handoff.md` —
 read that first.
 Stack stays as-is (FastAPI/Mongo Atlas M0 on Render free, Vite/React on Netlify,
