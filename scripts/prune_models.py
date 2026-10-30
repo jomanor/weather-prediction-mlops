@@ -7,6 +7,14 @@ free tier. `inference.py` only ever loads the newest model for each prefix, so
 everything older is dead weight.
 
 This keeps the newest `KEEP` artifacts per model family and deletes the rest.
+GridFS files and their registry documents are deleted together; registry *stages*
+(`staging`/`production`/`superseded`, Batch 5) are never rewritten here.
+
+It also ages out the Batch-5 `model_shadow` A/B documents. That collection is
+bounded by construction — one document per (production model, shadow model) pair,
+so O(#model-pairs) and never O(#predictions) — but a stale pair from a pruned
+model family has no consumer, so anything untouched for `KEEP_SHADOW_DAYS` goes.
+
 Run it after training, or standalone:
 
     MONGO_URI="mongodb+srv://..." python scripts/prune_models.py
@@ -18,6 +26,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 import gridfs
 from pymongo import MongoClient
@@ -30,6 +39,18 @@ FILENAME_FILTER = {"$regex": "^(temp|rain)_prediction_"}
 KEEP = int(os.getenv("KEEP_MODELS", "2"))
 DB_NAME = "weather_db"
 REGISTRY = "model_registry"
+SHADOW = "model_shadow"
+#: Shadow A/B docs are refreshed on every inference run while both models live;
+#: a pair untouched for this long belongs to a pruned family.
+KEEP_SHADOW_DAYS = int(os.getenv("KEEP_SHADOW_DAYS", "30"))
+
+
+def prune_shadow_docs(db, keep_days: int = KEEP_SHADOW_DAYS, now: datetime | None = None) -> int:
+    """Delete `model_shadow` docs not refreshed in *keep_days*. Returns the count."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=keep_days)
+    result = db[SHADOW].delete_many({"updated_at": {"$lt": cutoff}})
+    return getattr(result, "deleted_count", 0)
 
 
 def prune(mongo_uri: str, keep: int = KEEP) -> int:
@@ -57,6 +78,9 @@ def prune(mongo_uri: str, keep: int = KEEP) -> int:
                 db[REGISTRY].delete_many({"gridfs_file_id": doc["_id"]})
                 removed += 1
             print(f"{family}: kept {min(len(docs), keep)}/{len(docs)}")
+
+        stale_shadow = prune_shadow_docs(db)
+        print(f"{SHADOW}: removed {stale_shadow} A/B doc(s) older than {KEEP_SHADOW_DAYS} d")
 
         return removed
     finally:

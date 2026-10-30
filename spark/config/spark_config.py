@@ -16,6 +16,11 @@ def create_spark_session(app_name="WeatherMLOps"):
         .config("spark.jars.packages", "org.mongodb.spark:mongo-spark-connector_2.12:10.5.0")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        # Pin the session time zone: TIMESTAMP rendering/parsing is session-TZ
+        # dependent, and `weather_predictions._id` embeds the source epoch.
+        # Combined with inference.utc_epoch_seconds() this keeps the prediction
+        # key stable no matter where the job runs (runner TZ, container TZ).
+        .config("spark.sql.session.timeZone", "UTC")
         # Local runs default to 200 shuffle partitions, which is mostly task
         # scheduling overhead on a 4-core runner.
         .config("spark.sql.shuffle.partitions", "8")
