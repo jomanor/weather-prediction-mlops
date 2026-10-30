@@ -14,6 +14,7 @@ import { CityManager } from '@/features/overview/CityManager'
 import { useMapStations, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
 import { StationSheet } from '@/features/overview/StationSheet'
+import { stepStationIndex } from '@/features/overview/sheet'
 import { useFreshness } from '@/hooks/useFreshness'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { useStationSelection } from '@/hooks/useStationSelection'
@@ -62,9 +63,12 @@ export function OverviewPage() {
 
   /* U6 mobile sheet: position within the registry, and wrap-around stepping. */
   const selectedIndex = selectedCity ? cities.findIndex((city) => city.name === selectedCity) : -1
+  /* Wrap-around stepping lives in `sheet.ts` so the swipe, the arrow keys and
+     the prev/next buttons all share one rule. */
   const stepSelection = (delta: number) => {
-    if (selectedIndex < 0 || cities.length < 2) return
-    selectCity(cities[(selectedIndex + delta + cities.length) % cities.length].name)
+    const next = stepStationIndex(selectedIndex, cities.length, delta)
+    if (next === null) return
+    selectCity(cities[next].name)
   }
 
   const stats = useMemo(() => {
