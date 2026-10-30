@@ -24,9 +24,9 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff black
       - name: ruff check
-        run: ruff check backend scripts spark kafka
+        run: ruff check backend scripts spark
       - name: black check
-        run: black --check backend scripts spark kafka
+        run: black --check backend scripts spark
 
   # ─────────────────────────────────────────────────────────────────────────
   # 2. Backend tests — FastAPI service (offline, dependency-overridden fakes)
@@ -46,7 +46,7 @@ jobs:
         run: pytest backend/tests -q
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 3. Pipeline tests — Kafka, Spark jobs, scripts
+  # 3. Pipeline tests — Spark jobs, scripts
   # ─────────────────────────────────────────────────────────────────────────
   pipeline-test:
     name: Pipeline tests
@@ -68,7 +68,6 @@ jobs:
           pip install \
             pytest pytest-cov \
             pyspark==3.5.5 \
-            kafka-python \
             pymongo \
             requests \
             python-dotenv \
@@ -83,8 +82,6 @@ jobs:
       - name: Run pipeline unit tests
         run: |
           pytest tests/unit/ \
-            --cov=kafka/kafka-consumer \
-            --cov=kafka/kafka-producer \
             --cov=spark/spark-jobs \
             --cov=scripts \
             --cov-report=term-missing \
@@ -156,7 +153,6 @@ jobs:
             pytest \
             pytest-asyncio \
             pyspark==3.5.5 \
-            kafka-python \
             pymongo \
             requests \
             python-dotenv \
@@ -178,10 +174,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: producer
-            context: kafka/kafka-producer
-          - service: consumer
-            context: kafka/kafka-consumer
           - service: backend
             context: backend
           - service: spark

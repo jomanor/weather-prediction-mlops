@@ -16,69 +16,6 @@ services:
     networks:
       - weather-network
 
-  # Kafka
-  kafka:
-    image: apache/kafka:4.1.0
-    container_name: weather-kafka
-    ports:
-      - "29092:29092"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://localhost:9093,EXTERNAL://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    networks:
-      - weather-network
-
-  # Kafka Producer
-  weather-producer:
-    build: ./kafka/kafka-producer
-    container_name: weather-producer
-    depends_on:
-      kafka:
-        condition: service_healthy
-      mongodb:
-        condition: service_started
-    environment:
-      KAFKA_BROKER: kafka:9092
-      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
-    restart: unless-stopped
-    networks:
-      - weather-network
-
-  # Kafka Consumer
-  weather-consumer:
-    build: ./kafka/kafka-consumer
-    container_name: weather-consumer
-    depends_on:
-      kafka:
-        condition: service_healthy
-      mongodb:
-        condition: service_started
-    environment:
-      KAFKA_BROKER: kafka:9092
-      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongodb:27017/weather_db?authSource=admin
-    restart: unless-stopped
-    networks:
-      - weather-network
-
   # FastAPI backend
   weather-api:
     build: ./backend
@@ -202,7 +139,6 @@ services:
 
 volumes:
   mongo-data:
-  kafka-data:
   spark-logs:
   spark-tmp:
   mlflow-data:

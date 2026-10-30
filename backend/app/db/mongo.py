@@ -35,8 +35,9 @@ UNIQUE_INDEXES: dict[str, list[list[tuple[str, int]]]] = {
 # collection -> list of (field, expireAfterSeconds) TTL specs. The field must be
 # a BSON date; TTL deletes are irreversible, so these windows ARE the retention
 # policy. ``weather_features`` is the training input and deliberately has none.
-# ``timestamp`` is a BSON date for ``raw_weather`` (ingest/consumer) and
-# ``weather_data`` (consumer); ``prediction_timestamp`` is a Spark timestamp.
+# ``timestamp`` is a BSON date for ``raw_weather`` (ingest/backfill) and
+# ``weather_data`` (legacy current-conditions snapshot, no live writer since the
+# ingest path replaced it); ``prediction_timestamp`` is a Spark timestamp.
 TTL_INDEXES: dict[str, list[tuple[str, int]]] = {
     "raw_weather": [("timestamp", 180 * 86400)],
     "weather_predictions": [("prediction_timestamp", 90 * 86400)],

@@ -1,9 +1,10 @@
 """MongoDB access for the ``cities`` station registry.
 
-The registry is the source of truth for ingestion: producers read it, the API
-exposes and manages it. ``name_key`` is the case-insensitive identity used by
-the unique index and by lookups, so names stay unique regardless of casing
-while the operator's original casing is preserved in ``name``.
+The registry is the source of truth for ingestion: the ingest and backfill
+scripts read it, the API exposes and manages it. ``name_key`` is the
+case-insensitive identity used by the unique index and by lookups, so names stay
+unique regardless of casing while the operator's original casing is preserved
+in ``name``.
 """
 
 import logging

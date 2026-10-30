@@ -22,7 +22,8 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_TIMEOUT_SECONDS = 15.0
 
 #: Identical to ``scripts/ingest_weather.CURRENT_VARIABLES`` (asserted by a
-#: test), which mirrors the Kafka producer's list.
+#: test): the backend must request the same current-conditions variables the
+#: writer stores.
 CURRENT_VARIABLES = [
     "temperature_2m",
     "relative_humidity_2m",

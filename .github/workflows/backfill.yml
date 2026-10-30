@@ -1,9 +1,8 @@
 name: Backfill history
 
-# The deployed stack runs no Kafka producer, and the archive (ERA5) the
-# backfill reads lags real time by a few days. When the UI's rolling windows
-# (24 h – 7 d) run dry, this repopulates raw_weather on demand. The hourly
-# Ingest workflow keeps it topped up from then on.
+# The archive (ERA5) the backfill reads lags real time by a few days. When the
+# UI's rolling windows (24 h – 7 d) run dry, this repopulates raw_weather on
+# demand; the hourly Ingest workflow keeps it topped up from then on.
 on:
   workflow_dispatch:
     inputs:

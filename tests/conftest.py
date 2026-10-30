@@ -105,7 +105,7 @@ def mock_mongo_client():
 
 
 def make_open_meteo_message(city: str = "Madrid", unix_ts: int = 1_750_000_000) -> dict:
-    """Minimal Open-Meteo-shaped Kafka message value."""
+    """Minimal Open-Meteo-shaped payload."""
     return {
         "city": city,
         "latitude": 40.4168,
