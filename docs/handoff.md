@@ -87,8 +87,7 @@ was ruled out.
 
 ## State at handoff (2026-10-19, after Batch 5)
 
-- Batches 1–4 are merged on `main` (Batch 4 = 48b7380, PR #14). Batch 5 is merged locally as
-  0d68c57 / 9cc244a / 1d92c9d on top of bf0bcdf and **not pushed yet**; the model-lifecycle contract
+- Batches 1–4 are merged on `main` (Batch 4 = 48b7380, PR #14). Batch 5 is merged and **pushed** (2026-10-30); the model-lifecycle contract
   lives in `docs/model-lifecycle.md`. The Batch-4 detail below is kept as history.
 - **Batch 4 shipped (all four workstreams):**
   - **M2 horizons as config** (`spark/config/spark_config.py:37`): `FEATURES_CONFIG["target_horizons"] = [1,3,6,12,24]` replaces `target_horizon`; `ML_CONFIG["long_horizon_from"] = 12` uses a reduced grid (first value of each param) for `h >= 12`. One-pass `create_target_variable(df, horizons)`; `ml_training.main` caches the frame once and trains per horizon (per-horizon dropna/split/`data_snapshot`); `inference.main` loads once, loops horizons, skips a missing model with a warning, and unions all horizons into ONE upsert. `_id = {city}_{epoch(source_timestamp)}_{h}h`.
@@ -211,7 +210,7 @@ and training now share one implementation.
 - **Follow-ups closed**: shared `mongo_retry` helper, LRU cache bound + city validation, feature-index
   repair, Pasadena in the derived city lists, tz-independent prediction `_id`, MLflow no longer a dependency
   of CI, mobile sheet/map touch fixes (tap tolerance, focus/Escape, swipe axis lock, safe-area layout).
-- **Gates (measured on the merged tree)**: backend `235 passed`; root `285 passed, 7 skipped` (the 7 need a
+- **Gates (measured on the merged tree)**: backend `235 passed`; root `315 passed, 7 skipped` (the 7 need a
   live `mongo:6`; run with `PYSPARK_PYTHON=$PWD/.venv/bin/python`); frontend `35 files / 187 tests passed`,
   typecheck clean, lint 0 errors, build ok (chunk-size warning only); `ruff` clean; `black` 81 files
   unchanged.
@@ -232,6 +231,48 @@ disagreement, not accuracy, and only runs after a real promote.
 **Deploy notes:** a fresh deploy serves both `/api/health` and `/api/v1/health` (either proving the image
 shipped, unlike `/api/health/ready`); the hourly `job=inference` will log the staging-fallback warning until
 the first promote; `POST /api/refresh` is available immediately but writes no features/predictions.
+
+
+## 2026-10-30 — data-path incident and Batch 5.1 hotfix
+
+Promoting the first models and exercising `job=inference` exposed a chain of real defects. All are fixed
+and verified against production; do not regress them.
+
+- **Features were duplicated 2x by legacy `_id`s.** `weather_features` held 43,823 ObjectId-keyed rows and
+  43,851 string-keyed rows for the same `(city, timestamp)` — every legacy row had a string twin (verified
+  1:1) because the deterministic `{city}_{epoch}` key was introduced after the backfill. Mixed `_id` types
+  also made the Spark Mongo connector's `_id`-range partitioning read a **partial, run-varying** subset
+  (73 % of rows, 11–15 cities), so inference/training silently saw different data each run. Fixed by
+  deleting the 43,823 twin-verified ObjectId rows (recoverable: features rebuild from `raw_weather`) and
+  adding `latest_per_city()` with `dropDuplicates(["city","timestamp"])` in `inference.py`.
+  `weather_features` is now 43,880 rows, one per `(city, timestamp)`, all string `_id`. DB storage dropped
+  to **173 MiB** (`dataSize` 241.8 MiB); the 380.5 MiB budget model is still the conservative bound.
+- **GitHub throttles both hourly crons to ~4–7 runs/day** (evidence: `ingest.yml` runs at 22:00, 02:00,
+  09:00, 16:15). Raw observations therefore arrive 6–7 h apart, so the 6 h rolling std features were null;
+  `VectorAssembler(handleInvalid="skip")` then dropped every city and inference wrote only a stale Pasadena
+  row (2026-09-25). Fixed by `coalesce(*_std_6h, 0.0)` (0 = "no observed variation in the window", not
+  imputation), **a retrain is mandatory after this** (hard rule 1), plus an explicit `ingest_weather.py`
+  step at the start of `job=inference`/`job=all`, and a `Scored N/M cities` line + non-blocking
+  `::warning title=Prediction coverage` when <90 % of features cities are scored or the oldest source is
+  >12 h behind. `spark/requirements.txt` now pins `pandas` (lazily-imported mlflow used to provide it).
+- **Pasadena was missing from the live `cities` registry** (seed only runs when the collection is empty),
+  so ingest fetched 14/15 stations and Pasadena's data froze at 2026-09-25. Re-added via
+  `POST /api/v1/cities` (34.1478, -118.1445); ingest now stores 15/15. Its 12 h/24 h stds stay null until it
+  has two observations a window apart, so it is the one city without a fresh prediction until then — the
+  coverage ratio (14/15 = 93 %) deliberately does not warn for that single gap.
+- **First real promotion.** `job=all` retrained on the new feature definition, then all 10 slots were
+  promoted: 10 `production`, 8 `superseded`, 17 `staging`; inference loads them from GridFS and writes
+  `temp_model_version=20261030_191959` etc. The 8 shadow docs written before the promote (old production vs
+  new staging) are the first real A/B data. `temp_prediction_24h` (skill -0.117) and
+  `rain_prediction_1h` (-0.044) are worse than persistence but are the best available; they are promoted so
+  production matches the feature semantics.
+- **Map bug fixed:** the "edificios 3D" layer never appeared because Carto renamed its vector source and
+  building layer (`carto`/`building`/`render_height` → `protomaps`/`buildings`/`height`). `StationMap.tsx`
+  resolves both pairs, inserts the extrusion under the labels, and only hides the flat footprints when the
+  extrusion exists (`f03e1e9`).
+- **After the hotfix:** predictions are fresh for 14/15 cities at the newest feature row (20:00), 70 rows,
+  production model versions; `GET /api/v1/weather/quality` correctly reports `bad` completeness (~0.23)
+  because the ingest cron still delivers only ~4–7 observations/day — that is the L1 signal, not a code bug.
 
 ## Next: Batch 6
 
