@@ -339,7 +339,9 @@ class _RegistryCollection:
         self.find_calls.append((query, projection))
         if self.error is not None:
             raise self.error
-        return _RegistryCursor([doc for doc in self.docs if doc.get("name")])
+        # Verbatim, deliberately: filtering here would hide the malformed-name
+        # guard inside ``registry_names`` from its own test.
+        return _RegistryCursor(self.docs)
 
 
 class _RegistryCursor:
@@ -398,3 +400,21 @@ async def test_registry_names_follows_additions_and_deletions():
     collection.docs = [{"name": "Madrid"}]
 
     assert await registry_names(db) == ["Madrid"]
+
+
+async def test_registry_names_skips_documents_without_a_usable_name():
+    """A malformed row must not become a station name (or crash a monitor)."""
+    collection = _RegistryCollection(
+        [
+            {"_id": 1, "name": "Madrid"},
+            {"_id": 2, "name": None},
+            {"_id": 3},
+            {"_id": 4, "name": 123},
+            {"_id": 5, "name": ""},
+            {"_id": 6, "name": "Sevilla"},
+        ]
+    )
+
+    names = await registry_names(_FakeDb(collection))
+
+    assert names == ["Madrid", "Sevilla"]

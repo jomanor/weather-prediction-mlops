@@ -122,8 +122,14 @@ across the returned rows (null when empty).
 
 Every `Prediction` also carries `source_age_hours` (number|null) and `stale`
 (boolean): the age of `source_timestamp` at request time, and whether it exceeds
-`PREDICTION_STALE_AFTER_HOURS` (env, default 24). Stale rows stay visible and
+`PREDICTION_STALE_AFTER_HOURS` — **12 h**, a plain constant in
+`backend/app/core/thresholds.py` with no env override, because the watchdog,
+the inference job and the pipeline summary judge the same rows (finding 5: the
+API said 24 h while the watchdog said 12 h). Stale rows stay visible and
 flagged — never dropped. A missing `source_timestamp` yields `null`/`false`.
+`/latest` is cached for 30 s (with `ETag`/`Cache-Control` and a `304` on
+`If-None-Match`); age and `stale` are stamped inside the loader against one
+`now`, so a hit can lag the clock by at most the TTL.
 
 ### `GET /api/predictions/{city}?limit=48&horizon=`
 
@@ -243,7 +249,8 @@ replayed copy would report a stale verdict.
       "max_ms": 111.4
     }
   ],
-  "slo": { "latency_p95_ms_target": 2000, "p95_ms": 250.0, "met": true }
+  "slo": { "latency_p95_ms_target": 2000, "p95_ms": 250.0, "met": true },
+  "database": { "indexes": { "ok": true, "error": null } }
 }
 ```
 
@@ -297,6 +304,15 @@ replayed copy would report a stale verdict.
 - `/metrics` is counted like every other route. The request that reads the
   payload is counted once its own response is complete, so it shows up from the
   next call on — two consecutive calls never show their own count.
+- **`database.indexes` is the one field that is not a counter.** It reports the
+  outcome of the startup `ensure_indexes` call: `{"ok": true, "error": null}`
+  once it succeeded, `{"ok": false, "error": "<ExcType>: <message>"}` (bounded to
+  500 chars, no traceback) when it failed, and `{"ok": null, "error": null}`
+  while the background task has not run yet or was disabled with
+  `ENSURE_INDEXES_ON_START=false`. Deliberately here and not in
+  `/health/ready`: a missing index makes reads slow, it does not stop the
+  instance serving, and a readiness failure would have Render restart a working
+  process.
 
 ## Shared types
 
@@ -359,6 +375,17 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
   default `http://localhost:5173`.
 - No endpoint may return placeholder, synthetic or randomised values. If data
   is unavailable the field is `null` and the UI shows an explicit empty state.
+- **Cached reads** answer through a process-local TTL cache with a strong
+  `ETag`, `Cache-Control: public, max-age=<ttl>` and `304` on `If-None-Match`:
+  `/cities` (60 s), `/weather/current`, `/weather/series`,
+  `/predictions/latest` (30 s), `/weather/quality` and the `/analytics/*`
+  views and `/models` (300 s) and `/map/stations` (30 s). The cache is
+  LRU-bounded (256 entries) and `POST`/`DELETE` on `/cities` drop the
+  `cities:list` entry after a successful write, so `/cities` itself is correct
+  on the next request. The registry-derived monitors (`/weather/quality`, the
+  `/analytics/*` views) read the registry *inside* their cached payload, so a
+  registry change can take up to their own TTL (300 s) to show up there: the
+  price of caching an aggregate, and far below the 6 h rebuild it describes.
 - **Residual convention**: `residual_model` and `residual_aemet` are
   `prediction − observed`. Positive means the model ran warm, negative means it
   ran cold. `bias` follows the same sign.

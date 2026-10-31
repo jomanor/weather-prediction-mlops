@@ -55,18 +55,30 @@ from spark_config import FEATURES_CONFIG, create_spark_session
 # thresholds.py``, a module of plain constants with no imports of its own, shared
 # with the API, ``scripts/watchdog.py`` and ``scripts/pipeline_summary.py``.
 # Nothing in this file may restate a number (2026-10-31 audit, finding 5).
-# The job runs as ``python spark/spark-jobs/inference.py`` from the repo root, so
-# derive ``<repo_root>/backend`` from this file rather than from the cwd.
-_BACKEND_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend"
-)
-if _BACKEND_DIR not in sys.path:
-    sys.path.insert(0, _BACKEND_DIR)
+# Two layouts exist: a repo checkout (``spark/`` and ``backend/`` siblings) and
+# the Spark image (``spark/Dockerfile`` copies ``spark-jobs/`` to
+# ``/opt/spark-jobs/``, so the same bootstrap resolves to ``/backend``, which
+# docker-compose bind-mounts from ``backend/app``). Never copy the numbers here.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+for _backend_candidate in (os.path.join(_REPO_ROOT, "backend"), "/backend"):
+    if os.path.isdir(os.path.join(_backend_candidate, "app", "core")):
+        if _backend_candidate not in sys.path:
+            sys.path.insert(0, _backend_candidate)
+        break
 
-from app.core.thresholds import (  # noqa: E402 - path is set just above
-    PREDICTION_COVERAGE_WARN_RATIO,
-    PREDICTION_OK_AGE_HOURS,
-)
+try:
+    from app.core.thresholds import (  # noqa: E402 - path is set just above
+        PREDICTION_COVERAGE_WARN_RATIO,
+        PREDICTION_OK_AGE_HOURS,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - layout error, not a data path
+    raise ModuleNotFoundError(
+        "app.core.thresholds is not importable. It is the single authority for these "
+        "thresholds (backend/app/core/thresholds.py): run the job from a repo checkout "
+        "where spark/ and backend/ are siblings, or in the Spark image bind-mount "
+        "backend/app at /backend (docker-compose does this for spark-scheduler). "
+        "Do not restate the numbers in this file (docs/audit-2026-10-31.md finding 5)."
+    ) from exc
 
 logging.basicConfig(
     level=logging.INFO,

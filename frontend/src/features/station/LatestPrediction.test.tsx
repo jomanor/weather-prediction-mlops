@@ -123,7 +123,23 @@ describe('LatestPrediction age and stale badge', () => {
     expect(screen.queryByText('Antigua')).not.toBeInTheDocument()
   })
 
-  it('marks a prediction older than 24 h as "Antigua" without hiding it', () => {
+  it('pins the 12 h stale fallback the API also uses', () => {
+    // Cross-language contract: backend/app/core/thresholds.py
+    // PREDICTION_STALE_AFTER_HOURS (audit finding 5: one authority, not 24 vs 12).
+    expect(PREDICTION_STALE_HOURS).toBe(12)
+  })
+
+  it('flags a legacy payload one hour past the 12 h threshold, not at 24 h', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    renderLatest([
+      // No ``stale`` flag (legacy payload): the local 12 h fallback alone must flag it.
+      makePrediction({ source_timestamp: new Date(NOW - 13 * 3_600_000).toISOString() }),
+    ])
+    expect(screen.getByText('Antigua')).toBeInTheDocument()
+  })
+
+  it('marks a prediction older than the stale threshold as "Antigua" without hiding it', () => {
     vi.useFakeTimers()
     vi.setSystemTime(NOW)
     renderLatest([

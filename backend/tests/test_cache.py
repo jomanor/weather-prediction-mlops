@@ -11,6 +11,7 @@ from app.schemas.city import City
 
 MADRID = City(name="Madrid", latitude=40.4168, longitude=-3.7038)
 ALICANTE = City(name="Alicante", latitude=38.3452, longitude=-0.481)
+SEVILLA = City(name="Sevilla", latitude=37.3891, longitude=-5.9845)
 
 
 def _request() -> Request:
@@ -255,3 +256,54 @@ async def test_delete_unregisters_the_in_flight_load_so_the_next_call_reloads():
     release.set()
     assert await first is MADRID
     assert loads == ["slow", "quick"]
+
+
+async def test_an_older_finishing_load_cannot_unregister_the_newer_in_flight_one():
+    """The finally-guard in ``_run_loader``: an old load must not steal the new one's slot.
+
+    Without the identity check, the older task's ``finally`` pops the key that the
+    newer, still-running load registered: the newer load then refuses to store its
+    value (it is no longer the registered load) and the next request loads a third
+    time instead of hitting it.
+    """
+    cache = TTLCache()
+    old_started, old_release = asyncio.Event(), asyncio.Event()
+    new_started, new_release = asyncio.Event(), asyncio.Event()
+    loads: list[str] = []
+
+    async def old_loader() -> list[City]:
+        loads.append("old")
+        old_started.set()
+        await old_release.wait()
+        return [MADRID]
+
+    async def new_loader() -> list[City]:
+        loads.append("new")
+        new_started.set()
+        await new_release.wait()
+        return [ALICANTE]
+
+    async def third_loader() -> list[City]:
+        loads.append("third")
+        return [SEVILLA]
+
+    older = asyncio.create_task(
+        cached(_request(), Response(), cache, "cities:list", 60, old_loader)
+    )
+    await old_started.wait()
+    cache.delete("cities:list")
+    newer = asyncio.create_task(
+        cached(_request(), Response(), cache, "cities:list", 60, new_loader)
+    )
+    await new_started.wait()
+
+    old_release.set()  # the older load finishes first, while the newer one is still running
+    assert await older == [MADRID]
+    new_release.set()
+    assert await newer == [ALICANTE]
+
+    # The newer value was stored, so this is a hit and no third load runs.
+    assert await cached(_request(), Response(), cache, "cities:list", 60, third_loader) == [
+        ALICANTE
+    ]
+    assert loads == ["old", "new"]

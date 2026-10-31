@@ -7,9 +7,10 @@ to MongoDB Atlas Free Tier (M0 - 512 MB, no credit card required).
 Usage:
   1. Create a free cluster at https://www.mongodb.com/cloud/atlas
   2. Add database user + IP whitelist (0.0.0.0/0 for cloud access).
-  3. Set MONGO_URI in .env.production to the Atlas SRV string (the local
-     .env keeps the dev URI — its values are never overridden by dotenv):
-     MONGO_URI=mongodb+srv://<user>:<password>@cluster0.xxx.mongodb.net/weather_db?retryWrites=true&w=majority
+  3. The Atlas SRV string is MONGO_URI in the single repo-root .env (that is
+     also what the deployed app uses); the *source* is the local docker mongo,
+     built from MONGO_USERNAME/MONGO_PASSWORD. Override either end for a one-off:
+     LOCAL_MONGO_URI=... ATLAS_MONGO_URI=... python scripts/sync_to_atlas.py
   4. Run: python scripts/sync_to_atlas.py (or `make sync-atlas`)
 """
 
@@ -20,33 +21,47 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne
 
-PRODUCTION_ENV = Path(".env.production")
+#: The single env file (2026-10-31: .env / .env.production / atlas-credentials.env
+#: were unified). ``MONGO_URI`` in it is the Atlas URI the deployed app uses.
+ENV_FILE = Path(".env")
 
-load_dotenv()
+load_dotenv(ENV_FILE)
 
-LOCAL_MONGO_URL = os.getenv("MONGO_URI") or os.getenv(
-    "MONGO_URL", "mongodb://admin:weatherpass123@localhost:27017/weather_db?authSource=admin"
-)
-if "@mongodb:27017" in LOCAL_MONGO_URL and not os.path.exists("/.dockerenv"):
-    LOCAL_MONGO_URL = LOCAL_MONGO_URL.replace("@mongodb:27017", "@localhost:27017")
+
+def local_mongo_url() -> str:
+    """The sync source: a local mongo, never Atlas (that would be a self-copy).
+
+    ``LOCAL_MONGO_URI`` wins; otherwise the docker-compose mongo, assembled from
+    the same ``MONGO_USERNAME``/``MONGO_PASSWORD`` compose uses. The old default
+    came from ``MONGO_URI``, which after the env unification points at Atlas.
+    """
+    explicit = os.getenv("LOCAL_MONGO_URI")
+    if explicit:
+        return explicit
+    user = os.getenv("MONGO_USERNAME", "admin")
+    password = os.getenv("MONGO_PASSWORD", "weatherpass123")
+    url = f"mongodb://{user}:{password}@localhost:27017/weather_db?authSource=admin"
+    if "@mongodb:27017" in url and not os.path.exists("/.dockerenv"):
+        url = url.replace("@mongodb:27017", "@localhost:27017")
+    return url
+
+
+LOCAL_MONGO_URL = local_mongo_url()
 
 
 def atlas_target() -> str | None:
-    """Atlas URI: explicit ATLAS_MONGO_* override, else .env.production's MONGO_URI.
+    """Atlas URI: explicit ATLAS_MONGO_* override, else ``MONGO_URI`` from the environment.
 
-    dotenv does not override variables already set by .env, so the production
-    file's MONGO_URI (the same name the deployed app uses) is read directly
-    from the file instead of through os.getenv.
+    ``load_dotenv(ENV_FILE)`` has already put the single ``.env``'s ``MONGO_URI``
+    in the environment (and a real env var still wins), so no file parsing is
+    needed here.
     """
-    override = os.getenv("ATLAS_MONGO_URI") or os.getenv("ATLAS_MONGO_URL")
-    if override:
-        return override
-    if not PRODUCTION_ENV.exists():
-        return None
-    for line in PRODUCTION_ENV.read_text().splitlines():
-        if line.startswith(("MONGO_URI=", "MONGO_URL=")):
-            return line.split("=", 1)[1].strip().strip('"')
-    return None
+    return (
+        os.getenv("ATLAS_MONGO_URI")
+        or os.getenv("ATLAS_MONGO_URL")
+        or os.getenv("MONGO_URI")
+        or os.getenv("MONGO_URL")
+    )
 
 
 ATLAS_MONGO_URL = atlas_target()
@@ -89,7 +104,7 @@ def main():
         print("ATTENTION: MongoDB Atlas connection string required!")
         print("1. Go to https://www.mongodb.com/cloud/atlas (Free M0 Cluster, No Credit Card).")
         print("2. Create Database User & allow access IP (0.0.0.0/0).")
-        print("3. Add the Atlas SRV string to .env.production:")
+        print("3. Set the Atlas SRV string as MONGO_URI in .env (or ATLAS_MONGO_URI):")
         print("   MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/weather_db")
         print("4. Re-run: python scripts/sync_to_atlas.py (or `make sync-atlas`)")
         print("----------------------------------------------------------------------")

@@ -17,8 +17,11 @@ import {
 } from '@/lib/format'
 import { latestRun, pickHorizon } from '@/lib/predictions'
 
-/** A prediction whose source observation is older than this is flagged, not hidden. */
-export const PREDICTION_STALE_HOURS = 24
+/** A prediction whose source observation is older than this is flagged, not hidden.
+ * Must match the API's ``PREDICTION_STALE_AFTER_HOURS`` (12 h, one authority in
+ * ``backend/app/core/thresholds.py``): this is only the fallback for a legacy
+ * payload with no ``stale`` flag, so it must not disagree with the server. */
+export const PREDICTION_STALE_HOURS = 12
 
 interface LatestPredictionProps {
   /** Prediction history as served (oldest → newest); the newest run is picked here. */

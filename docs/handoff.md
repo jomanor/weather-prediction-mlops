@@ -37,9 +37,12 @@ cd backend && ../.venv/bin/python -m pytest tests -q
 .venv/bin/python -m pytest tests -q     # pipeline tests (spark/scripts)
 cd frontend && npm run test && npm run typecheck && npm run lint && npm run build
 
-# Backend against production data for a local check (kill it afterwards):
-cd backend && MONGO_URI="$(grep '^MONGO_URI=' ../.env.production | cut -d= -f2- | tr -d '"')" \
-  MONGO_DB=weather_db ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8123
+# Backend against production data for a local check (kill it afterwards). The
+# single repo-root .env already points MONGO_URI at Atlas; backend/ reads it via
+# the env_file=(".env", "../.env") tuple, so nothing has to be exported:
+cd backend && ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8123
+# (port 8123 is often taken by a hand-run instance: pick another, the check is
+# the same. curl /api/v1/metrics and read database.indexes to prove the code shipped.)
 
 # Workflows
 gh workflow run ml-pipeline.yml --ref main -f job=all        # features + train + prune + inference
@@ -48,9 +51,15 @@ gh run watch <id> --exit-status
 gh api repos/jomanor/weather-prediction-mlops/actions/jobs/<job_id> -q '.steps[]|.name+" "+.conclusion'
 ```
 
-`.env.production` is unquoted and contains `&`, so `source` fails — parse the line as
-shown above. **Never print `MONGO_URI`,** not even truncated. Local Mongo container
-`weather-mongodb` runs on `:27017` if you need an offline database.
+**One env file: `.env` at the repo root** (gitignored, mode 600). It replaced
+`.env` + `.env.production` + `atlas-credentials.env` on 2026-10-31 — see the
+*Batch B* section. It holds `MONGO_DB`, the Atlas `MONGO_URI`, the local mongo
+`MONGO_USERNAME`/`MONGO_PASSWORD` (docker-compose only) and `AEMET_API_KEY`.
+Never `source` it (the password contains `&`) and **never print `MONGO_URI`**,
+not even truncated. Production config is not a file: `render.yaml` + the Render
+dashboard for the API, the Netlify UI for the frontend; the tracked placeholder
+for onboarding is `.env.example`. Local Mongo container `weather-mongodb` runs on
+`:27017` if you need an offline database.
 
 ## Hard rules (these were paid for)
 
@@ -789,7 +798,8 @@ Gate before done: `code-reviewer` on the diff, `qa-engineer` when tests change, 
 
 ## 2026-10-31 — Batch A: the writers tell the truth (audit findings 1, 2, 6, 12, S4, S5)
 
-In the working tree, **not committed**: `scripts/backfill_historical_data.py`,
+Committed as **`ab9ee4c`** on `main` (batch B sits on top as `b3e57a2`).
+Files: `scripts/backfill_historical_data.py`,
 `tests/unit/test_backfill.py`, `scripts/requirements.txt` (new), `backend/app/repositories/weather_repo.py`
 (one docstring), `.github/workflows/{ingest,backfill,ml-pipeline,ci}.yml`. No backend/runtime code path
 changed; `spark/` untouched. Reviewer verdict **CLOSED** after three passes (blocker + should-fix fixed,
@@ -849,3 +859,94 @@ listed below); no database-engineer or sre gate applies (no index, TTL, schema o
   writer, a real failure is already counted by the two counters above. (4) **No retrain was run**: feature
   *semantics* did not change, so hard rule 1 is not triggered yet — it becomes mandatory after the first
   `job=features` that ingests rows from a DST-spanning backfill (the audit's F6 note).
+
+## 2026-10-31 — Batch B: one authority per rule (audit findings 3, 4, 5, 11 + S1)
+
+Committed as **`b3e57a2`** (built in the `batch-b` worktree, fast-forwarded into `main` because the
+`/refresh` deletion was in flight in the main tree). `docs/api-contract.md` updated for the changed
+threshold, the new cache headers and the additive `/metrics` key.
+
+- **F3 — `raw_weather` is read first, `weather_data` is the fallback.** `latest_for_city`,
+  `latest_per_city`, `find_range` and `find_many_in_range` flipped: the live collection is queried first and
+  the legacy snapshot only when it has no rows, so one leftover legacy document can no longer replace the
+  fourteen live stations or shrink a history to a point. One round-trip fewer on the hot path; sorts stay
+  `{city:1, timestamp:-1}`, aggregates keep `allowDiskUse`, output stays oldest→newest. The collection and
+  its TTL stay (hard rule 3).
+- **F4 — the Mongo `cities` registry is the only runtime city set.** New
+  `city_repo.registry_names(db)` (one `find({}, {name:1})`, sorted, deduped, `DEFAULT_CITIES` only when the
+  registry is empty/unreadable, never raises) is now read by `quality_report`, the diurnal/correlation/
+  error-by-hour aggregates (the module-level `CANONICAL_CITIES` constant is gone) and, for its fallback,
+  the backfill script. `DEFAULT_CITIES` is seed data + the empty-registry fallback and nothing else, so a
+  station added or deleted through the API is ingested *and* monitored; the backfill's separate 14-station
+  dict (no Pasadena) is gone.
+- **F5 — `backend/app/core/thresholds.py` is the single authority.** Plain constants, no imports, imported
+  by the API (`weather_repo`, `routers/predictions`), `spark/spark-jobs/inference.py`,
+  `scripts/pipeline_summary.py` and the stdlib-only `scripts/watchdog.py` (they add `<repo>/backend` to
+  `sys.path`; the module drags in no framework). **Prediction source age is 12 h everywhere** — the API's
+  `stale` flag previously said 24 h while the watchdog said 12 h. No env override: `config.prediction_stale_after_hours`
+  was deleted on purpose. The watchdog/watchdog-docstring "mirror these numbers" instructions are gone.
+- **F11 — index failure is visible; the two heaviest reads are cached.**
+  `_prepare_database` records `{"ok", "error"}` on `app.state.index_status` and `GET /metrics` reports it as
+  the additive `database.indexes` key (`ok: null` before the background task runs). Deliberately *not* in
+  `/health/ready`: a missing index is slow, not unservable, and readiness failure would make Render restart
+  a working process. `/predictions/latest` (30 s, per-horizon key) and `/weather/series` (30 s, key =
+  cities+hours+sorted fields+step) are now cached with ETag/`Cache-Control`/304 — verified live: 200 with
+  ETag, then 304 on `If-None-Match`. `TTLCache.delete(key)` drops both the value and the in-flight load
+  registration (a loader only caches while it is still registered), and `POST`/`DELETE /cities` call it
+  after a successful write only.
+- **S1 — one env file.** `.env` + `.env.production` + `atlas-credentials.env` are collapsed into a single
+  repo-root `.env` (mode 600, gitignored): `MONGO_DB` (was `MONGO_DATABASE`), the Atlas `MONGO_URI` so
+  local runs show real data, `MONGO_USERNAME`/`MONGO_PASSWORD` (docker-compose mongo only) and
+  `AEMET_API_KEY`; the local-mongo alternative is a commented `MONGO_URI`. Deleted keys —
+  `WEATHER_API_KEY`, `KAFKA_BROKER`, `API_URL`, `MONGO_DATABASE`, `MONGODB_*` — and `NETLIFY_AUTH_TOKEN`,
+  which the repo never read, are in `.env.dropped-keys` (mode 600) so a human-held secret is not lost:
+  **move that token to wherever your netlify CLI expects it, then delete the file.** It was never
+  committed (`git log -- .env*` is empty), so no rotation is needed. `Settings` now reads
+  `env_file=(".env", "../.env")`, so `cd backend && uvicorn app.main:app` also picks the file up;
+  `docker-compose.yml` uses `${MONGO_DB}`; `.env.example` is tracked (gitignore got a `!.env.example`
+  negation) and is the onboarding placeholder. Production config is not a file: `render.yaml` + Render
+  dashboard, Netlify UI for the frontend.
+- **Also on `main`, not this batch:** `decaba5` deleted `POST /refresh` and its limiter (another session).
+- **Gates measured on the merged tree:** backend **333 passed** (the count moved from 312 because the 22
+  `/refresh` tests were deleted in `decaba5`); root **461 passed, 7 skipped**; frontend 370 tests,
+  typecheck clean, lint 0 errors, build ok; `ruff`/`black --check` clean over `backend scripts spark`
+  (81 files). Live, local API against Atlas: `/api/v1/weather/current` → **200, 15 stations incl.
+  Pasadena**; `/api/v1/quality?days=7` → 15 cities all `ok`; `/api/v1/metrics` → `database.indexes
+  {ok: true}`; legacy `/api` alias 200; `/health/ready` 200; `/series` 32 points oldest→newest.
+  `scripts/watchdog.py --dry-run` → `veredicto: ok`, exit 0 (1.0 h / 1.000 / 7.8 h / 15-of-15).
+- **Deliberate leftovers:** `quality_report`'s completeness gates stay 0.95/0.80 (only the age gates moved
+  into the shared module — completeness is that meter's own scale, and the one-shot backfill's 0.98 must
+  keep flagging a broken ingest cadence); the registry is read once per aggregate rather than cached (one
+  name-only query, and a cache would need invalidation on every registry write); `weather_data` is still
+  present with its TTL.
+
+**Batch B review fixes (all applied before closing).** Four should-fix items came out of the
+review/QA pass and are fixed, not waived:
+
+1. **The frontend was a fifth judge of prediction age.** `LatestPrediction.tsx` still had its own
+   `PREDICTION_STALE_HOURS = 24` for the legacy-payload fallback, so the badge could say "Más de 24 h"
+   while the API flagged `stale` at 12 h. Now 12, with two tests: one pins the literal to the shared
+   backend constant (a cross-language contract test) and one proves a 13 h legacy payload is flagged.
+2. **The Spark image could not import the shared module.** `spark/Dockerfile` copies only `spark-jobs/`
+   to `/opt/spark-jobs/`, so the bootstrap resolved to `/backend`, which did not exist →
+   `ModuleNotFoundError` at import (and the compose scheduler only logs a subprocess failure). Fixed
+   by (a) `docker-compose.yml` bind-mounting `backend/app` at `/backend/app` read-only for
+   `spark-scheduler`, and (b) `inference.py` trying `<repo>/backend` then `/backend` and, if neither
+   exists, raising a message that names the rule ("do not restate the numbers here"). The repo layout
+   was verified by importing the module from `/tmp`; CI (`ml-pipeline.yml`) is unaffected.
+3. **`QUALITY_WARN_COMPLETENESS = 0.80` was a second literal of the shared
+   `QUALITY_BAD_COMPLETENESS_BELOW`.** It is now an alias of the shared constant, and a test asserts
+   identity so a retune cannot leave the meter behind. `QUALITY_OK_COMPLETENESS = 0.95` stays local
+   (the meter's own scale).
+4. **`scripts/sync_to_atlas.py` still read `.env.production`** (reachable via `make sync-atlas`), which
+   S1 deleted. It now loads the single `.env`, takes the Atlas target from `MONGO_URI` (or
+   `ATLAS_MONGO_URI`) and — important after the unification — builds the *source* from
+   `MONGO_USERNAME`/`MONGO_PASSWORD` or `LOCAL_MONGO_URI`, because `MONGO_URI` now points at Atlas and
+   the old code would have synced Atlas onto itself. Its usage text is updated too.
+
+QA added the missing test for the `_run_loader` `finally` identity guard (the one surviving mutant: an
+older load finishing used to be able to unregister a newer in-flight load, so the newer value was never
+cached) — it fails when that guard is removed. `registry_names` now has a malformed-row test, and the
+test double no longer filters out the very documents the guard exists for. One unexplained
+`test_cache.py` flake was seen once by the reviewer in ~90 runs and could not be reproduced in 2000
+targeted replays; the invariant it asserts is now covered by two deterministic tests.

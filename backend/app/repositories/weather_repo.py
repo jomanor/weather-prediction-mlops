@@ -23,7 +23,11 @@ from fastapi import Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.coerce import as_utc, first_not_none, to_float, to_int
-from app.core.thresholds import QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS
+from app.core.thresholds import (
+    QUALITY_BAD_COMPLETENESS_BELOW,
+    QUALITY_OK_AGE_HOURS,
+    QUALITY_WARN_AGE_HOURS,
+)
 from app.db.mongo import get_db
 from app.repositories.city_repo import registry_names
 from app.schemas.quality import CityQuality, QualityStatus
@@ -182,11 +186,10 @@ def _downsample_by_step(points: list[CurrentWeather], step_hours: int) -> list[C
 #: Completeness and age are graded independently, then the worse of the two wins.
 #: The age gates live in ``app.core.thresholds`` (12 h ok / 18 h warn, shared
 #: with the watchdog and the prediction badge) so no surface can drift from
-#: another. Completeness stays local: it is this meter's own scale, and the
-#: 0.98 completeness of the one-shot backfill must keep flagging a broken
-#: cadence.
+#: another. ``QUALITY_WARN_COMPLETENESS`` is an alias of the shared
+#: ``QUALITY_BAD_COMPLETENESS_BELOW``: the same 0.80 boundary, one literal.
 QUALITY_OK_COMPLETENESS = 0.95
-QUALITY_WARN_COMPLETENESS = 0.80
+QUALITY_WARN_COMPLETENESS = QUALITY_BAD_COMPLETENESS_BELOW
 
 _STATUS_RANK: dict[str, int] = {"ok": 0, "warn": 1, "bad": 2}
 

@@ -70,3 +70,10 @@ def test_there_is_no_env_override_for_the_stale_threshold(monkeypatch):
     # 12 h, not the old 24 h: the badge cannot be retuned out of band any more.
     assert thresholds.PREDICTION_STALE_AFTER_HOURS == 12.0
     assert thresholds.PREDICTION_OK_AGE_HOURS == thresholds.PREDICTION_STALE_AFTER_HOURS
+
+
+def test_one_retune_moves_both_prediction_age_readers():
+    """The stale flag aliases the ok-age, so the badge and the flag cannot split."""
+    assert thresholds.PREDICTION_STALE_AFTER_HOURS == thresholds.PREDICTION_OK_AGE_HOURS
+    # The meter's completeness ``bad`` boundary is the shared one, not a copy.
+    assert weather_repo.QUALITY_WARN_COMPLETENESS is thresholds.QUALITY_BAD_COMPLETENESS_BELOW

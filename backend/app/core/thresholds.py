@@ -18,11 +18,14 @@ QUALITY_WARN_AGE_HOURS = 18.0
 #: Data-quality meter: completeness below this ratio grades ``bad``.
 QUALITY_BAD_COMPLETENESS_BELOW = 0.80
 
-#: A served prediction whose source observation is older than this is ``stale``.
-PREDICTION_STALE_AFTER_HOURS = 12.0
 #: Prediction freshness badge: at or below this source age the badge is ``ok``.
+#: This is THE prediction-age number: the API's ``stale`` flag derives from it
+#: (below), so retuning it here moves the badge and the flag together.
 PREDICTION_OK_AGE_HOURS = 12.0
-#: Prediction freshness badge: above this source age the badge is ``bad`` (``warn`` in between).
+#: A served prediction whose source observation is older than this is ``stale``.
+#: Deliberately an alias, not a second literal: one retune, four readers.
+PREDICTION_STALE_AFTER_HOURS = PREDICTION_OK_AGE_HOURS
+#: Watchdog: above this source age a prediction is ``bad`` (``warn`` in between).
 PREDICTION_WARN_AGE_HOURS = 18.0
 #: Prediction interval coverage below this ratio is flagged for retraining.
 PREDICTION_COVERAGE_WARN_RATIO = 0.90

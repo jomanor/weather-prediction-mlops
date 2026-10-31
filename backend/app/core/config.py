@@ -12,7 +12,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # ``.env`` is the repo-root file (docker-compose and the scripts read it).
+        # ``../.env`` is the same file seen from ``backend/``, so
+        # ``cd backend && uvicorn app.main:app`` also picks up the real
+        # connection string without exporting it by hand. Both entries are
+        # optional and absent in the Docker image, where Render injects the env.
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -51,12 +56,6 @@ class Settings(BaseSettings):
     #: unset (the default) answers both writes with a 503, and an empty
     #: ``CITY_WRITES_TOKEN`` means unset, never "no auth". Reads are unaffected.
     city_writes_token: str | None = None
-
-    #: A served prediction whose source observation is older than
-    #: ``PREDICTION_STALE_AFTER_HOURS`` is flagged ``stale`` (row stays visible,
-    #: never dropped). The threshold is NOT a setting: it lives in
-    #: ``app.core.thresholds`` so the API, the watchdog and the inference job
-    #: cannot disagree (audit finding 5).
 
     @field_validator("city_writes_token", mode="before")
     @classmethod
