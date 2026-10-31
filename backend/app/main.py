@@ -14,6 +14,7 @@ from app.core.cache import TTLCache
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import RequestContextMiddleware, configure_logging
+from app.core.metrics import RequestMetrics
 from app.core.rate_limit import RefreshRateLimiter
 from app.db.mongo import create_client, ensure_indexes, ping
 from app.repositories.city_repo import seed_default_cities
@@ -22,6 +23,7 @@ from app.routers import (
     benchmark,
     cities,
     health,
+    metrics,
     models,
     predictions,
     refresh,
@@ -79,6 +81,7 @@ def _api_routes() -> APIRouter:
     api.include_router(models.router)
     api.include_router(analytics.router)
     api.include_router(refresh.router)
+    api.include_router(metrics.router)
     return api
 
 
@@ -158,6 +161,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_per_minute=settings.refresh_max_per_minute,
         max_per_day=settings.refresh_max_per_day,
     )
+    # Request counters for ``GET /metrics``: per app, so an embedding (or a test)
+    # never sees another instance's traffic. The mount prefixes are passed in
+    # because both mounts share the same route objects, so the route template
+    # alone cannot say which one served the request.
+    app.state.metrics = RequestMetrics(
+        mount_prefixes=(API_V1_PREFIX, API_LEGACY_PREFIX),
+    )
 
     # Order matters: middleware added last is outermost. RequestContext must wrap
     # CORS so that preflights are logged too and so the id/access line covers
@@ -173,7 +183,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # cannot read the ETag or show the X-Data-Age-Seconds freshness badge.
         expose_headers=["ETag", "Cache-Control", "X-Data-Age-Seconds", "X-Request-Id"],
     )
-    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(
+        RequestContextMiddleware,
+        metrics=app.state.metrics,
+        route_prefixes=(API_V1_PREFIX, API_LEGACY_PREFIX),
+    )
 
     register_error_handlers(app)
 

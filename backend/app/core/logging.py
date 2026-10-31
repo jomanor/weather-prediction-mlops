@@ -7,6 +7,12 @@ stdout and is the only component that logs a request:
      "path": "/api/v1/cities", "status_code": 200, "duration_ms": 3.2,
      "cache_hit": false}
 
+The same middleware, after the response is complete, feeds the in-process
+``RequestMetrics`` recorder that ``GET /metrics`` serves. It records the matched
+**route template** (never the served path) and the same status/duration/cache
+values as the line above; a failure in the recorder is swallowed so a broken
+counter can never fail a request.
+
 Deliberate omissions, not oversights:
 
 * **No query string** — ``scope["path"]`` only. Query values are user input and
@@ -31,8 +37,11 @@ from uuid import uuid4
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.core.metrics import RequestMetrics, route_template
+
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 REQUEST_LOGGER = logging.getLogger("app.request")
+logger = logging.getLogger(__name__)
 
 #: Response header carrying the correlation id (also in every error envelope).
 REQUEST_ID_HEADER = "X-Request-Id"
@@ -104,15 +113,53 @@ def _log_request(
 
 
 class RequestContextMiddleware:
-    """Assign/echo the request id and emit the access log line.
+    """Assign/echo the request id, emit the access log line, count the request.
 
     Plain ASGI (not ``BaseHTTPMiddleware``) so the same ``scope`` — and its
     ``state`` dict, which carries the id to the error handlers and the TTL-cache
     hit flag back out — is reachable on both sides of the call.
+
+    ``metrics`` is optional (``None`` disables counting, which is what a unit
+    test of the log line wants) and ``route_prefixes`` are the app's mounts; see
+    ``app.core.metrics.route_template`` for why the prefix cannot be read off
+    the route object.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        metrics: RequestMetrics | None = None,
+        route_prefixes: tuple[str, ...] = (),
+    ) -> None:
         self.app = app
+        self.metrics = metrics
+        self.route_prefixes = route_prefixes
+
+    def _observe(self, scope: Scope, *, status_code: int, started: float, cache_hit: bool) -> None:
+        """Feed the recorder; never let a stats failure reach the request.
+
+        Only the route template is recorded — it carries no city name, query
+        string or request id — so the ``GET /metrics`` payload stays safe to
+        serve publicly.
+        """
+        if self.metrics is None:
+            return
+        try:
+            route = route_template(
+                getattr(scope.get("route"), "path", None),
+                scope.get("path", ""),
+                self.route_prefixes,
+            )
+            self.metrics.record(
+                method=scope.get("method", ""),
+                route=route,
+                status_code=status_code,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                cache_hit=cache_hit,
+            )
+        except Exception:  # noqa: BLE001 - counters must never fail a request
+            logger.debug("request metrics update failed", exc_info=True)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -150,6 +197,12 @@ class RequestContextMiddleware:
                 started=started,
                 cache_hit=bool(state.get("cache_hit")),
             )
+            self._observe(
+                scope,
+                status_code=500,
+                started=started,
+                cache_hit=bool(state.get("cache_hit")),
+            )
             # Re-raised: uvicorn/ServerErrorMiddleware owns the traceback, and
             # the registered ``Exception`` handler builds the 500 envelope.
             raise
@@ -158,6 +211,12 @@ class RequestContextMiddleware:
             request_id=request_id,
             method=scope["method"],
             path=scope["path"],
+            status_code=status_code,
+            started=started,
+            cache_hit=bool(state.get("cache_hit")),
+        )
+        self._observe(
+            scope,
             status_code=status_code,
             started=started,
             cache_hit=bool(state.get("cache_hit")),

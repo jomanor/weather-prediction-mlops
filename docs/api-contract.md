@@ -238,6 +238,97 @@ document; never runs Spark, so features and predictions are not refreshed.
 - `502 refresh_upstream_error` when Open-Meteo fails or returns no usable
   observation.
 
+## Metrics (process-local, public)
+
+### `GET /api/v1/metrics` (alias: `GET /api/metrics`)
+
+Aggregates the JSON access log into the surface an availability/latency SLO is
+read from: totals, per-route latency estimates and one verdict. JSON, not
+Prometheus text, and no new dependency (no exporter, no scraper, no store): the
+access line already carries these fields per request, this endpoint is the
+aggregate. It is unauthenticated and public-safe by construction (see below),
+and `Cache-Control: no-store` — no `ETag`, no `X-Data-Age-Seconds`, because a
+replayed copy would report a stale verdict.
+
+```json
+{
+  "started_at": "2026-10-31T11:22:24Z",
+  "uptime_seconds": 14.865,
+  "requests": {
+    "total": 9,
+    "by_status_class": { "2xx": 8, "4xx": 1 },
+    "errors_5xx": 0,
+    "cache_hits": 1,
+    "cache_hit_rate": 0.1111
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "route": "/api/v1/weather/history/{city}",
+      "count": 2,
+      "error_count": 0,
+      "cache_hit_rate": 0.0,
+      "p50_ms": 100.0,
+      "p95_ms": 250.0,
+      "p99_ms": 250.0,
+      "max_ms": 111.4
+    }
+  ],
+  "slo": { "latency_p95_ms_target": 2000, "p95_ms": 250.0, "met": true }
+}
+```
+
+- **These counters are per process and reset on every restart.** On the free
+  Render tier the instance sleeps when idle, so they also restart from zero when
+  it wakes. They describe the current instance's life only — **not** a 28-day
+  window — and must never be reported as one. A durable window needs an exporter
+  or a store; deliberately out of scope.
+- `requests.total` equals the sum of `routes[].count`. `by_status_class` lists
+  only the classes seen since start (`"2xx"`, `"4xx"`, …). `errors_5xx` and
+  `routes[].error_count` count **5xx only**: a 4xx is a client error, not an
+  availability failure. `cache_hit_rate` is `null` when its denominator is 0,
+  otherwise rounded to 4 decimals.
+- `routes` is keyed by `(method, route template)` — `GET` ×
+  `/api/v1/weather/history/{city}` — and sorted by `count` descending (ties broken
+  by route, then method). Neither column can carry client text: `route` is a
+  template the app declares (never the served path, so no city name), and
+  `method` is normalized to a fixed set — `GET`, `HEAD`, `POST`, `PUT`, `PATCH`,
+  `DELETE`, `OPTIONS`. **Any other method token** (a lowercase `get`, `TRACE`, a
+  crafted `M4711` that uvicorn happily accepts) is reported as `<other>` and is
+  never echoed back; `GET`, `HEAD` and `POST` on one path stay separate rows.
+  Query strings, request ids and client addresses are never recorded either, so
+  the payload is safe to serve publicly. (The JSON access log keeps the raw
+  `method` verbatim — it is a server-side log line, not a response body.)
+- **The table holds at most 256 entries, whatever the client sends.** The cap
+  covers the whole table — every `(method, route)` combination and the reserved
+  labels included — and one slot is always kept free, so up to 255 real rows plus
+  the single overflow row exist. Anything past the cap is folded into one
+  `(method: "<other>", route: "<other>")` entry, so neither method cardinality
+  nor path cardinality can grow the map and the body stays under ~52 KB
+  (`256 × ~200 B`). A request the router never matched is `<unmatched>` — a 404
+  raised before routing, and a CORS preflight (answered by the CORS middleware
+  without reaching a route) — and it is subject to the cap like any other row. A
+  *routed* failure keeps its template: a 405 on `/api/v1/health` is counted
+  there, and a `history` 404 for a city with no rows stays
+  `/api/v1/weather/history/{city}`. `/api/v1/...` and `/api/...` are separate
+  entries because they are separate mounts.
+- **Percentiles are bucket upper bounds (no interpolation).** Latency is counted
+  into fixed buckets — 5/10/25/50/100/250/500/1000/2500/5000/10000 ms — so memory
+  is O(routes × buckets) and cannot grow with traffic. A reported `p95_ms` of 250
+  means "the 95th percentile is at most 250 ms": a 120 ms request is reported as
+  250, so the estimate is never below the true value. A sample above the last
+  bound reports that route's `max_ms`, which is the largest duration actually
+  observed. A route only appears once it has a sample, so the percentiles in the
+  payload are never `null`; `null` is what the maths returns for an empty set.
+- `slo.met` is the process-wide `p95_ms <= 2000` (reported alongside it), and
+  `true` while no request has been recorded — nothing has violated the target
+  yet. The bucket convention keeps the verdict conservative: a p95 above 2 s is
+  bucketed at 2500 ms or higher, so `met` flips to `false` instead of being
+  rounded down.
+- `/metrics` is counted like every other route. The request that reads the
+  payload is counted once its own response is complete, so it shows up from the
+  next call on — two consecutive calls never show their own count.
+
 ## Shared types
 
 ```ts
