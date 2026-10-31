@@ -1,0 +1,46 @@
+name: Watchdog
+
+# Dead-man's switch for ingest -> features -> predictions (repo-local; no
+# external account, no secret beyond the automatic GITHUB_TOKEN).
+#
+# GREEN = "the watchdog works": it read the public API and either the pipeline
+# was in threshold or the rolling issue was created/commented/closed. It does NOT
+# mean the pipeline is healthy -- the issue is the health signal. An unreachable
+# or 5xx API is an availability verdict (api_down) and still a green run. RED =
+# the watchdog itself is broken (missing token, GitHub error, bad args, bad
+# payload): investigate it, not the pipeline.
+on:
+  schedule:
+    - cron: "25 */3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    # 15 min backstop, sized from scripts/watchdog.py: the evidence phase is
+    # bounded by API_TOTAL_BUDGET_SECONDS (360 s) + one HTTP_TIMEOUT_SECONDS
+    # attempt (120 s) = 8 min, and the GitHub calls by GITHUB_TIMEOUT_SECONDS
+    # (30 s) x 3 attempts + backoff per call (<= 7 min). The Render free tier
+    # spins down after ~15 min idle, so the first read-API attempt can take
+    # 30-60 s (sometimes more): that is why the per-attempt timeout is 120 s.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Stdlib only: no pip install, nothing to cache.
+      - name: Check pipeline freshness and update the rolling issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/watchdog.py
