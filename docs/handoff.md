@@ -11,7 +11,7 @@ live in `docs/batch4-contract.md`.
 | --- | --- | --- |
 | Repo | `jomanor/weather-prediction-mlops`, branch `main` | Public repo → standard GitHub Actions minutes are unlimited. |
 | API | Render service `meteoml-api`, deployed from `main` | `render.yaml`: docker, `backend/Dockerfile`, free plan, `autoDeploy: true`, health `GET /api/health`. Dashboard branch was the trap that caused stale deploys; it is now `main`. A deploy hook exists in the Render dashboard to force a deploy; the key is a secret, so it must never be committed to this public repo. |
-| Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing must stay enabled. |
+| Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing is currently **off** (`ignore = "exit 0"`); see the 2026-10-31 entry. |
 | DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** (includes Pasadena). Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL. Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
 | Cron | GitHub Actions | `ingest.yml` declared hourly `:50` (see the live caveat below); `ml-pipeline.yml` inference hourly `:05`, features `20 */6`, train nightly `35 2`; `backfill.yml` manual. |
 
@@ -348,10 +348,10 @@ the cut list live in `docs/app-rethink.md`.
   a live check.
 
 
-## Next session (2026-10-31) — queued, not started
+## Next session (2026-10-31) — items 2 and 3 done, item 1 user-side
 
-Live frontend: **https://meteoml.netlify.app** (Netlify auto-deploys every push to `main`; base
-`frontend`, `npm ci && npm run build`, publish `dist`). The old `weather-mlops-1787759329` URL was a
+Live frontend: **https://meteoml.netlify.app** (base `frontend`, `npm ci && npm run build`, publish
+`dist`; auto-publish is paused — see the 2026-10-31 entry). The old `weather-mlops-1787759329` URL was a
 site rename. State at handoff: three surfaces, type scale applied (controls 11 px, titles 13/14, h1 18),
 chart zoom/pan/reset, latest-forecast card/chart, Pasadena hidden from Sistema, CI green.
 
@@ -362,28 +362,14 @@ chart zoom/pan/reset, latest-forecast card/chart, Pasadena hidden from Sistema, 
   "Hide Netlify Drawer" (account-level; visitors never see it). A custom domain does not remove either.
 - If the badge toggle is plan-gated on that account, upgrading or hiding the Drawer is the only route.
 
-### 2. Night icons (moon instead of sun)
-- Today `describeWeather(code)` (`frontend/src/lib/weather.ts`) ignores day/night, and the API does
-  not expose Open-Meteo's `is_day` (`backend/app/services/openmeteo.py` fetches it, but
-  `schemas/weather.py` / `weather_repo._from_*` drop it).
-- Work: add `is_day` (0/1, nullable) to `CurrentWeather` and both raw/feature mappings; add it to
-  `currentWeatherSchema`; pass it to `describeWeather` and add moon variants for codes 0/1/2 (and a
-  moon+cloud icon for 3); fall back to local hour only when `is_day` is null. The map has its own SDF
-  glyph set in `components/map/weather-icons.ts` (`iconName(code)`), so it needs the moon glyphs too
-  — reuse the lucide Moon/CloudMoon shapes or add matching SVGs. Pasadena must use its own `is_day`,
-  never the viewer's local time. Tests: `weather.test.ts` (day/night matrix), current conditions,
-  map glyph mapping.
+### 2. Night icons (moon instead of sun) — **done 2026-10-31**
+- Shipped as `is_day` end-to-end plus night descriptors/glyphs; details in the
+  *2026-10-31 — Batch 6a* section below. Not live yet (auto-publish paused).
 
-### 3. Mobile map controls cover the map
-- `StationMap.tsx` renders a fixed `w-44` panel (`Capas`: four checkboxes, basemap select and two
-  legends) at `right-2 top-2`, plus `RadarControls` bottom-left. On a 390 px phone it eats the map.
-- Work: on `< sm`, collapse it behind a compact "Capas" button opening a bottom sheet/popover
-  (same content, large rows, closes on selection/backdrop/Escape), keep the legend as a one-line
-  strip or inside the sheet, keep `--nav-h`/`--safe-bottom` respected, and do not regress the tap
-  tolerance/cooperative gestures or the 3D-buildings toggle. Desktop keeps the current panel.
-- "Second tab" (Estación) mobile: review at 390 px — segmented controls wrap, chart toolbar and the
-  prediction card spacing; verify no horizontal scroll and that the zoom controls stay reachable.
-  (If "second tab" meant Sistema → Modelos, confirm before changing it.)
+### 3. Mobile map controls cover the map — **done 2026-10-31**
+- Shipped as `MapLayersControl.tsx` (`Capas` button + bottom sheet under `sm`, desktop panel
+  unchanged); details in the *2026-10-31 — Batch 6a* section below. Not live yet (auto-publish paused).
+- "Second tab" ambiguity **resolved**: Estación — reviewed at 390 px, no defect, no change.
 
 ### Verification recipe used today
 `cd frontend && VITE_API_PROXY=https://weather-prediction-mlops.onrender.com npm run dev -- --port 4173`
@@ -391,6 +377,52 @@ then Playwright with the cached Chromium (`~/.cache/ms-playwright/chromium-1247/
 `playwright-core` installed in `/tmp/pw`). Check computed font sizes, `scrollWidth`, network paths,
 zoom/domain changes and the station forecast timestamps. Deployed hash check:
 `curl -s https://meteoml.netlify.app/ | grep -oE 'assets/index-[^.]+.js'` vs `ls frontend/dist/assets/index-*.js`.
+
+## 2026-10-31 — Batch 6a: night icons + mobile map layers, deploys paused
+
+- **Contract `is_day`**: `CurrentWeather.is_day` (`int | None`, 1 day / 0 night / null unknown) in
+  `backend/app/schemas/weather.py`, mapped from `payload.current.is_day` in `_from_raw_weather`
+  (`backend/app/repositories/weather_repo.py`) with `_RAW_FIELD_PATHS` and `WEATHER_FIELDS` entries;
+  legacy `weather_data` leaves it null. `StationProperties.is_day` in `backend/app/schemas/map.py`,
+  passed in `backend/app/routers/map.py` — without it the map glyph path falls back to the viewer's
+  clock. Documented in `docs/api-contract.md`. **No pipeline rebuild was needed** and none is needed
+  for this: `scripts/ingest_weather.py` already fetched `is_day`, so `raw_weather` already stored it.
+  Do not retrain for this.
+- **Frontend**: `describeWeather(code, isDay)` / `weatherIconName(code, isDay)` in
+  `frontend/src/lib/weather.ts`, night descriptors for WMO 0/1/2/3 — `Cielo despejado (noche)`,
+  `Mayormente despejado (noche)`, `Parcialmente nuboso (noche)`, `Cubierto (noche)`, tones unchanged;
+  every other code keeps its day glyph. `is_day` parsed in `frontend/src/api/schemas.ts` as nullable
+  0/1 (absent key → null, any other value → null). Call sites: `CurrentConditions.tsx`,
+  `StationTable.tsx`, `components/map/station-geojson.ts`. The map needed no new artwork:
+  `components/map/weather-icons.ts` rasterises the same lucide components, so the `moon`/`moon-star`/
+  `cloud-moon` keys it already loops over are the night glyphs.
+- **Viewer-local-hour fallback is deliberate.** In `lib/weather.ts` it is reachable only when `is_day`
+  is genuinely null; it is a spec-mandated fallback and dead path once every payload carries the flag.
+  A reviewer flagged it once. Do not "fix" it by guessing.
+- **Test trap fixed**: `station-geojson.test.ts` asserted on a null-`is_day` fixture, so it was green
+  or red depending on the runner's wall clock (UTC CI fails 22:00–06:59 UTC). Every day/night
+  assertion now passes the flag explicitly; the suite is TZ-independent and passes under `TZ=UTC` and
+  `TZ=Pacific/Auckland`.
+- **Mobile map**: new `frontend/src/components/map/MapLayersControl.tsx` holds the layer settings once.
+  Desktop `>= sm` keeps the unchanged `w-44` panel (`absolute right-2 top-2`); phones `< sm` get a
+  44 px `Capas` button opening a bottom sheet with identical content (four layers, basemap, both
+  legends), closing on selection, backdrop tap or Escape, 44 px tap rows, 16 px select (iOS zoom),
+  focus to the close button and back to the trigger, Tab trapped, sheet offset by
+  `calc(var(--nav-h) + var(--safe-bottom))` and capped with `100svh`. `StationMap.tsx` renders both
+  surfaces and lets CSS pick. The 3D-buildings/protomaps source resolution, pin tap tolerance and
+  radar controls are untouched. Browser-verified at 320/360/390/414/639/640 px.
+- **Deploys paused**: `netlify.toml` has `ignore = "exit 0"` under `[build]`, so git-triggered Netlify
+  builds are skipped (the every-push auto-publish was burning the Netlify tokens). A dashboard
+  **Deploy site** or an API/build-hook deploy still builds; deleting that one line re-enables
+  auto-publish. **The night-icon and `Capas` UI is committed but NOT live until such a deploy is
+  deliberately triggered.**
+- **Config**: `render.yaml` CORS now lists `https://meteoml.netlify.app` (commit 36b5f9c).
+- **Gates measured on the merged working tree** (passes say nothing about correctness): backend
+  `261 passed`, `ruff`/`black` clean; frontend 47 files / 323 tests passed, typecheck clean, lint
+  0 errors (one pre-existing `vite.config.ts` warning), build ok.
+- **Review**: an independent reviewer found one blocker — `/api/map/stations` was missing `is_day`,
+  which made the moon glyphs unreachable in production and rendered Pasadena from the viewer's clock;
+  fixed and re-reviewed CLOSED after the clock-dependent test fix.
 
 ## Next: Batch 6
 
