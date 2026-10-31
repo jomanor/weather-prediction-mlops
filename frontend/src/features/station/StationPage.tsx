@@ -2,10 +2,11 @@ import { RefreshCw } from 'lucide-react'
 import { useMemo } from 'react'
 
 import { useCities } from '@/api/queries'
+import type { WeatherPoint } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
 import { HistoryChart, type HistoryVariable } from '@/components/charts/HistoryChart'
 import { Button } from '@/components/ui/Button'
-import { ErrorState, LoadingBlock, ChartSkeleton } from '@/components/ui/Feedback'
+import { ChartSkeleton, EmptyState, ErrorState, LoadingBlock } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
@@ -13,9 +14,8 @@ import { CurrentConditions } from '@/features/station/CurrentConditions'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
 import {
   PREDICTION_HORIZONS,
-  useCurrentWeather,
-  useHistory,
   usePredictions,
+  useStationSeries,
   type PredictionHorizon,
 } from '@/features/station/queries'
 import { useChartWindow } from '@/hooks/useChartSync'
@@ -40,6 +40,10 @@ const VARIABLES: ReadonlyArray<{ value: HistoryVariable; label: string }> = [
   { value: 'precipitation', label: 'Lluvia' },
   { value: 'wind', label: 'Viento' },
 ]
+
+/* Stable identity for the "no points" case: a fresh `[]` on every render would
+   re-run the chart's row merge (and its memo) for nothing. */
+const NO_POINTS: WeatherPoint[] = []
 
 /* Contract 2: horizon selector over the M2 config; default +1 h. */
 const HORIZON_OPTIONS: ReadonlyArray<{ value: PredictionHorizon; label: string }> =
@@ -68,8 +72,17 @@ export function StationPage() {
   const variable = state.var
   const horizon = state.horizon
 
-  const current = useCurrentWeather(city)
-  const history = useHistory(city, hours)
+  /* ONE bulk request per station: the hero observation and the chart series are
+     two views of the same payload, so they cannot disagree. */
+  const series = useStationSeries(city, hours)
+  const station = useMemo(
+    () => series.data?.cities.find((entry) => entry.city === city),
+    [series.data, city],
+  )
+  /* The API serves each city oldest -> newest; the chart reads left to right. */
+  const points = station?.points ?? NO_POINTS
+  /* The hero is the newest observation, never `points[0]`. */
+  const observation = points.at(-1) ?? null
   /* One unfiltered predictions query per station; card and chart both derive
      from it so they can never disagree about which run is the latest. */
   const predictions = usePredictions(city)
@@ -81,7 +94,7 @@ export function StationPage() {
       : null
 
   /* Share the observed window with the benchmark charts on the same time axis. */
-  const { brushed, resetWindow } = useChartWindow(hours, history.data?.points.at(-1)?.observed_at)
+  const { brushed, resetWindow } = useChartWindow(hours, observation?.observed_at)
 
   return (
     <div className="space-y-5 pb-8">
@@ -117,8 +130,8 @@ export function StationPage() {
               options={HORIZON_OPTIONS}
               label="Horizonte de predicción"
             />
-            <Button onClick={() => current.refetch()} disabled={current.isFetching}>
-              <RefreshCw className={cn('h-3.5 w-3.5', current.isFetching && 'animate-spin')} />
+            <Button onClick={() => series.refetch()} disabled={series.isFetching}>
+              <RefreshCw className={cn('h-3.5 w-3.5', series.isFetching && 'animate-spin')} />
               Actualizar
             </Button>
           </>
@@ -134,20 +147,31 @@ export function StationPage() {
       ) : (
         <>
           <div className="px-4 sm:px-6">
-            {current.isError ? (
+            {series.isError ? (
               <Panel>
                 <ErrorState
                   title="No se pudo cargar la observación"
-                  description={current.error.message}
-                  action={<Button onClick={() => current.refetch()}>Reintentar</Button>}
+                  description={series.error.message}
+                  action={<Button onClick={() => series.refetch()}>Reintentar</Button>}
                 />
               </Panel>
-            ) : current.isLoading || !current.data ? (
+            ) : series.isLoading ? (
               <Panel>
                 <LoadingBlock />
               </Panel>
+            ) : observation ? (
+              <CurrentConditions station={observation} />
             ) : (
-              <CurrentConditions station={current.data} />
+              /* `/series` answers 200 with an empty city instead of the old
+                 `/current` 404, so "no observation in this window" is an empty
+                 state, not an error — and the window can be widened from here. */
+              <Panel>
+                <EmptyState
+                  title="Sin observaciones recientes"
+                  description={`No hay observaciones de ${city} en las últimas ${hours} h. Amplía el rango o revisa la ingesta.`}
+                  action={<Button onClick={() => series.refetch()}>Reintentar</Button>}
+                />
+              </Panel>
             )}
           </div>
 
@@ -173,13 +197,13 @@ export function StationPage() {
                 }
               />
               <div className="p-3">
-                {history.isLoading ? (
+                {series.isLoading ? (
                   <ChartSkeleton />
-                ) : history.isError ? (
-                  <ErrorState title="Sin histórico" description={history.error.message} />
+                ) : series.isError ? (
+                  <ErrorState title="Sin histórico" description={series.error.message} />
                 ) : (
                   <HistoryChart
-                    points={history.data?.points ?? []}
+                    points={points}
                     predictions={run}
                     palette={palette}
                     variable={variable}

@@ -1,30 +1,57 @@
 import { z } from 'zod'
 
 import { queryKeys, useApiQuery } from '@/api/queries'
-import {
-  currentWeatherSchema,
-  historyResponseSchema,
-  predictionSchema,
-  statsResponseSchema,
-} from '@/api/schemas'
+import { predictionSchema, seriesResponseSchema, statsResponseSchema } from '@/api/schemas'
 
-/** Station-scoped queries: current observation, history, stats and predictions. */
+/** Station-scoped queries: the observation series, stats and predictions. */
 
-export const useCurrentWeather = (city: string) =>
-  useApiQuery(
-    queryKeys.station(city),
-    `/weather/current/${encodeURIComponent(city)}`,
-    currentWeatherSchema,
-    { refetchInterval: 5 * 60_000, enabled: Boolean(city) },
-  )
+/**
+ * Exactly the columns this surface renders, as accepted by the backend's
+ * `FIELDS_QUERY` (it rejects anything outside `WEATHER_FIELDS` with a 422):
+ *
+ * - hero card: `temperature`, `apparent_temperature`, `humidity`, `pressure`,
+ *   `wind_speed`, `wind_direction`, `precipitation`, `cloud_cover`,
+ *   `weather_code`, `is_day` (the icon reads the station's own day flag);
+ * - chart: `temperature`, `precipitation`, `wind_speed`.
+ *
+ * The union is the whole contract today, so the projection saves nothing yet —
+ * it is pinned so an 11th `weather_data` column cannot start arriving in a
+ * payload nobody reads. `latitude`/`longitude`/`city`/`observed_at` are the
+ * identity columns and are always projected by the API.
+ */
+export const STATION_SERIES_FIELDS = [
+  'temperature',
+  'apparent_temperature',
+  'humidity',
+  'pressure',
+  'wind_speed',
+  'wind_direction',
+  'precipitation',
+  'cloud_cover',
+  'weather_code',
+  'is_day',
+] as const
 
-export const useHistory = (city: string, hours = 24) =>
-  useApiQuery(
-    queryKeys.history(city, hours),
-    `/weather/history/${encodeURIComponent(city)}?hours=${hours}&limit=500`,
-    historyResponseSchema,
-    { enabled: Boolean(city) },
-  )
+const stationSeriesPath = (city: string, hours: number) =>
+  `/weather/series?cities=${encodeURIComponent(city)}&hours=${hours}` +
+  `&fields=${STATION_SERIES_FIELDS.join(',')}`
+
+/**
+ * One bulk observation request per station instead of `/weather/current/{city}`
+ * + `/weather/history/{city}`: the newest point is the hero observation and the
+ * ordered points are the chart series, so the two can never disagree about what
+ * was observed.
+ *
+ * `step_hours` is left at the backend default (1 h = no downsampling), which is
+ * what keeps the point count identical to the `/history` call it replaces.
+ * Polling follows the old `useCurrentWeather` cadence (5 min): it was the faster
+ * of the two removed queries, so the hero never gets staler than it used to.
+ */
+export const useStationSeries = (city: string, hours = 24) =>
+  useApiQuery(queryKeys.series(city, hours), stationSeriesPath(city, hours), seriesResponseSchema, {
+    refetchInterval: 5 * 60_000,
+    enabled: Boolean(city),
+  })
 
 export const useStats = (city: string, hours = 24) =>
   useApiQuery(

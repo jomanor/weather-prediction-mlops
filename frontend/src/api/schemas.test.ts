@@ -7,6 +7,7 @@ import {
   modelsResponseSchema,
   predictionSchema,
   registryModelSchema,
+  seriesResponseSchema,
   stationCollectionSchema,
   stationsResponseSchema,
   weatherQualitySchema,
@@ -96,6 +97,133 @@ describe('benchmarkSchema', () => {
     expect(parsed.aemet.available).toBe(false)
     expect(parsed.series[0].aemet).toBeNull()
     expect(parsed.metrics.aemet.mae).toBeNull()
+  })
+})
+
+describe('seriesResponseSchema', () => {
+  const point = (observedAt: string, temperature = 20) => ({
+    city: 'Madrid',
+    latitude: 40.4168,
+    longitude: -3.7038,
+    temperature,
+    apparent_temperature: temperature - 0.5,
+    humidity: 61,
+    pressure: 1014.2,
+    wind_speed: 14.2,
+    wind_direction: 210,
+    precipitation: 0,
+    cloud_cover: 15,
+    weather_code: 0,
+    is_day: 1,
+    observed_at: observedAt,
+  })
+
+  it('parses one city series, points reused verbatim from the point schema', () => {
+    const parsed = seriesResponseSchema.parse({
+      hours: 48,
+      count: 1,
+      cities: [
+        {
+          city: 'Madrid',
+          count: 2,
+          latest_timestamp: '2026-09-25T11:00:00Z',
+          points: [point('2026-09-25T10:00:00Z'), point('2026-09-25T11:00:00Z', 22.5)],
+        },
+      ],
+    })
+    expect(parsed.hours).toBe(48)
+    expect(parsed.cities[0].latest_timestamp).toBe('2026-09-25T11:00:00Z')
+    /* Same columns `/current` serves, so the hero can render a series point. */
+    expect(parsed.cities[0].points[1].temperature).toBe(22.5)
+    expect(parsed.cities[0].points[1].apparent_temperature).toBe(22)
+  })
+
+  it('keeps the served ordering: oldest first, newest last', () => {
+    const parsed = seriesResponseSchema.parse({
+      hours: 24,
+      count: 1,
+      cities: [
+        {
+          city: 'Madrid',
+          count: 3,
+          latest_timestamp: '2026-09-25T12:00:00Z',
+          points: [
+            point('2026-09-25T10:00:00Z'),
+            point('2026-09-25T11:00:00Z'),
+            point('2026-09-25T12:00:00Z'),
+          ],
+        },
+      ],
+    })
+    expect(parsed.cities[0].points.map((entry) => entry.observed_at)).toEqual([
+      '2026-09-25T10:00:00Z',
+      '2026-09-25T11:00:00Z',
+      '2026-09-25T12:00:00Z',
+    ])
+  })
+
+  it('parses a requested city with no rows in the window', () => {
+    /* No per-city 404: the city is echoed with an empty, null-latest series. */
+    const parsed = seriesResponseSchema.parse({
+      hours: 24,
+      count: 1,
+      cities: [{ city: 'Vigo', count: 0, latest_timestamp: null, points: [] }],
+    })
+    expect(parsed.cities[0].latest_timestamp).toBeNull()
+    expect(parsed.cities[0].points).toEqual([])
+  })
+
+  it('tolerates a payload that omits latest_timestamp entirely', () => {
+    const parsed = seriesResponseSchema.parse({
+      hours: 24,
+      count: 1,
+      cities: [{ city: 'Vigo', count: 0, points: [] }],
+    })
+    expect(parsed.cities[0].latest_timestamp).toBeNull()
+  })
+
+  it('parses extra cities without dropping or reordering them', () => {
+    /* The station page asks for one city; a bulk caller may ask for more, and a
+       future shared cache would see them all. The page picks its own city. */
+    const parsed = seriesResponseSchema.parse({
+      hours: 24,
+      count: 2,
+      cities: [
+        { city: 'Madrid', count: 1, latest_timestamp: '2026-09-25T10:00:00Z', points: [point('2026-09-25T10:00:00Z')] },
+        { city: 'Sevilla', count: 0, latest_timestamp: null, points: [] },
+      ],
+    })
+    expect(parsed.cities.map((entry) => entry.city)).toEqual(['Madrid', 'Sevilla'])
+  })
+
+  it('keeps duplicate timestamps as served instead of inventing a dedupe', () => {
+    /* `find_many_in_range` does not dedupe, so the schema must not either: the
+       chart merges rows by timestamp, and a silent drop here would hide an
+       upstream duplicate from the surface that could report it. */
+    const parsed = seriesResponseSchema.parse({
+      hours: 24,
+      count: 1,
+      cities: [
+        {
+          city: 'Madrid',
+          count: 2,
+          latest_timestamp: '2026-09-25T10:00:00Z',
+          points: [point('2026-09-25T10:00:00Z', 20), point('2026-09-25T10:00:00Z', 21)],
+        },
+      ],
+    })
+    expect(parsed.cities[0].points).toHaveLength(2)
+    expect(parsed.cities[0].points.map((entry) => entry.temperature)).toEqual([20, 21])
+  })
+
+  it('rejects a payload whose series has no timestamp', () => {
+    const { observed_at: _dropped, ...noTimestamp } = point('2026-09-25T10:00:00Z')
+    const result = seriesResponseSchema.safeParse({
+      hours: 24,
+      count: 1,
+      cities: [{ city: 'Madrid', count: 1, latest_timestamp: null, points: [noTimestamp] }],
+    })
+    expect(result.success).toBe(false)
   })
 })
 

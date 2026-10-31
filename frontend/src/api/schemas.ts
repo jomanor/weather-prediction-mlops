@@ -312,6 +312,31 @@ export const historyResponseSchema = z.object({
 })
 export type HistoryResponse = z.infer<typeof historyResponseSchema>
 
+/**
+ * `GET /api/weather/series?cities=&hours=&fields=&step_hours=` — one bulk read
+ * for 1–15 cities. A point is the *same* `CurrentWeather`-shaped object `/current`
+ * and `/history` serve, so the columns are reused from `weatherPointSchema`
+ * rather than re-declared. Ordering is per city: oldest → newest.
+ *
+ * `latest_timestamp` is the newest observation inside the window, `null` when the
+ * city has no rows in it. A city the caller asked for always appears, with
+ * `count: 0` and no points — the endpoint has no per-city 404.
+ */
+export const citySeriesSchema = z.object({
+  city: z.string(),
+  count: z.number(),
+  latest_timestamp: nullableString,
+  points: z.array(weatherPointSchema),
+})
+export type CitySeries = z.infer<typeof citySeriesSchema>
+
+export const seriesResponseSchema = z.object({
+  hours: z.number(),
+  count: z.number(),
+  cities: z.array(citySeriesSchema),
+})
+export type SeriesResponse = z.infer<typeof seriesResponseSchema>
+
 export const latestPredictionsSchema = z.object({
   count: z.number(),
   generated_at: nullableString,
