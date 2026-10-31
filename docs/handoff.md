@@ -1,5 +1,11 @@
 # Handoff — operational notes for the next session
 
+**Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
+items, batches A–F, and five owner decisions). Pick a batch from its *Suggested order* table,
+fall back to `docs/roadmap.md` *Accepted follow-ups* when it is exhausted. Do not start a batch
+before answering the owner questions that batch depends on (Spark for E, `/refresh` for A/C,
+Analítica and Pasadena for D).
+
 Read this **before** `docs/roadmap.md`. The roadmap holds the plan and the status
 checklist; this file holds the environment, the hard rules and the traps that are not
 written down anywhere else. Do not duplicate the roadmap here. Batch 4 frozen interfaces
