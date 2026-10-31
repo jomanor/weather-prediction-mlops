@@ -47,7 +47,7 @@ services:
       # browser only ever talks to its own origin; the Netlify domain is
       # listed anyway so direct browser calls to Render also pass CORS.
       - key: CORS_ORIGINS
-        value: https://weather-mlops-1787759329.netlify.app,http://localhost:5173,http://localhost:8080
+        value: https://meteoml.netlify.app,http://localhost:5173,http://localhost:8080
       - key: AEMET_TIMEOUT_SECONDS
         value: "8"
       - key: AEMET_RETRIES
