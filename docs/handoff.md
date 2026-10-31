@@ -424,14 +424,132 @@ zoom/domain changes and the station forecast timestamps. Deployed hash check:
   which made the moon glyphs unreachable in production and rendered Pasadena from the viewer's clock;
   fixed and re-reviewed CLOSED after the clock-dependent test fix.
 
+## 2026-10-31 — Batch 6b: pipeline watchdog + server-side data age
+
+Both halves are in the working tree and **not on `main`** — `scripts/watchdog.py`,
+`.github/workflows/watchdog.yml` and `tests/unit/test_watchdog.py` are untracked, the frontend files are
+modified-but-uncommitted. The cron does not exist until the workflow lands on `main`, and auto-publish is
+paused (2026-10-31 entry), so neither half is live.
+
+**Watchdog — `scripts/watchdog.py` + `.github/workflows/watchdog.yml`**
+
+- Stdlib only (`urllib.request`, `json`, `argparse`, `dataclasses`), no `pip install`: it must run before
+  any dependency install. Reads the public read API only (`/api/v1/weather/current`,
+  `/api/v1/weather/quality?days=7`, `/api/v1/predictions/latest`, `/api/v1/models`) — no Mongo
+  credentials, no `gh` CLI, and nothing writes to the database or the pipeline.
+- One rolling issue, no fan-out: title **`[ops] Pipeline de datos desactualizado`**, label **`ops-alert`**
+  (created itself on a 422 when the label is missing), matched by *title* so a hand-removed label cannot
+  fork a second one. A `<!-- watchdog-verdict {...} -->` block in the body/comment makes it idempotent:
+  unchanged verdict → no comment, recovery → one comment + close. At most one issue, ≤1 comment per run.
+- Cron `25 */3 * * *` plus `workflow_dispatch`; `concurrency: watchdog`, `cancel-in-progress: false`;
+  `permissions: contents: read` + `issues: write`; Python 3.12; `timeout-minutes: 15` (backstop above
+  the code's own budget: 360 s evidence budget + one 120 s attempt, plus the GitHub calls); one run step.
+  **No secret beyond the automatic `GITHUB_TOKEN` and no external account** — it replaces the user-side
+  Healthchecks.io ping.
+- Thresholds are *mirrored*, never invented: newest `observed_at` and newest `source_timestamp` 12 h ok /
+  18 h warn-or-bad, worst-city completeness bad `< 0.80`, prediction coverage bad `< 0.90`, edges
+  inclusive (14/15 = 0.933 stays ok). They are one block at the top of `scripts/watchdog.py`, copied from
+  `backend/app/repositories/weather_repo.py` (12.0/18.0) and `scripts/pipeline_summary.py`
+  (`PREDICTION_COVERAGE_WARN_RATIO`). **Retune the backend first and copy the numbers here; never retune
+  the switch alone**, or it will disagree with the quality meter.
+- **Model skill degradation is advisory only and must stay that way.** Production models at or below a
+  `skill_score` of `0.0` are printed in the issue body but never create an issue or a comment on their
+  own, because two promoted models already sit below zero (`temp_prediction_24h_LinearRegression -0.117`,
+  `rain_prediction_1h_GradientBoostedTrees -0.044`, 2026-10-30 entry). Reading the live payload, the level
+  is `stage` (or `status`) and the score is `metrics.skill_score` (falling back to
+  `diagnostics.skill_score`); null/absent stays "unknown" and is never advisory.
+- **Green vs red.** Exit `0` means "the watchdog worked": everything in threshold, the issue was
+  created/commented/closed, **or the read API could not be read**. A red run (exit `1`) means the
+  **watchdog itself is broken** — missing `GITHUB_TOKEN`/`--repo`, a GitHub REST error, or an internal
+  exception including a payload that breaks the documented API shape. Read the *issue*, not the check.
+- **An unreachable API is a verdict, not a red run.** A timeout or connection fault after the retries (and
+  any 5xx/502, e.g. during a Render deploy) on a graded endpoint becomes the `api_down` verdict: it opens
+  or updates the same rolling issue with the error text in the body, and the run still exits `0`. A
+  failing `/api/v1/models` is narrower: it records `advisory_error`, prints it in the body and never
+  aborts the run, so a sick advisory endpoint cannot mask a stale pipeline.
+- **Timeouts are sized for the Render cold start, not to make the run red:** `HTTP_TIMEOUT_SECONDS =
+  120.0` per read-API attempt (3 attempts, 5 s / 10 s backoff) inside `API_TOTAL_BUDGET_SECONDS = 360.0`
+  for the whole evidence phase (≈8 min worst case, after which remaining calls fail instantly as
+  `api_down`/`advisory_error`); GitHub calls keep their own `GITHUB_TIMEOUT_SECONDS = 30.0` because there
+  is no cold start there. The old 30 s read timeout killed the first attempt on every scheduled run,
+  since nothing keeps the free instance warm between the 3-hourly runs.
+- **Silence or tune it:** `gh workflow disable watchdog.yml` stops it (`gh workflow enable watchdog.yml`
+  restarts); `gh workflow run watchdog.yml --ref main` runs it once out of band. Check by hand without
+  writing anything:
+
+  ```bash
+  .venv/bin/python scripts/watchdog.py --dry-run                        # verdict + table, no writes
+  .venv/bin/python scripts/watchdog.py --dry-run --json                 # machine-readable
+  .venv/bin/python scripts/watchdog.py --dry-run --repo jomanor/weather-prediction-mlops  # + planned action
+  ```
+
+  `--api` points it at another base (default `https://weather-prediction-mlops.onrender.com`), `--token`
+  defaults to `$GITHUB_TOKEN`. Close the issue manually to acknowledge it; a still-bad pipeline recreates
+  it on the next run, and so does an API that flaps down→up→down (only *open* issues are matched, so a
+  flapping API can open a fresh issue per cycle — up to 8/day at this cron). To change the sensitivity,
+  edit the threshold block in `scripts/watchdog.py` and the backend together.
+
+**Frontend — `X-Data-Age-Seconds` is now consumed (Resumen only)**
+
+- `frontend/src/api/client.ts`: the fetch+schema body moved to a private `getJson()` that keeps the
+  `Response`; `apiGet` keeps its exact signature/behaviour, and the additive `apiGetWithDataAge()` returns
+  `{data, dataAgeSeconds}`. `parseDataAgeSeconds()` accepts only a trimmed `/^\d+$/` that is a safe
+  integer — `'-5'`, `'1.5'`, `'12s'` and `''` all yield `null`.
+- `frontend/src/api/queries.ts`: `useApiQueryWithDataAge()` (same key/path/schema/options as
+  `useApiQuery`) also returns `ageCapturedAt` = React Query's `dataUpdatedAt`, i.e. the `Date.now()`
+  baseline for ageing the value forward. No new timer.
+- **Precedence / invariant** in `frontend/src/hooks/useFreshness.ts` (`effectiveAgeSeconds`, optional third
+  arg `serverAge`):
+  1. `carried = serverAge + max(0, round((now - receivedAt)/1000))`, recomputed on the existing 60 s tick,
+     then `ageSeconds = payloadAge === null ? carried : max(carried, payloadAge)`.
+  2. **The header is a floor, not live authority.** `/weather/current` is served `public, max-age=30` with
+     a strong ETag, so a revalidation answers 304 — invisible to `fetch` — and the browser replays the
+     stored body *and* the stored header while React Query resets `dataUpdatedAt`. `carried` therefore
+     restarts from a value measured at the last real 200 and can freeze while the data ages. `max()` means
+     the header can only **raise** the estimate, never lower it, so a stale payload is never painted
+     fresh; the value the badge shows is never below the pre-header payload math.
+  3. no usable server age (absent or unparseable header, proxy-stripped, old backend) ⇒ `ageInSeconds(observed_at)`
+     exactly as before; a server age with no payload timestamp ⇒ `carried` alone (unreachable in practice:
+     `observed_at` is required and the API derives the header from the same field).
+  4. `isFresh = ageSeconds !== null && ageSeconds <= FRESH_WINDOW_SECONDS` (`12 * 60 * 60`, unchanged), and
+     the stale line keys on that result: `stale = ageSeconds !== null && !isFresh`, so "… · datos con más
+     de 12 h" also appears when the age came from the server and `observed_at` is missing.
+- **Why read the header at all:** it is measured where the data lives, so a client clock *behind* true time
+  can no longer make stale data look fresh (the carried server age raises the estimate past it). A clock
+  *ahead* can still show fresh data as stale — that direction is bounded, pre-existing, and the safe one.
+  The browser can only read the header because the API exposes it in `access-control-expose-headers`
+  (verified live: `ETag, Cache-Control, X-Data-Age-Seconds, X-Request-Id`); a proxy that drops it just falls
+  back to case 3.
+- Wired only for `useStations` (`/weather/current`) in `frontend/src/features/overview/queries.ts` +
+  `OverviewPage.tsx`. The rendered line ("… · datos con más de 12 h") and the dot are unchanged; the
+  station hero, `StationTable` and the rest of the ~all `apiGet` call sites were deliberately left alone.
+- **Closed review blocker (2026-10-31, does not need action):** the first cut let a 304 replay lower the
+  reported age and paint stalled data fresh. Fixed by the `max()` invariant above, not by hiding it; a test
+  (`'survives a 304 replay storm without freezing the age'` in
+  `frontend/src/hooks/useFreshness.test.ts`) pins it. Residual understatement left: only a client clock *behind*
+  combined with a frozen header, bounded by exactly what the code did before this feature.
+- **Gates measured here** (passes say nothing about correctness): `pytest tests/unit/test_watchdog.py -q`
+  → `93 passed`; `scripts/watchdog.py --dry-run` → `veredicto: ok`, exit 0 (3.0 h / 0.994 / 5.2 h /
+  1.000 at 11:12 UTC — the values move with the data, plus the two skill advisories); `ruff`/`black
+  --check` clean on both new files; frontend 48 files / 351 tests passed, typecheck clean, lint 0 errors,
+  build ok. The repo-wide `ruff`/`black` failures (`tests/unit/fake_registry.py`,
+  `tests/unit/test_promote_model.py`) and the 60 PySpark `Py4JJavaError` failures in the local root suite
+  are pre-existing, untouched by this slice. The earlier gap is closed: `parse_timestamp` now has
+  parametrised tests for naive input, `Z`/`z`, fractional seconds, non-UTC offsets and garbage.
+- **Review verdict: CLOSED** (re-verified on the fixed tree). Open NITs only:
+  `python scripts/watchdog.py --nope` exits `2` while the module docstring still says `1`; the code's
+  900 s worst-case model counts 4 GitHub calls where `GitHubClient.comments()` can issue 5 (needs a
+  hanging GitHub plus >100 comments).
+
 ## Next: Batch 6
 
 No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
-surface `X-Data-Age-Seconds` in the frontend (`apiGet` does not read response headers), consume
-`/series`/`/summary`/`/range`, k6 cold-burst, a read-API latency/availability SLO (the JSON access log now
-has the fields an OTel histogram would need), a pageable production-drift signal (sustained
-`skill_score <= 0.0` or temperature-feature drift → GitHub issue, never a page), and a dead-man's switch for
-`ingest` + features. Browser verification still needs the desktop app session.
+consume `/series`/`/summary`/`/range` (the map still reads `/api/map/stations`), k6 cold-burst, a read-API
+latency/availability SLO (the JSON access log now has the fields an OTel histogram would need), and a
+pageable production-drift signal (sustained `skill_score <= 0.0` or temperature-feature drift → GitHub
+issue, never a page — the Batch 6b watchdog surfaces skill **advisory-only**). The Resumen freshness line
+is guarded by the `max()` invariant above; it understates only for a client clock behind true time. Browser
+verification still needs the desktop app session.
 
 **L1 (15-min ingest) is deferred, not cancelled.** Measured projection with 15-min ingest is ~637 MiB at a 180-day raw window (~890 MiB if features densify too), which breaks the 512 MB M0 cap. Three ways forward when it is picked up: shorten the raw window to ~90 d (free, ~350 MiB, halves the training window), upgrade the Atlas tier (2 GB, paid), or keep hourly ingest. Do not start L1 without re-measuring storage first.
 
@@ -449,6 +567,6 @@ Gate before done: `code-reviewer` on the diff, `qa-engineer` when tests change, 
   value must match. Running both is safe — Render ignores a deploy request for
   an already-deployed commit.
 - Sentry DSN on Render.
-- Healthchecks.io checks for the ingest/inference/train crons (highest value: a dead-man's switch on `ingest.yml` + features; the in-repo `::warning` is ephemeral).
+- Healthchecks.io checks for the ingest/inference/train crons (optional now: the repo-local `watchdog.yml` from Batch 6b covers ingest + features + inference staleness, so Healthchecks.io would only add an out-of-band liveness ping; the in-repo `::warning` is ephemeral).
 - Atlas project alerts (disk >80%, connections >80%, query targeting).
 - Browser verification needs this session open in the desktop app, otherwise the browser tools report `disconnected`.
