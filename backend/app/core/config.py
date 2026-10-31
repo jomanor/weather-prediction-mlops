@@ -52,10 +52,11 @@ class Settings(BaseSettings):
     #: ``CITY_WRITES_TOKEN`` means unset, never "no auth". Reads are unaffected.
     city_writes_token: str | None = None
 
-    #: A served prediction whose source observation is older than this is
-    #: flagged ``stale`` (row stays visible, never dropped). The default matches
-    #: one ingest/rebuild cycle plus jitter.
-    prediction_stale_after_hours: float = Field(default=24.0, ge=0)
+    #: A served prediction whose source observation is older than
+    #: ``PREDICTION_STALE_AFTER_HOURS`` is flagged ``stale`` (row stays visible,
+    #: never dropped). The threshold is NOT a setting: it lives in
+    #: ``app.core.thresholds`` so the API, the watchdog and the inference job
+    #: cannot disagree (audit finding 5).
 
     @field_validator("city_writes_token", mode="before")
     @classmethod

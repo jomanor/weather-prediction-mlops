@@ -29,7 +29,8 @@ Options
     --dry-run: validate the requested range, resolve the station set and print
                the plan (plus the document/chunk counts), then exit without
                calling Open-Meteo and without writing to MongoDB. Works with
-               MongoDB unreachable: the bundled city list is used instead.
+               MongoDB unreachable: the seed stations from ``app.core.cities``
+               are used instead.
     --best-effort: an API failure for one city/chunk (the archive and the
                forecast API are documented to lag and to hiccup) becomes a
                ``::warning`` instead of a non-zero exit. Write failures and
@@ -46,7 +47,8 @@ Defaults
 Cities
 ------
     Read from the ``cities`` registry when present so the station set matches
-    the deployed app; otherwise the bundled list is used.
+    the deployed app; otherwise the seed tuple (``DEFAULT_CITIES`` in
+    ``app/core/cities.py``, the same 15 stations the API seeds) is used.
 
 Idempotency
 -----------
@@ -77,6 +79,14 @@ import requests
 from pymongo import MongoClient, UpdateOne
 from pymongo.errors import BulkWriteError, PyMongoError
 
+# ``app.core.cities`` lives in the backend; it is pure stdlib, so importing it
+# here cannot drag FastAPI/motor into the script.
+BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "backend")
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from app.core.cities import DEFAULT_CITIES  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -97,21 +107,10 @@ OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 REQUEST_DELAY_SECONDS = 0.5  # Be polite to the free API
 BATCH_UPSERT_SIZE = 100  # MongoDB upsert batch size
 
-CITIES = {
-    "El Ejido": (36.7756, -2.8144),
-    "Almería": (36.8381, -2.4597),
-    "Granada": (37.1773, -3.5986),
-    "Paterna": (39.5028, -0.4408),
-    "Madrid": (40.4168, -3.7038),
-    "Barcelona": (41.3851, 2.1734),
-    "Valencia": (39.4699, -0.3763),
-    "Sevilla": (37.3891, -5.9845),
-    "Zaragoza": (41.6488, -0.8891),
-    "Malaga": (36.7213, -4.4214),
-    "Murcia": (37.9922, -1.1307),
-    "Palma": (39.5696, 2.6502),
-    "Bilbao": (43.2630, -2.9350),
-    "Alicante": (38.3452, -0.4810),
+#: {name: (lat, lon)} for the seed stations, used only when the registry is
+#: empty or unreachable — the ``cities`` collection is the runtime source.
+FALLBACK_CITIES: dict[str, tuple[float, float]] = {
+    name: (latitude, longitude) for name, latitude, longitude in DEFAULT_CITIES
 }
 
 # Hourly variables requested from the historical archive
@@ -564,14 +563,14 @@ def dry_run(args, start_date: date, end_date: date) -> None:
     """Print what a real run would do and exit 0 — no API call, no write.
 
     The station set is resolved best-effort: an unreachable MongoDB falls back to
-    the bundled ``CITIES`` list instead of aborting, so the flag works offline.
+    the seed ``FALLBACK_CITIES`` instead of aborting, so the flag works offline.
     """
-    registry = dict(CITIES)
+    registry = dict(FALLBACK_CITIES)
     try:
         with MongoClient(args.mongo_url, serverSelectionTimeoutMS=DRY_RUN_TIMEOUT_MS) as client:
-            registry = load_cities(client["weather_db"]) or dict(CITIES)
+            registry = load_cities(client["weather_db"]) or dict(FALLBACK_CITIES)
     except PyMongoError as exc:
-        print(f"[WARN] MongoDB unreachable ({exc.__class__.__name__}); using the bundled list")
+        print(f"[WARN] MongoDB unreachable ({exc.__class__.__name__}); using the seed list")
 
     wanted = parse_city_filter(args.city)
     try:
@@ -615,9 +614,9 @@ def main():
     db = client["weather_db"]
     collection = db["raw_weather"]
 
-    # Match the deployed station registry when it exists; fall back to the
-    # bundled list on a brand-new database the API has not seeded yet.
-    registry = load_cities(db) or CITIES
+    # Match the deployed station registry when it exists; fall back to the seed
+    # list on a brand-new database the API has not seeded yet.
+    registry = load_cities(db) or dict(FALLBACK_CITIES)
 
     # Optional single-station repair: no filter means the whole registry.
     wanted = parse_city_filter(args.city)

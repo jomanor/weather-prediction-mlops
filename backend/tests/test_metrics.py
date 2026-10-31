@@ -427,7 +427,7 @@ async def test_metrics_is_served_on_both_prefixes_with_the_documented_shape(clie
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
-    assert set(body) == {"started_at", "uptime_seconds", "requests", "routes", "slo"}
+    assert set(body) == {"started_at", "uptime_seconds", "requests", "routes", "slo", "database"}
     assert set(body["requests"]) == {
         "total",
         "by_status_class",
@@ -597,3 +597,56 @@ async def test_non_get_requests_are_their_own_route_entry(client):
 
     assert _route(body, "DELETE", "/api/v1/cities/{name}")["count"] == 1
     assert body["requests"]["by_status_class"] == {"4xx": 1}
+
+
+# --- database.indexes: the startup index outcome -------------------------------
+
+
+async def test_index_status_is_unknown_until_the_index_task_has_run(client):
+    # ``create_app`` starts with the status unknown, so a reader can tell
+    # "not run yet" from "ok" instead of guessing.
+    body = await _metrics_body(client)
+
+    assert body["database"] == {"indexes": {"ok": None, "error": None}}
+
+
+async def test_a_failed_index_creation_is_reported_with_its_error(app, client):
+    app.state.index_status = {"ok": False, "error": "OperationFailure: not authorized"}
+
+    response = await client.get("/api/v1/metrics")
+
+    assert response.status_code == 200
+    # Same no-store semantics as before: a cached "indexes ok" would be a lie.
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["database"] == {
+        "indexes": {"ok": False, "error": "OperationFailure: not authorized"}
+    }
+    # Additive only: every counter key is still served unchanged.
+    assert set(body) == {"started_at", "uptime_seconds", "requests", "routes", "slo", "database"}
+    assert set(body["requests"]) == {
+        "total",
+        "by_status_class",
+        "errors_5xx",
+        "cache_hits",
+        "cache_hit_rate",
+    }
+
+
+async def test_a_successful_index_creation_is_reported_as_ok(app, client):
+    app.state.index_status = {"ok": True, "error": None}
+
+    assert (await _metrics_body(client))["database"] == {"indexes": {"ok": True, "error": None}}
+
+
+async def test_a_failed_index_does_not_fail_readiness(app, client):
+    """/health/ready is Render's restart trigger; a missing index must not trip it."""
+    from tests.fakes import FakeDatabase
+
+    app.state.db = FakeDatabase()
+    app.state.index_status = {"ok": False, "error": "OperationFailure: not authorized"}
+
+    ready = await client.get("/api/v1/health/ready")
+
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ok", "database": "weather_db"}

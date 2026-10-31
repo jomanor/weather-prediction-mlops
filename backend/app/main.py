@@ -48,17 +48,26 @@ API_LEGACY_PREFIX = "/api"
 PREPARE_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
-async def _prepare_database(db) -> None:
+async def _prepare_database(db, state) -> None:
     """Ensure indexes and seed the registry, once per process, off the request path.
 
     Runs as a background task so a cold request never waits for it. Failures are
     logged with a full traceback (loudly) but do not kill an already-serving
-    instance: index creation is retried on the next cold start.
+    instance: index creation is retried on the next cold start. An index failure
+    is *recorded* on ``state.index_status`` anyway, because a serving-but-scanning
+    instance is an ops problem and is otherwise invisible (``GET /metrics``
+    reports it). It deliberately does **not** touch ``/health/ready``: that is
+    Render's health check, and a missing index must not make the platform
+    restart a process that can still answer requests correctly.
     """
     try:
         await ensure_indexes(db)
-    except Exception:  # noqa: BLE001 - logged loudly, service keeps serving
+    except Exception as exc:  # noqa: BLE001 - logged loudly, service keeps serving
         logger.exception("ensure_indexes failed; continuing without guaranteed indexes")
+        # Bounded: the payload is public, so no full driver traceback in it.
+        state.index_status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+    else:
+        state.index_status = {"ok": True, "error": None}
     await seed_default_cities(db)
 
 
@@ -104,7 +113,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # orphaned. ``ping`` above already guaranteed Mongo is reachable, so the
         # first request is served without waiting for indexes/seeding.
         app.state.prepare_database_task = (
-            asyncio.create_task(_prepare_database(db)) if settings.ensure_indexes_on_start else None
+            asyncio.create_task(_prepare_database(db, app.state))
+            if settings.ensure_indexes_on_start
+            else None
         )
         logger.info(
             "Started %s v%s (db=%s, aemet_configured=%s)",
@@ -156,6 +167,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.metrics = RequestMetrics(
         mount_prefixes=(API_V1_PREFIX, API_LEGACY_PREFIX),
     )
+    #: ``{"ok": bool, "error": str | None}`` once the background index task has
+    #: run, ``None`` while it is unknown (not started yet, or disabled with
+    #: ``ENSURE_INDEXES_ON_START=false``). ``/metrics`` reports it as
+    #: ``database.indexes``; a failure is not a readiness failure.
+    app.state.index_status = None
 
     # Order matters: middleware added last is outermost. RequestContext must wrap
     # CORS so that preflights are logged too and so the id/access line covers

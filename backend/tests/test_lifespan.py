@@ -133,3 +133,59 @@ async def test_lifespan_shutdown_bounds_and_cancels_stuck_preparation(
 
     assert "did not finish within" in caplog.text
     assert client.closed is True
+
+
+async def test_index_failure_is_recorded_on_app_state_instead_of_forgotten(settings, monkeypatch):
+    """Finding 11: the failure stays visible (via ``/metrics``) but never blocks serving."""
+    client = _FakeClient()
+
+    async def fake_ping(_client):
+        return None
+
+    async def failing_ensure_indexes(db):
+        raise RuntimeError("create_index timed out")
+
+    async def fake_seed_cities(db):
+        return True
+
+    monkeypatch.setattr(main_module, "create_client", lambda _settings: client)
+    monkeypatch.setattr(main_module, "ping", fake_ping)
+    monkeypatch.setattr(main_module, "ensure_indexes", failing_ensure_indexes)
+    monkeypatch.setattr(main_module, "seed_default_cities", fake_seed_cities)
+
+    app = main_module.create_app(settings)
+    # Unknown until the background task has run.
+    assert app.state.index_status is None
+
+    async with app.router.lifespan_context(app):
+        await app.state.prepare_database_task
+
+        assert app.state.index_status == {
+            "ok": False,
+            "error": "RuntimeError: create_index timed out",
+        }
+
+
+async def test_successful_index_creation_is_recorded_as_ok(settings, monkeypatch):
+    client = _FakeClient()
+
+    async def fake_ping(_client):
+        return None
+
+    async def fake_ensure_indexes(db):
+        return None
+
+    async def fake_seed_cities(db):
+        return True
+
+    monkeypatch.setattr(main_module, "create_client", lambda _settings: client)
+    monkeypatch.setattr(main_module, "ping", fake_ping)
+    monkeypatch.setattr(main_module, "ensure_indexes", fake_ensure_indexes)
+    monkeypatch.setattr(main_module, "seed_default_cities", fake_seed_cities)
+
+    app = main_module.create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        await app.state.prepare_database_task
+
+        assert app.state.index_status == {"ok": True, "error": None}

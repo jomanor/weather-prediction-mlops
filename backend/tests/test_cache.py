@@ -175,3 +175,83 @@ def test_get_marks_an_entry_as_most_recently_used():
     assert cache.get("a") == (MADRID, "etag-a")
     assert cache.get("c") == (MADRID, "etag-c")
     assert cache.get("b") is None  # least recently used, evicted
+
+
+# ---------------------------------------------------------------------------
+# Invalidation: ``delete`` must also stop a racing cold load from re-caching
+# ---------------------------------------------------------------------------
+
+
+def test_delete_drops_the_entry_and_a_later_get_misses():
+    cache = TTLCache()
+    cache.set("cities:list", [MADRID], "etag-1", 60)
+    assert cache.get("cities:list") is not None
+
+    cache.delete("cities:list")
+
+    assert cache.get("cities:list") is None
+    assert len(cache) == 0
+    cache.delete("never-cached")  # deleting an absent key is a no-op, not an error
+
+
+async def test_delete_while_a_cold_load_is_in_flight_does_not_re_cache_it():
+    """A load that started before the write must not hide the write for a whole TTL."""
+    cache = TTLCache()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    loads: list[str] = []
+
+    async def stale_loader() -> list[City]:
+        loads.append("stale")
+        started.set()
+        await release.wait()
+        return [MADRID]
+
+    async def fresh_loader() -> list[City]:
+        loads.append("fresh")
+        return [MADRID, ALICANTE]
+
+    in_flight = asyncio.create_task(
+        cached(_request(), Response(), cache, "cities:list", 60, stale_loader)
+    )
+    await started.wait()
+
+    # The registry write lands while the pre-write load is still running.
+    cache.delete("cities:list")
+    release.set()
+    assert await in_flight == [MADRID]  # the caller already in flight still gets its value
+
+    # The discarded result was not stored: the next request reloads the new state.
+    assert await cached(_request(), Response(), cache, "cities:list", 60, fresh_loader) == [
+        MADRID,
+        ALICANTE,
+    ]
+    assert loads == ["stale", "fresh"]
+    assert cache.get("cities:list") is not None
+
+
+async def test_delete_unregisters_the_in_flight_load_so_the_next_call_reloads():
+    cache = TTLCache()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    loads: list[str] = []
+
+    async def slow() -> City:
+        loads.append("slow")
+        started.set()
+        await release.wait()
+        return MADRID
+
+    async def quick() -> City:
+        loads.append("quick")
+        return ALICANTE
+
+    first = asyncio.create_task(cached(_request(), Response(), cache, "k", 60, slow))
+    await started.wait()
+    cache.delete("k")
+
+    # Not coalesced onto the pre-delete load: a new loader starts immediately.
+    assert await cached(_request(), Response(), cache, "k", 60, quick) is ALICANTE
+    release.set()
+    assert await first is MADRID
+    assert loads == ["slow", "quick"]

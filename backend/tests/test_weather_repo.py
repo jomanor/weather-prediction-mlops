@@ -3,14 +3,13 @@
 from datetime import datetime, timedelta, timezone
 
 from app.core.cities import DEFAULT_CITIES
+from app.core.thresholds import QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS
 from app.repositories.weather_repo import (
     _CURRENT_FIELD_PATHS,
     _CURRENT_IDENTITY,
     _RAW_FIELD_PATHS,
     _RAW_IDENTITY,
     MS_TO_KMH,
-    QUALITY_OK_AGE_HOURS,
-    QUALITY_WARN_AGE_HOURS,
     WeatherRepository,
     _downsample_by_step,
     _from_raw_weather,
@@ -134,18 +133,20 @@ def test_projection_limits_to_requested_fields_plus_collection_identity():
 
 
 async def test_find_many_in_range_projects_and_sorts_descending_timestamp():
-    current = FakeMongoCollection(
+    raw = FakeMongoCollection(
         [
             {
                 "city": "Madrid",
                 "timestamp": OBSERVED_AT,
-                "latitude": 40.4168,
-                "longitude": -3.7038,
-                "data": {"main": {"temp": 21.0}},
+                "payload": {
+                    "latitude": 40.4168,
+                    "longitude": -3.7038,
+                    "current": {"temperature_2m": 21.0},
+                },
             }
         ]
     )
-    raw = FakeMongoCollection([])
+    current = FakeMongoCollection([])
     repo = WeatherRepository(FakeMongoDb(current, raw))
 
     points = await repo.find_many_in_range(
@@ -157,7 +158,7 @@ async def test_find_many_in_range_projects_and_sorts_descending_timestamp():
 
     assert [point.temperature for point in points] == [21.0]
     assert points[0].latitude == 40.4168 and points[0].longitude == -3.7038
-    query, projection = current.find_calls[0]
+    query, projection = raw.find_calls[0]
     assert query == {
         "city": {"$in": ["Madrid"]},
         "timestamp": {
@@ -168,21 +169,17 @@ async def test_find_many_in_range_projects_and_sorts_descending_timestamp():
     assert projection == {
         "city": 1,
         "timestamp": 1,
-        "latitude": 1,
-        "longitude": 1,
-        "temperature": 1,
-        "data.main.temp": 1,
+        "payload.latitude": 1,
+        "payload.longitude": 1,
+        "payload.current.temperature_2m": 1,
     }
     # Must match ``{city: 1, timestamp: -1}``: this is what keeps the query
     # index-fed instead of forcing a blocking in-memory SORT.
-    assert current.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
-    assert raw.find_calls == []  # no fallback when weather_data has the city
+    assert raw.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
+    assert current.find_calls == []  # no fallback when raw_weather has the city
 
 
-async def test_find_many_in_range_falls_back_to_raw_per_missing_city():
-    current = FakeMongoCollection(
-        [{"city": "Madrid", "timestamp": OBSERVED_AT, "data": {"main": {"temp": 21.0}}}]
-    )
+async def test_find_many_in_range_falls_back_to_legacy_per_missing_city():
     raw = FakeMongoCollection(
         [
             {
@@ -195,6 +192,9 @@ async def test_find_many_in_range_falls_back_to_raw_per_missing_city():
                 },
             }
         ]
+    )
+    current = FakeMongoCollection(
+        [{"city": "Madrid", "timestamp": OBSERVED_AT, "data": {"main": {"temp": 21.0}}}]
     )
     repo = WeatherRepository(FakeMongoDb(current, raw))
 
@@ -209,8 +209,12 @@ async def test_find_many_in_range_falls_back_to_raw_per_missing_city():
         ("Madrid", 21.0),
     ]
     raw_query, _ = raw.find_calls[0]
-    assert raw_query["city"] == {"$in": ["Alicante"]}
-    assert raw.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
+    assert raw_query["city"] == {"$in": ["Madrid", "Alicante"]}
+    # Only the city raw_weather could not serve is re-queried in the legacy
+    # collection, and that follow-up keeps its city-prefixed sort too.
+    current_query, _ = current.find_calls[0]
+    assert current_query["city"] == {"$in": ["Madrid"]}
+    assert current.cursors[0].sort_spec == [("city", 1), ("timestamp", -1)]
 
 
 async def test_find_many_in_range_applies_in_and_range_filters():
@@ -245,7 +249,7 @@ async def test_find_many_in_range_applies_in_and_range_filters():
     ]
 
 
-async def test_raw_fallback_keeps_coordinates_under_projection():
+async def test_raw_only_data_keeps_its_coordinates_under_projection():
     raw = FakeMongoCollection(
         [
             {
@@ -451,10 +455,15 @@ def test_quality_status_worst_metric_wins():
 
 
 def test_quality_age_thresholds_match_the_rebuild_cycle():
-    # Batch 4, Contract 5: ~2x / ~3x the ~6 h feature-rebuild cycle. The
-    # completeness gates are unchanged (the 0.98 completeness comes from the
-    # one-shot backfill, so they must keep flagging a broken cadence).
+    # Batch 4, Contract 5: ~2x / ~3x the ~6 h feature-rebuild cycle. The values
+    # are the shared ``app.core.thresholds`` ones (audit finding 5): the meter
+    # must not carry a second copy that can drift from the watchdog's.
+    from app.core import thresholds
+    from app.repositories import weather_repo
+
     assert (QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS) == (12.0, 18.0)
+    assert weather_repo.QUALITY_OK_AGE_HOURS is thresholds.QUALITY_OK_AGE_HOURS
+    assert weather_repo.QUALITY_WARN_AGE_HOURS is thresholds.QUALITY_WARN_AGE_HOURS
 
 
 def test_quality_status_grades_at_exact_thresholds():
@@ -463,3 +472,162 @@ def test_quality_status_grades_at_exact_thresholds():
     assert _quality_status(0.7999, 12.0) == "bad"
     assert _quality_status(0.95, 12.0001) == "warn"
     assert _quality_status(0.95, None) == "bad"  # missing last observation
+
+
+# ---------------------------------------------------------------------------
+# Read order (audit finding 3): ``raw_weather`` first, ``weather_data`` only as
+# the fallback. Reading the legacy collection first meant ONE leftover document
+# inside its 30-day TTL could replace fourteen live stations and shrink a
+# history to a single point.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingCollection(FakeMongoCollection):
+    """A collection double that appends every read to a shared call log."""
+
+    def __init__(self, label: str, log: list[str], documents: list[dict] | None = None) -> None:
+        super().__init__(documents)
+        self._label = label
+        self._log = log
+
+    def find(self, query, projection=None):
+        self._log.append(f"{self._label}.find")
+        return super().find(query, projection)
+
+    def aggregate(self, pipeline, allowDiskUse=False, **kwargs):
+        self._log.append(f"{self._label}.aggregate")
+        return super().aggregate(pipeline, allowDiskUse=allowDiskUse, **kwargs)
+
+    async def find_one(self, query, sort=None):
+        self._log.append(f"{self._label}.find_one")
+        return await super().find_one(query, sort=sort)
+
+
+def _raw_doc(city: str, hour: float, temperature: float) -> dict:
+    return {
+        "city": city,
+        "timestamp": OBSERVED_AT - timedelta(hours=hour),
+        "payload": {
+            "latitude": 40.0,
+            "longitude": -3.0,
+            "current": {"temperature_2m": temperature},
+        },
+    }
+
+
+def _legacy_doc(city: str, hour: float, temperature: float) -> dict:
+    return {
+        "city": city,
+        "timestamp": OBSERVED_AT - timedelta(hours=hour),
+        "data": {"main": {"temp": temperature}},
+    }
+
+
+def _repo(log: list[str], raw_docs: list[dict], legacy_docs: list[dict]) -> WeatherRepository:
+    """A repository over a ``raw_weather`` double and a ``weather_data`` double."""
+    return WeatherRepository(
+        FakeMongoDb(
+            _RecordingCollection("legacy", log, legacy_docs),
+            _RecordingCollection("raw", log, raw_docs),
+        )
+    )
+
+
+async def test_latest_for_city_reads_raw_first_and_never_touches_legacy():
+    log: list[str] = []
+    repo = _repo(log, [_raw_doc("Madrid", 0, 22.0)], [_legacy_doc("Madrid", 5, 10.0)])
+
+    point = await repo.latest_for_city("Madrid")
+
+    assert point is not None and point.temperature == 22.0  # raw wins, not the stale doc
+    assert log == ["raw.find_one"]  # one round-trip: the fallback never ran
+
+
+async def test_latest_for_city_falls_back_to_legacy_when_raw_is_empty():
+    log: list[str] = []
+    repo = _repo(log, [], [_legacy_doc("Madrid", 5, 10.0)])
+
+    point = await repo.latest_for_city("Madrid")
+
+    # The fallback exists precisely so legacy-only data is still served.
+    assert point is not None and point.temperature == 10.0
+    assert log == ["raw.find_one", "legacy.find_one"]
+
+
+async def test_latest_per_city_aggregates_raw_first_with_disk_use_and_city_sort():
+    log: list[str] = []
+    raw = _RecordingCollection(
+        "raw", log, [_raw_doc("Madrid", 0, 22.0), _raw_doc("Alicante", 0, 30.0)]
+    )
+    current = _RecordingCollection("legacy", log, [_legacy_doc("Pasadena", 0, 5.0)])
+    repo = WeatherRepository(FakeMongoDb(current, raw))
+
+    stations = await repo.latest_per_city()
+
+    # One stale legacy document must not replace the live stations.
+    assert [(station.city, station.temperature) for station in stations] == [
+        ("Alicante", 30.0),
+        ("Madrid", 22.0),
+    ]
+    assert log == ["raw.aggregate"]
+    aggregate = raw.aggregate_calls[0]
+    assert aggregate["allowDiskUse"] is True
+    assert aggregate["pipeline"][0] == {"$sort": {"city": 1, "timestamp": -1}}
+
+
+async def test_latest_per_city_falls_back_to_legacy_only_when_raw_has_no_rows():
+    log: list[str] = []
+    raw = _RecordingCollection("raw", log, [])
+    current = _RecordingCollection("legacy", log, [_legacy_doc("Pasadena", 0, 5.0)])
+    repo = WeatherRepository(FakeMongoDb(current, raw))
+
+    stations = await repo.latest_per_city()
+
+    assert [(station.city, station.temperature) for station in stations] == [("Pasadena", 5.0)]
+    assert log == ["raw.aggregate", "legacy.aggregate"]
+    assert current.aggregate_calls[0]["allowDiskUse"] is True
+
+
+async def test_find_range_reads_raw_first_and_keeps_every_point():
+    log: list[str] = []
+    repo = _repo(
+        log,
+        [_raw_doc("Madrid", hour, 20.0 + hour) for hour in range(3)],
+        [_legacy_doc("Madrid", 1, 99.0)],
+    )
+
+    points = await repo.find_range(
+        "Madrid", OBSERVED_AT - timedelta(hours=2), OBSERVED_AT, newest_first=False
+    )
+
+    # Three raw points, not the single legacy one.
+    assert [point.temperature for point in points] == [22.0, 21.0, 20.0]
+    assert log == ["raw.find"]
+
+
+async def test_find_range_falls_back_to_legacy_when_raw_window_is_empty():
+    log: list[str] = []
+    repo = _repo(log, [_raw_doc("Madrid", 100, 1.0)], [_legacy_doc("Madrid", 1, 10.0)])
+
+    points = await repo.find_range(
+        "Madrid", OBSERVED_AT - timedelta(hours=2), OBSERVED_AT, newest_first=False
+    )
+
+    assert [point.temperature for point in points] == [10.0]
+    assert log == ["raw.find", "legacy.find"]
+
+
+async def test_find_many_in_range_reads_raw_before_legacy():
+    log: list[str] = []
+    repo = _repo(log, [_raw_doc("Madrid", 0, 22.0)], [_legacy_doc("Alicante", 0, 30.0)])
+
+    points = await repo.find_many_in_range(
+        ["Madrid", "Alicante"], OBSERVED_AT - timedelta(hours=1), OBSERVED_AT
+    )
+
+    assert [(point.city, point.temperature) for point in points] == [
+        ("Alicante", 30.0),
+        ("Madrid", 22.0),
+    ]
+    # raw first, legacy only for the city raw could not serve.
+    assert log == ["raw.find", "legacy.find"]

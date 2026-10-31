@@ -821,7 +821,18 @@ class TestChunkDaysValidation:
 
 
 class TestDryRunOffline:
-    def test_unreachable_mongo_falls_back_to_the_bundled_cities(self, monkeypatch, capsys):
+    def test_fallback_cities_are_the_shared_seed_tuple(self):
+        """The offline fallback is the API's seed list, not a second registry.
+
+        It used to be a private 14-station dict with no Pasadena, so an offline
+        dry run planned one station fewer than the app ingests.
+        """
+        assert len(bh.FALLBACK_CITIES) == 15
+        assert bh.FALLBACK_CITIES["Pasadena"] == (34.1478, -118.1445)
+        assert bh.FALLBACK_CITIES["Malaga"] == (36.7213, -4.4214)  # unaccented on purpose
+        assert set(bh.FALLBACK_CITIES) == {name for name, _, _ in bh.DEFAULT_CITIES}
+
+    def test_unreachable_mongo_falls_back_to_the_seed_stations(self, monkeypatch, capsys):
         collection = FakeCollection()
 
         def _no_client(*args, **kwargs):
@@ -847,7 +858,7 @@ class TestDryRunOffline:
         out = capsys.readouterr().out
         assert "[WARN] MongoDB unreachable" in out
         assert "ServerSelectionTimeoutError" in out
-        assert f"Cities         : {len(bh.CITIES)}" in out
+        assert f"Cities         : {len(bh.FALLBACK_CITIES)}" in out
         assert "[DRY RUN]" in out
 
     def test_unreachable_mongo_still_honours_the_city_filter(self, monkeypatch, capsys):
@@ -874,7 +885,7 @@ class TestDryRunOffline:
         assert raised.value.code == 0
         out = capsys.readouterr().out
         assert "[WARN] MongoDB unreachable" in out
-        assert f"Cities         : 1 of {len(bh.CITIES)}" in out
+        assert f"Cities         : 1 of {len(bh.FALLBACK_CITIES)}" in out
 
 
 # ---------------------------------------------------------------------------

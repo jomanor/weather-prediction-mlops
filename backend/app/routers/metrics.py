@@ -8,6 +8,10 @@ The counters live in the process and reset on every restart. On the free Render
 tier the instance also sleeps when idle, so waking up starts them from zero
 again: these numbers describe the current instance's life, **not a 28-day
 window**, and must not be reported as one.
+
+One key is not a counter: ``database.indexes`` carries the outcome of the
+startup ``ensure_indexes`` call (see ``main._prepare_database``), so a process
+serving every read as a collection scan is visible instead of merely slow.
 """
 
 from fastapi import APIRouter, Request
@@ -39,9 +43,21 @@ async def metrics(request: Request) -> JSONResponse:
     ``/metrics`` is counted like every other route; the request reading this
     payload is counted once its own response is complete, so it shows up from
     the next call on. The response is ``Cache-Control: no-store``.
+
+    ``database.indexes`` is the one non-counter key: ``app.state.index_status``
+    (see ``main._prepare_database``) as ``{"ok": bool|null, "error": str|null}``,
+    ``null`` while the background index task has not run. It is reported here and
+    not in ``/health/ready`` on purpose: a missing index slows reads down, it does
+    not make the instance unable to serve, and readiness failure would have Render
+    restart a working process.
     """
     recorder: RequestMetrics = request.app.state.metrics
-    return JSONResponse(
-        content=recorder.snapshot(),
-        headers={"Cache-Control": "no-store"},
-    )
+    payload = recorder.snapshot()
+    status = request.app.state.index_status
+    payload["database"] = {
+        "indexes": {
+            "ok": status["ok"] if status is not None else None,
+            "error": status["error"] if status is not None else None,
+        }
+    }
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})

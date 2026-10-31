@@ -36,6 +36,7 @@ from app.schemas.analytics import (
     WindRoseResponse,
     WindSector,
 )
+from tests.fakes import FakeMongoCollection, FakeMongoDb
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -507,6 +508,7 @@ class _Db:
         self._collections = {
             "weather_features": _Collection(features),
             "weather_predictions": _Collection(predictions),
+            "cities": _Collection([]),  # unseeded: the repositories use the seed list
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -664,3 +666,78 @@ async def test_repository_error_by_hour_buckets_minute_aligned_observations():
     assert point.mae == pytest.approx(1.0)  # |22 - 23|
     assert point.bias == pytest.approx(-1.0)
     assert point.persistence_mae == pytest.approx(3.0)  # |23 - 20|
+
+
+# ---------------------------------------------------------------------------
+# The aggregate city set is the Mongo registry, not a code constant (finding 4)
+# ---------------------------------------------------------------------------
+
+
+def _registry(*names: str) -> FakeMongoCollection:
+    """A ``cities`` collection holding just these stations."""
+    return FakeMongoCollection([{"name": name, "name_key": name.casefold()} for name in names])
+
+
+def _hourly(city: str, hour: int, temperature: float) -> dict:
+    return {
+        "city": city,
+        "timestamp": datetime(2026, 9, 25, hour, 0, tzinfo=timezone.utc),
+        "hour": hour,
+        "temperature": temperature,
+    }
+
+
+async def test_diurnal_covers_the_registry_not_the_seed_list():
+    features = FakeMongoCollection(
+        [
+            _hourly("Madrid", 12, 25.0),
+            _hourly("Barcelona", 12, 22.0),
+            _hourly("Alicante", 12, 30.0),  # rows, but not a registered station
+        ]
+    )
+    registry = _registry("Madrid", "Barcelona")
+    db = FakeMongoDb(weather_features=features, cities=registry)
+
+    result = await AnalyticsRepository(db).diurnal(1, NOW)
+
+    assert sorted({cell.city for cell in result.cells}) == ["Barcelona", "Madrid"]
+    assert len(result.cells) == 2 * 24
+    # The registry is read once per aggregate, then queried once per station.
+    assert registry.find_calls == [({}, {"name": 1})]
+    assert [call[0]["city"] for call in features.find_calls] == ["Barcelona", "Madrid"]
+
+
+async def test_correlation_matrix_is_the_registry_city_set():
+    features = FakeMongoCollection(
+        [
+            _hourly("Madrid", 12, 25.0),
+            _hourly("Madrid", 13, 26.0),
+            _hourly("Barcelona", 12, 22.0),
+            _hourly("Barcelona", 13, 23.0),
+            _hourly("Alicante", 12, 30.0),
+        ]
+    )
+    registry = _registry("Madrid", "Barcelona")
+    db = FakeMongoDb(weather_features=features, cities=registry)
+
+    result = await AnalyticsRepository(db).correlation(1, "temperature", NOW)
+
+    assert result.cities == ["Barcelona", "Madrid"]
+    assert [len(row) for row in result.matrix] == [2, 2]
+    assert len(registry.find_calls) == 1
+    assert len(features.find_calls) == 2
+
+
+async def test_station_deleted_from_the_registry_stops_being_reported():
+    features = FakeMongoCollection([_hourly("Madrid", 12, 25.0), _hourly("Barcelona", 12, 22.0)])
+    registry = _registry("Madrid", "Barcelona")
+    db = FakeMongoDb(weather_features=features, cities=registry)
+
+    before = await AnalyticsRepository(db).diurnal(1, NOW)
+    assert {cell.city for cell in before.cells} == {"Barcelona", "Madrid"}
+
+    # ``DELETE /cities/Barcelona``: the station's rows stay, the station goes.
+    registry.documents = [{"name": "Madrid", "name_key": "madrid"}]
+
+    after = await AnalyticsRepository(db).diurnal(1, NOW)
+    assert {cell.city for cell in after.cells} == {"Madrid"}

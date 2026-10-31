@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from app.core.cities import DEFAULT_CITIES
 from app.core.config import Settings
 from app.main import create_app
-from app.repositories.city_repo import get_city_repo, seed_default_cities
+from app.repositories.city_repo import get_city_repo, registry_names, seed_default_cities
 from tests.conftest import CITY_WRITES_TOKEN
 
 #: Credentials the ``settings`` fixture accepts for a registry write.
@@ -174,6 +174,84 @@ async def test_correct_token_allows_both_writes(prefix, client, city_repo):
 
 
 # ---------------------------------------------------------------------------
+# ``cities:list`` invalidation: a write must be visible on the next read, and a
+# rejected write must not throw the cached list away for nothing.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_successful_create_invalidates_the_cached_list(client, city_repo):
+    assert [city["name"] for city in (await client.get("/api/cities")).json()] == [
+        "Alicante",
+        "Madrid",
+    ]
+    assert city_repo.calls.count("list") == 1
+
+    created = await client.post(
+        "/api/cities",
+        headers=WRITE_AUTH,
+        json={"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+    )
+    assert created.status_code == 201
+
+    # Not the 60 s old payload: the key was dropped by the write.
+    assert [city["name"] for city in (await client.get("/api/cities")).json()] == [
+        "Alicante",
+        "Madrid",
+        "Sevilla",
+    ]
+    assert city_repo.calls.count("list") == 2
+
+
+async def test_a_successful_delete_invalidates_the_cached_list(client, city_repo):
+    await client.get("/api/cities")
+
+    assert (await client.delete("/api/cities/Madrid", headers=WRITE_AUTH)).status_code == 204
+
+    assert [city["name"] for city in (await client.get("/api/cities")).json()] == ["Alicante"]
+    assert city_repo.calls.count("list") == 2
+
+
+@pytest.mark.parametrize("status", [401, 409, 404])
+async def test_a_rejected_write_keeps_the_cached_list(client, city_repo, status):
+    first = await client.get("/api/cities")
+
+    if status == 401:  # the gate runs before the handler
+        rejected = await client.post(
+            "/api/cities",
+            headers={"Authorization": "Bearer wrong-token"},
+            json={"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+        )
+    elif status == 409:  # validation fails before the write
+        rejected = await client.post(
+            "/api/cities",
+            headers=WRITE_AUTH,
+            json={"name": "Madrid", "latitude": 40.4168, "longitude": -3.7038},
+        )
+    else:  # nothing to delete
+        rejected = await client.delete("/api/cities/Atlantis", headers=WRITE_AUTH)
+    assert rejected.status_code == status
+
+    # Still served from the cache: a rejected write invalidated nothing.
+    second = await client.get("/api/cities")
+    assert second.json() == first.json()
+    assert city_repo.calls.count("list") == 1
+
+
+async def test_a_503_disabled_write_keeps_the_cached_list(city_repo):
+    async with _unconfigured_client(city_repo) as unconfigured:
+        first = await unconfigured.get("/api/cities")
+        rejected = await unconfigured.post(
+            "/api/cities",
+            json={"name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+        )
+        second = await unconfigured.get("/api/cities")
+
+    assert rejected.status_code == 503
+    assert second.json() == first.json()
+    assert city_repo.calls.count("list") == 1
+
+
+# ---------------------------------------------------------------------------
 # Seeding
 # ---------------------------------------------------------------------------
 
@@ -242,3 +320,81 @@ async def test_seed_swallows_mongo_failure():
     seeded = await seed_default_cities(_FakeDb(collection))
 
     assert seeded is False
+
+
+# ---------------------------------------------------------------------------
+# The registry as the runtime station list (finding 4)
+# ---------------------------------------------------------------------------
+
+
+class _RegistryCollection:
+    """``find({}, {"name": 1})`` double; records the requested projection."""
+
+    def __init__(self, docs=None, error: Exception | None = None):
+        self.docs = list(docs or [])
+        self.error = error
+        self.find_calls: list[tuple[dict, dict | None]] = []
+
+    def find(self, query, projection=None):
+        self.find_calls.append((query, projection))
+        if self.error is not None:
+            raise self.error
+        return _RegistryCursor([doc for doc in self.docs if doc.get("name")])
+
+
+class _RegistryCursor:
+    def __init__(self, docs):
+        self._docs = docs
+
+    def __aiter__(self):
+        self._iterator = iter(self._docs)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+async def test_registry_names_returns_sorted_unique_names():
+    collection = _RegistryCollection(
+        [
+            {"_id": 1, "name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+            {"_id": 2, "name": "Alicante", "latitude": 38.3452, "longitude": -0.481},
+            {"_id": 3, "name": "Sevilla", "latitude": 37.3891, "longitude": -5.9845},
+        ]
+    )
+
+    names = await registry_names(_FakeDb(collection))
+
+    assert names == ["Alicante", "Sevilla"]
+    # Only ``name`` is fetched: the station set must not drag the coordinates.
+    assert collection.find_calls == [({}, {"name": 1})]
+
+
+async def test_registry_names_falls_back_to_the_seed_list_when_empty():
+    names = await registry_names(_FakeDb(_RegistryCollection()))
+
+    assert len(names) == 15
+    assert names == sorted(name for name, _, _ in DEFAULT_CITIES)
+    assert "Pasadena" in names
+
+
+async def test_registry_names_falls_back_without_raising_when_unreadable():
+    collection = _RegistryCollection(error=RuntimeError("no mongod"))
+
+    names = await registry_names(_FakeDb(collection))
+
+    assert names == sorted(name for name, _, _ in DEFAULT_CITIES)
+
+
+async def test_registry_names_follows_additions_and_deletions():
+    collection = _RegistryCollection([{"name": "Madrid"}, {"name": "Pasadena"}])
+    db = _FakeDb(collection)
+
+    assert await registry_names(db) == ["Madrid", "Pasadena"]
+
+    collection.docs = [{"name": "Madrid"}]
+
+    assert await registry_names(db) == ["Madrid"]

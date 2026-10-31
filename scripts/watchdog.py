@@ -39,7 +39,9 @@ So a green run with an open issue is the pipeline alert; a red run is the
 alarm about the alarm.
 
 Stdlib only (``urllib.request``/``json``/``argparse``/``dataclasses``): this job
-must be able to run before, and independently of, any dependency install.
+must be able to run before, and independently of, any dependency install. The one
+repo import is ``app.core.thresholds`` -- plain constants, no imports of its own --
+so sharing the numbers costs nothing at runtime (see the threshold block below).
 """
 
 from __future__ import annotations
@@ -57,21 +59,36 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 
 # ---------------------------------------------------------------------------
-# Thresholds -- ONE block, mirrored from backend/app/repositories/weather_repo.py
-# (QUALITY_OK_AGE_HOURS = 12.0 / QUALITY_WARN_AGE_HOURS = 18.0) and from the
-# ml-pipeline's 90 % prediction-coverage warning. The age gates are calibrated to
-# the ~6 h feature-rebuild cycle (~2x ok, ~3x warn = one missed rebuild). Retune
-# them in the backend first and copy the numbers here; never retune this file
-# alone, or the switch and the quality meter will disagree.
+# Thresholds -- imported from their ONE authority, ``backend/app/core/
+# thresholds.py`` (plain constants, stdlib-importable), shared with the API,
+# ``inference.py`` and ``pipeline_summary.py``. Nothing is mirrored here any
+# more: to retune a gate, change that module and every reader follows (2026-10-31
+# audit, finding 5: four copies, three different numbers). The age gates are
+# calibrated to the ~6 h feature-rebuild cycle (~2x ok, ~3x warn = one missed
+# rebuild) and that calibration belongs to the shared module too.
+# ``scripts/`` runs from the repo root, so derive ``<repo_root>/backend`` from
+# this file rather than from the cwd, and keep this import stdlib-only.
 # ---------------------------------------------------------------------------
-QUALITY_OK_AGE_HOURS = 12.0
-QUALITY_WARN_AGE_HOURS = 18.0
-QUALITY_BAD_COMPLETENESS_BELOW = 0.80
-PREDICTION_OK_AGE_HOURS = 12.0
-PREDICTION_BAD_AGE_HOURS = 18.0
-PREDICTION_BAD_COVERAGE_BELOW = 0.90
-#: Advisory only (never a trigger): production models scoring at/below this.
-SKILL_SCORE_ADVISORY_AT_OR_BELOW = 0.0
+# ``SKILL_SCORE_ADVISORY_AT_OR_BELOW`` is advisory only (never a trigger):
+# production models scoring at/below it are printed, not paged.
+_BACKEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from app.core.thresholds import (  # noqa: E402 - path is set just above
+    PREDICTION_COVERAGE_WARN_RATIO,
+    PREDICTION_OK_AGE_HOURS,
+    PREDICTION_WARN_AGE_HOURS,
+    QUALITY_BAD_COMPLETENESS_BELOW,
+    QUALITY_OK_AGE_HOURS,
+    QUALITY_WARN_AGE_HOURS,
+    SKILL_SCORE_ADVISORY_AT_OR_BELOW,
+)
+
+#: Local aliases so the rest of this file keeps reading the same names. Both
+#: *are* the shared values -- a retune upstream moves them, a stale copy cannot.
+PREDICTION_BAD_AGE_HOURS = PREDICTION_WARN_AGE_HOURS
+PREDICTION_BAD_COVERAGE_BELOW = PREDICTION_COVERAGE_WARN_RATIO
 
 # ---------------------------------------------------------------------------
 # Fixed identities -- one rolling issue, so the switch cannot fan out.

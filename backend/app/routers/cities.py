@@ -18,6 +18,10 @@ from app.services.geo import GeocodingError, GeocodingService, get_geo_service
 
 router = APIRouter(tags=["cities"])
 
+#: Cached ``GET /cities`` payload. Named once because the writes below must
+#: invalidate exactly this key.
+CITIES_CACHE_KEY = "cities:list"
+
 MAX_NAME_LENGTH = 100
 CITIES_TTL_SECONDS = 60
 GEO_TTL_SECONDS = 300
@@ -66,7 +70,7 @@ async def list_cities(
     repo: CityRepository = Depends(get_city_repo),
     cache: TTLCache = Depends(get_cache),
 ) -> list[City] | Response:
-    return await cached(request, response, cache, "cities:list", CITIES_TTL_SECONDS, repo.list)
+    return await cached(request, response, cache, CITIES_CACHE_KEY, CITIES_TTL_SECONDS, repo.list)
 
 
 @router.post(
@@ -75,7 +79,11 @@ async def list_cities(
     status_code=201,
     dependencies=[Depends(require_city_writes_token)],
 )
-async def create_city(city: City, repo: CityRepository = Depends(get_city_repo)) -> City:
+async def create_city(
+    city: City,
+    repo: CityRepository = Depends(get_city_repo),
+    cache: TTLCache = Depends(get_cache),
+) -> City:
     name = city.name.strip()
     if not name or len(name) > MAX_NAME_LENGTH:
         raise HTTPException(
@@ -89,7 +97,11 @@ async def create_city(city: City, repo: CityRepository = Depends(get_city_repo))
     if await repo.get(name) is not None:
         raise HTTPException(status_code=409, detail=f"City '{name}' already exists")
 
-    return await repo.upsert(City(name=name, latitude=city.latitude, longitude=city.longitude))
+    created = await repo.upsert(City(name=name, latitude=city.latitude, longitude=city.longitude))
+    # Only after the write landed: a 400/401/409/503 must leave the cached list
+    # (and its in-flight load) alone, or it would be dropped for nothing.
+    cache.delete(CITIES_CACHE_KEY)
+    return created
 
 
 @router.delete(
@@ -97,9 +109,15 @@ async def create_city(city: City, repo: CityRepository = Depends(get_city_repo))
     status_code=204,
     dependencies=[Depends(require_city_writes_token)],
 )
-async def delete_city(name: str, repo: CityRepository = Depends(get_city_repo)) -> None:
+async def delete_city(
+    name: str,
+    repo: CityRepository = Depends(get_city_repo),
+    cache: TTLCache = Depends(get_cache),
+) -> None:
     if not await repo.delete(name):
         raise HTTPException(status_code=404, detail=f"City '{name}' not found")
+    # Invalidate after the delete, never before: a 404 leaves the list untouched.
+    cache.delete(CITIES_CACHE_KEY)
 
 
 @router.get("/geo/search", response_model=GeoSearchResponse)

@@ -188,7 +188,12 @@ def test_threshold_constants():
 
 
 def test_coverage_warning_threshold_is_ninety_percent():
+    """Imported from the shared module, not a local copy (audit finding 5)."""
+    from app.core import thresholds
+
+    assert ps.PREDICTION_COVERAGE_WARN_RATIO is thresholds.PREDICTION_COVERAGE_WARN_RATIO
     assert ps.PREDICTION_COVERAGE_WARN_RATIO == 0.9
+    assert ps.SKILL_SCORE_WARN_THRESHOLD is thresholds.SKILL_SCORE_ADVISORY_AT_OR_BELOW
 
 
 def test_coverage_warning_fires_when_one_of_fifteen_cities_is_scored():

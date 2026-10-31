@@ -28,6 +28,9 @@ router = APIRouter(prefix="/weather", tags=["weather"])
 HOURS_QUERY = Query(default=24, ge=1, le=168, description="Hours of data (max 168 = 1 week)")
 
 CURRENT_TTL_SECONDS = 30
+#: ``/series`` runs one bulk read over ``raw_weather`` per request, so it is
+#: cached for the same short window as the other hot reads.
+SERIES_TTL_SECONDS = 30
 QUALITY_TTL_SECONDS = 300
 MAX_BULK_CITIES = 15
 MAX_RANGE_LIMIT = 2000
@@ -196,23 +199,45 @@ async def weather_range(
 
 @router.get("/series", response_model=SeriesResponse)
 async def weather_series(
+    request: Request,
+    response: Response,
     cities: str = CITIES_QUERY,
     hours: int = HOURS_QUERY,
     fields: str | None = FIELDS_QUERY,
     step_hours: int = STEP_HOURS_QUERY,
     repo: WeatherRepository = Depends(get_weather_repo),
-) -> SeriesResponse:
+    cache: TTLCache = Depends(get_cache),
+) -> SeriesResponse | Response:
     """One bulk query for up to 15 cities; one compact series per city."""
     names = _parse_cities(cities)
     selected = _parse_fields(fields)
-    now = datetime.now(timezone.utc)
-    points = await repo.find_many_in_range(
-        names, now - timedelta(hours=hours), now, fields=selected, step_hours=step_hours
-    )
-    return SeriesResponse(
-        hours=hours,
-        count=len(names),
-        cities=[_city_series(name, points) for name in names],
+    key = _series_key(names, hours, selected, step_hours)
+
+    async def load() -> SeriesResponse:
+        now = datetime.now(timezone.utc)
+        points = await repo.find_many_in_range(
+            names, now - timedelta(hours=hours), now, fields=selected, step_hours=step_hours
+        )
+        return SeriesResponse(
+            hours=hours,
+            count=len(names),
+            cities=[_city_series(name, points) for name in names],
+        )
+
+    return await cached(request, response, cache, key, SERIES_TTL_SECONDS, load)
+
+
+def _series_key(names: list[str], hours: int, fields: list[str] | None, step_hours: int) -> str:
+    """Cache key covering every parameter that changes the ``/series`` payload.
+
+    ``names`` keeps the request order (it is the order of ``cities`` in the
+    response) and is already stripped/deduplicated by ``_parse_cities``. The
+    projected ``fields`` are sorted: the projection is a set, so a reordered
+    field list produces the same payload and must hit the same entry.
+    """
+    return (
+        f"weather:series:{','.join(names)}"
+        f":{hours}:{','.join(sorted(fields)) if fields else 'all'}:{step_hours}"
     )
 
 

@@ -29,6 +29,24 @@ from datetime import datetime, timezone
 
 from pymongo import MongoClient
 
+#: The thresholds this summary judges are the shared ones: ``backend/app/core/
+#: thresholds.py`` is plain constants with no imports of its own, so the script
+#: can import the same numbers inference.py, the watchdog and the API apply
+#: instead of mirroring them (2026-10-31 audit, finding 5). ``scripts/`` runs
+#: from the repo root, so derive ``<repo_root>/backend`` from this file.
+#: ``PREDICTION_COVERAGE_WARN_RATIO`` is the fraction of the cities that have
+#: features below which this summary prints a ``::warning`` (never a failure):
+#: by the time it runs the write has already happened, so it is the only signal
+#: that a run scored part of the fleet only (2026-10-30: 1 of 15 cities, silently).
+_BACKEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from app.core.thresholds import (  # noqa: E402 - path is set just above
+    PREDICTION_COVERAGE_WARN_RATIO,
+    SKILL_SCORE_ADVISORY_AT_OR_BELOW,
+)
+
 DB_NAME = "weather_db"
 
 #: M4: a model's test ``metrics.skill_score`` at or below this value is flagged.
@@ -40,18 +58,14 @@ DB_NAME = "weather_db"
 #: for every model and horizon as the split crosses the summer→September
 #: seasonal pressure rise (measured 2026-09-28, spread 0.505–0.518 across 11
 #: models × 5 horizons; temperature ~0.26, all other features <0.19).
-SKILL_SCORE_WARN_THRESHOLD = 0.0
+#: Alias of the shared ``SKILL_SCORE_ADVISORY_AT_OR_BELOW`` (the watchdog's
+#: advisory gate): one number, two readers.
+SKILL_SCORE_WARN_THRESHOLD = SKILL_SCORE_ADVISORY_AT_OR_BELOW
 #: How many top per-feature ``drift_psi`` values to list per model. Informational
 #: only — these never raise the warning.
 TOP_DRIFT_FEATURES = 3
 #: Cap on registry docs scanned when resolving the current model per family.
 DRIFT_MODEL_LIMIT = 200
-#: Prediction coverage below this fraction of the cities that have features is
-#: reported as a ``::warning`` (never a failure). Mirrors
-#: ``inference.COVERAGE_WARN_RATIO``; by the time the summary runs the write has
-#: already happened, so this is the only signal that a run scored only part of
-#: the fleet (2026-10-30: 1 of 15 cities, silently).
-PREDICTION_COVERAGE_WARN_RATIO = 0.9
 
 
 def _as_utc(value):

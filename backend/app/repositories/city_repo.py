@@ -36,6 +36,35 @@ def city_from_doc(doc: dict[str, Any]) -> City | None:
     return City(name=name, latitude=latitude, longitude=longitude)
 
 
+def _seed_names() -> list[str]:
+    """Sorted names from the seed tuple: the registry's fallback set."""
+    return sorted({name for name, _, _ in DEFAULT_CITIES})
+
+
+async def registry_names(db: AsyncIOMotorDatabase) -> list[str]:
+    """Sorted station names from the ``cities`` registry, de-duplicated.
+
+    The registry is the only runtime source of the station set: the monitors
+    (``weather_repo.quality_report``, the analytics aggregates) and the backfill
+    all read their cities from here, so adding or deleting a station changes
+    what they report. ``DEFAULT_CITIES`` describes the empty-registry fallback
+    only; it is returned when the collection is empty or unreadable (a Mongo
+    hiccup must not degrade a monitor to "no stations").
+
+    Projects ``name`` only and never raises.
+    """
+    names: set[str] = set()
+    try:
+        async for doc in db["cities"].find({}, {"name": 1}):
+            name = doc.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+    except Exception:  # noqa: BLE001 - a monitor must survive Mongo being unreachable
+        logger.warning("Could not read the cities registry; using the seed list", exc_info=True)
+        return _seed_names()
+    return sorted(names) or _seed_names()
+
+
 class CityRepository:
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._db = db

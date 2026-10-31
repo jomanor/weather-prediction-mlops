@@ -1,17 +1,20 @@
-"""Default station registry.
+"""Seed data for the station registry.
 
 These are the stations the original Open-Meteo ingest has always covered, plus
-Pasadena. On startup the API seeds the ``cities`` collection with them when it
-is empty. Names are kept byte-for-byte as that writer used them, including the
-unaccented ``"Malaga"``.
+Pasadena. On startup the API inserts them into the ``cities`` collection when it
+is empty — that is all this tuple is for. Once seeded, the Mongo registry is the
+only runtime source of the station set: the ingest, the backfill, the quality
+meter and the analytics aggregates all read their cities from it, so adding or
+deleting a station through ``/cities`` immediately changes what they ingest and
+report. The tuple is also the fallback when the registry is empty or unreadable.
+Names are kept byte-for-byte as that writer used them, including the unaccented
+``"Malaga"``.
 
 Pasadena is the one US station: it is fed by the Open-Meteo ingest (not by
 AEMET, which has no US coverage), so the AEMET benchmark reports no data for it.
-It lives here because several endpoints derive their city set from this tuple
-(``weather_repo.quality_report``, ``analytics_repo.CANONICAL_CITIES``) and would
-otherwise silently omit a station that is present in production. Seeding only
-runs on an empty collection, so this list cannot retro-add rows to an existing
-registry — it only fixes the derived lists.
+It stays in the tuple because the tuple is what seeds a fresh database and what
+the monitors fall back to when the registry is unreadable: dropping it would
+silently narrow the station set in both cases.
 """
 
 from typing import Final

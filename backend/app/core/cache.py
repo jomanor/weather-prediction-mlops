@@ -15,7 +15,10 @@ the process map without limit on a memory-constrained free instance. Both a
 Cold misses are single-flighted per key: concurrent callers of ``cached()`` for
 the same key share one loader task instead of each hitting Mongo. The in-flight
 map lives on the ``TTLCache`` instance (not the module) so separate apps/tests
-cannot leak work into each other.
+cannot leak work into each other. ``delete()`` drops both the cached value and
+the registration of a load racing with it, and a loader only stores its result
+while it is still the registered load for its key — so an invalidation cannot be
+undone by a loader that started before it.
 
 ETags are derived from the serialized payload. A cache hit therefore never
 touches Mongo to recompute its validator.
@@ -95,6 +98,20 @@ class TTLCache:
     def clear(self) -> None:
         self._entries.clear()
 
+    def delete(self, key: str) -> None:
+        """Drop ``key``: the cached entry and the registration of any cold load for it.
+
+        Used by the registry writes to make ``cities:list`` honest immediately
+        instead of up to one TTL later. Unregistering the in-flight load matters
+        as much as dropping the value: a load that started *before* the write
+        would otherwise store the pre-write payload and hide the write for a full
+        TTL (see :func:`_run_loader`, which only stores while it is still the
+        registered load). Callers already awaiting that load still receive its
+        result; it is just not cached.
+        """
+        self._entries.pop(key, None)
+        self._inflight.pop(key, None)
+
 
 def _serialize(payload: Any) -> str:
     """Deterministic JSON for the supported payload shapes (pydantic / list / dict)."""
@@ -152,15 +169,22 @@ async def _run_loader(
     loader: Callable[[], Awaitable[T]],
 ) -> tuple[T, str]:
     """The single runner for a cold miss: run, store in the TTL cache, unregister."""
+    task = asyncio.current_task()
     try:
         value = await loader()
         etag = etag_for(value)
-        cache.set(key, value, etag, ttl_seconds)
+        # Store only while this task is still the registered load for ``key``:
+        # ``TTLCache.delete`` unregisters it, and a load that started before the
+        # write which invalidated the key must not re-cache what it replaced.
+        if cache._inflight.get(key) is task:
+            cache.set(key, value, etag, ttl_seconds)
         return value, etag
     finally:
-        # Always unregister, success or failure: a raising loader must not
-        # poison the key for later callers.
-        cache._inflight.pop(key, None)
+        # Always unregister, success or failure: a raising loader must not poison
+        # the key for later callers. Guarded on identity so this task cannot
+        # unregister a newer load that ``delete`` let start in the meantime.
+        if cache._inflight.get(key) is task:
+            cache._inflight.pop(key, None)
 
 
 async def _load_once(

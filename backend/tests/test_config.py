@@ -1,8 +1,5 @@
 """Settings and CORS behaviour."""
 
-import pytest
-from pydantic import ValidationError
-
 from app.core.config import Settings
 
 
@@ -23,7 +20,9 @@ def test_defaults(monkeypatch):
     assert settings.aemet_api_key is None
     assert settings.aemet_cache_ttl_seconds == 3600
     assert settings.ensure_indexes_on_start is True
-    assert settings.prediction_stale_after_hours == 24.0
+    # Freshness is not a setting: it lives in ``app.core.thresholds`` so the API,
+    # the watchdog and inference read the same number (audit finding 5).
+    assert not hasattr(settings, "prediction_stale_after_hours")
     # Shipped default: the registry writes are disabled (503), never open.
     assert settings.city_writes_token is None
 
@@ -42,10 +41,11 @@ def test_city_writes_token_is_read_from_env(monkeypatch):
     assert Settings(_env_file=None).city_writes_token == "s3cret"
 
 
-def test_prediction_stale_after_hours_must_be_non_negative(monkeypatch):
-    monkeypatch.setenv("PREDICTION_STALE_AFTER_HOURS", "-1")
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None)
+def test_prediction_stale_after_hours_is_not_configurable(monkeypatch):
+    """The old 24 h setting is gone: env cannot desynchronise the badge from ops."""
+    monkeypatch.setenv("PREDICTION_STALE_AFTER_HOURS", "24")
+    settings = Settings(_env_file=None)
+    assert not hasattr(settings, "prediction_stale_after_hours")
 
 
 def test_cors_origins_comma_separated(monkeypatch):

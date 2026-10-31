@@ -25,9 +25,9 @@ from typing import Any, Iterable
 from fastapi import Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.cities import DEFAULT_CITIES
 from app.core.coerce import as_utc, to_float, to_int
 from app.db.mongo import get_db
+from app.repositories.city_repo import registry_names
 from app.schemas.analytics import (
     ClimatologyPoint,
     ClimatologyResponse,
@@ -56,10 +56,6 @@ MIN_CORRELATION_DAYS = 3
 #: 16 compass sectors, clockwise from North.
 WIND_SECTORS = 16
 WIND_SECTOR_DEGREES = 360.0 / WIND_SECTORS  # 22.5°
-
-#: The fixed 14-station registry (sorted); diurnal/correlation report all of them
-#: even when a city has no rows, so an outage is visible instead of silent.
-CANONICAL_CITIES: tuple[str, ...] = tuple(sorted(name for name, _, _ in DEFAULT_CITIES))
 
 
 def _mean(values: Iterable[float]) -> float | None:
@@ -286,17 +282,18 @@ class AnalyticsRepository:
         return WindRoseResponse(city=city, days=days, generated_at=now, sectors=sectors)
 
     async def diurnal(self, days: int, now: datetime) -> DiurnalResponse:
-        """All canonical cities x local hour 0..23, mean temperature per cell."""
+        """Every registry station x local hour 0..23, mean temperature per cell."""
+        cities = await registry_names(self._db)
         start = now - timedelta(days=days)
         per_city = await asyncio.gather(
             *(
                 self._read_features(city, ["temperature", "hour"], start=start, end=now)
-                for city in CANONICAL_CITIES
+                for city in cities
             )
         )
 
         cells: list[DiurnalCell] = []
-        for city, rows in zip(CANONICAL_CITIES, per_city):
+        for city, rows in zip(cities, per_city):
             by_hour: dict[int, list[float]] = {}
             for doc in rows:
                 hour = to_int(doc.get("hour"))
@@ -318,9 +315,10 @@ class AnalyticsRepository:
 
     async def correlation(self, days: int, var: str, now: datetime) -> CorrelationResponse:
         """Pairwise Pearson of daily city means, aligned by date, over the window."""
+        cities = await registry_names(self._db)
         start = now - timedelta(days=days)
         per_city = await asyncio.gather(
-            *(self._read_features(city, [var], start=start, end=now) for city in CANONICAL_CITIES)
+            *(self._read_features(city, [var], start=start, end=now) for city in cities)
         )
 
         daily: list[dict[str, float]] = []
@@ -334,7 +332,6 @@ class AnalyticsRepository:
                 by_date.setdefault(timestamp.date().isoformat(), []).append(value)
             daily.append({day: sum(values) / len(values) for day, values in by_date.items()})
 
-        cities = list(CANONICAL_CITIES)
         matrix: list[list[float | None]] = []
         for left in range(len(cities)):
             row: list[float | None] = []
@@ -360,9 +357,10 @@ class AnalyticsRepository:
         missing — or whose target observation carries no local ``hour`` — are
         excluded, per Contract 4.
         """
+        cities = await registry_names(self._db)
         start = now - timedelta(days=days)
         per_city = await asyncio.gather(
-            *(self._error_rows_for_city(city, start, now) for city in CANONICAL_CITIES)
+            *(self._error_rows_for_city(city, start, now) for city in cities)
         )
 
         errors: dict[tuple[int, int], list[float]] = {}

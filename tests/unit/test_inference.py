@@ -1228,6 +1228,13 @@ class TestCoverageWarningThreshold:
         assert inference.coverage_warning(stats) is None
 
     def test_constants_are_the_frozen_contract(self):
+        """One authority (2026-10-31 audit, finding 5): the tripwires are the
+        shared thresholds, imported -- not literals restated in this job."""
+        from app.core import thresholds
+
+        assert inference.COVERAGE_WARN_RATIO is thresholds.PREDICTION_COVERAGE_WARN_RATIO
+        assert inference.STALE_SOURCE_HOURS is thresholds.PREDICTION_OK_AGE_HOURS
+        # ...and the shared values are still the ones the audit signed off.
         assert inference.COVERAGE_WARN_RATIO == 0.9
         assert inference.STALE_SOURCE_HOURS == 12.0
 

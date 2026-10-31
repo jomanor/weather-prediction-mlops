@@ -51,6 +51,23 @@ from pyspark.sql import functions as F
 sys.path.append("/opt/config")
 from spark_config import FEATURES_CONFIG, create_spark_session
 
+# The freshness/coverage thresholds have ONE authority: ``backend/app/core/
+# thresholds.py``, a module of plain constants with no imports of its own, shared
+# with the API, ``scripts/watchdog.py`` and ``scripts/pipeline_summary.py``.
+# Nothing in this file may restate a number (2026-10-31 audit, finding 5).
+# The job runs as ``python spark/spark-jobs/inference.py`` from the repo root, so
+# derive ``<repo_root>/backend`` from this file rather than from the cwd.
+_BACKEND_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend"
+)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from app.core.thresholds import (  # noqa: E402 - path is set just above
+    PREDICTION_COVERAGE_WARN_RATIO,
+    PREDICTION_OK_AGE_HOURS,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -73,9 +90,12 @@ SHADOW_RAIN_THRESHOLD = 0.5
 #: run still beats no run), but a silently shrunk prediction set must be visible
 #: in the log and as a GitHub annotation: on 2026-10-30 the assembler's
 #: ``handleInvalid="skip"`` dropped 14 of 15 cities and only the oldest row was
-#: written, and nothing said so.
-COVERAGE_WARN_RATIO = 0.9
-STALE_SOURCE_HOURS = 12.0
+#: written, and nothing said so. The numbers are imported, not restated: 90 %
+#: coverage and a 12 h source age are the same gates the API and the watchdog
+#: apply. The names below are aliases so ``coverage_warning`` keeps reading the
+#: same; changing either means changing ``app/core/thresholds.py``.
+COVERAGE_WARN_RATIO = PREDICTION_COVERAGE_WARN_RATIO
+STALE_SOURCE_HOURS = PREDICTION_OK_AGE_HOURS
 
 
 def _download_and_unzip(fs: GridFS, file_id, dest_dir: str) -> str:

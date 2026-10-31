@@ -1,15 +1,18 @@
-"""MongoDB access for ``weather_data`` and ``raw_weather``.
+"""MongoDB access for ``raw_weather`` and ``weather_data``.
 
 Two writers produce observations:
 
-* ``weather_data`` — the legacy current-conditions snapshot, nested under
-  ``data.main`` / ``data.wind`` / ``data.clouds`` / ``data.weather``.
 * ``raw_weather`` — the full Open-Meteo payload written by the ingest script
   *and* the historical backfill, with the per-hour values under
-  ``payload.current``.
+  ``payload.current``. This is the live collection.
+* ``weather_data`` — the legacy current-conditions snapshot, nested under
+  ``data.main`` / ``data.wind`` / ``data.clouds`` / ``data.weather``. No writer
+  since the ingest path replaced it; it holds 0 rows and its 30-day TTL is all
+  that is left of it (audit finding 3 — the collection stays).
 
-``weather_data`` is preferred; ``raw_weather`` is the fallback so historical
-backfills are queryable too. One mapping helper per collection, no duplication.
+``raw_weather`` is read first and ``weather_data`` is the *fallback*, so a
+single leftover legacy document cannot shadow fourteen stations. One mapping
+helper per collection, no duplication.
 """
 
 import asyncio
@@ -19,9 +22,10 @@ from typing import Any
 from fastapi import Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.cities import DEFAULT_CITIES
 from app.core.coerce import as_utc, first_not_none, to_float, to_int
+from app.core.thresholds import QUALITY_OK_AGE_HOURS, QUALITY_WARN_AGE_HOURS
 from app.db.mongo import get_db
+from app.repositories.city_repo import registry_names
 from app.schemas.quality import CityQuality, QualityStatus
 from app.schemas.weather import CurrentWeather
 
@@ -176,14 +180,13 @@ def _downsample_by_step(points: list[CurrentWeather], step_hours: int) -> list[C
 
 #: Data-quality thresholds from ``docs/batch4-contract.md`` (Contract 5).
 #: Completeness and age are graded independently, then the worse of the two wins.
-#: Age is calibrated to the ~6 h feature-rebuild cycle (``ml-pipeline.yml``
-#: features ``20 */6``): ok up to ~2x the cycle, warn up to ~3x (one missed
-#: rebuild). The Contract-1 target-drop that forced a healthy pipeline to land
-#: ~6 h stale is fixed in WS-A, so a fresh rebuild lands within this window.
+#: The age gates live in ``app.core.thresholds`` (12 h ok / 18 h warn, shared
+#: with the watchdog and the prediction badge) so no surface can drift from
+#: another. Completeness stays local: it is this meter's own scale, and the
+#: 0.98 completeness of the one-shot backfill must keep flagging a broken
+#: cadence.
 QUALITY_OK_COMPLETENESS = 0.95
 QUALITY_WARN_COMPLETENESS = 0.80
-QUALITY_OK_AGE_HOURS = 12.0
-QUALITY_WARN_AGE_HOURS = 18.0
 
 _STATUS_RANK: dict[str, int] = {"ok": 0, "warn": 1, "bad": 2}
 
@@ -234,14 +237,21 @@ class WeatherRepository:
         return sorted(city for city in cities if city)
 
     async def latest_for_city(self, city: str) -> CurrentWeather | None:
-        doc = await self._current.find_one({"city": city}, sort=[("timestamp", -1)])
-        if doc is not None:
-            return _from_weather_data(doc)
-
+        """Newest observation for one city: ``raw_weather`` first, legacy as fallback."""
         doc = await self._raw.find_one({"city": city}, sort=[("timestamp", -1)])
-        return _from_raw_weather(doc) if doc is not None else None
+        if doc is not None:
+            return _from_raw_weather(doc)
+
+        doc = await self._current.find_one({"city": city}, sort=[("timestamp", -1)])
+        return _from_weather_data(doc) if doc is not None else None
 
     async def latest_per_city(self) -> list[CurrentWeather]:
+        """One newest observation per city: ``raw_weather`` first, legacy as fallback.
+
+        The fallback only runs when ``raw_weather`` has no rows at all, so the
+        hot path is one aggregate. Reading the legacy collection first would let
+        a single stale document replace the fourteen live stations.
+        """
         # Sort by (city, timestamp) so the ``{city: 1, timestamp: -1}`` index
         # feeds the group directly. Sorting on ``timestamp`` alone is a blocking
         # sort across the whole collection, which exceeds the 32 MB in-memory
@@ -254,12 +264,12 @@ class WeatherRepository:
             {"$replaceRoot": {"newRoot": "$latest"}},
             {"$sort": {"city": 1}},
         ]
-        docs = [doc async for doc in self._current.aggregate(pipeline, allowDiskUse=True)]
-        if docs:
-            return _map_all(docs, _from_weather_data)
-
         docs = [doc async for doc in self._raw.aggregate(pipeline, allowDiskUse=True)]
-        return _map_all(docs, _from_raw_weather)
+        if docs:
+            return _map_all(docs, _from_raw_weather)
+
+        docs = [doc async for doc in self._current.aggregate(pipeline, allowDiskUse=True)]
+        return _map_all(docs, _from_weather_data)
 
     async def find_range(
         self,
@@ -270,21 +280,26 @@ class WeatherRepository:
         newest_first: bool = True,
         after: datetime | None = None,
     ) -> list[CurrentWeather]:
-        """Observations in ``[start, end]``, optionally strictly after ``after`` (keyset)."""
+        """Observations in ``[start, end]``, optionally strictly after ``after`` (keyset).
+
+        ``raw_weather`` first; ``weather_data`` only when it has no rows in the
+        window, so one leftover legacy document cannot shrink the history to a
+        single point.
+        """
         window: dict[str, datetime] = {"$gte": start, "$lte": end}
         if after is not None:
             window["$gt"] = after
         query = {"city": city, "timestamp": window}
         direction = -1 if newest_first else 1
 
-        cursor = self._current.find(query).sort("timestamp", direction).limit(limit)
-        docs = [doc async for doc in cursor]
-        if docs:
-            return _map_all(docs, _from_weather_data)
-
         cursor = self._raw.find(query).sort("timestamp", direction).limit(limit)
         docs = [doc async for doc in cursor]
-        return _map_all(docs, _from_raw_weather)
+        if docs:
+            return _map_all(docs, _from_raw_weather)
+
+        cursor = self._current.find(query).sort("timestamp", direction).limit(limit)
+        docs = [doc async for doc in cursor]
+        return _map_all(docs, _from_weather_data)
 
     async def find_many_in_range(
         self,
@@ -296,8 +311,8 @@ class WeatherRepository:
     ) -> list[CurrentWeather]:
         """Bulk read for ``cities`` in ``[start, end]`` with one query per collection.
 
-        ``weather_data`` is read first; any requested city without rows in range
-        falls back to ``raw_weather`` (the repo's usual policy, applied per city
+        ``raw_weather`` is read first; any requested city without rows in range
+        falls back to ``weather_data`` (the repo's usual policy, applied per city
         here because the request spans cities). ``fields`` limits the Mongo
         projection to the requested contract fields — never to the query alone.
 
@@ -313,10 +328,10 @@ class WeatherRepository:
         query = {"city": {"$in": requested}, "timestamp": {"$gte": start, "$lte": end}}
         sort: list[tuple[str, int]] = [("city", 1), ("timestamp", -1)]
 
-        cursor = self._current.find(
-            query, _projection(fields, _CURRENT_FIELD_PATHS, _CURRENT_IDENTITY)
-        ).sort(sort)
-        points = _map_all([doc async for doc in cursor], _from_weather_data)
+        cursor = self._raw.find(query, _projection(fields, _RAW_FIELD_PATHS, _RAW_IDENTITY)).sort(
+            sort
+        )
+        points = _map_all([doc async for doc in cursor], _from_raw_weather)
 
         missing = [city for city in requested if city not in {point.city for point in points}]
         if missing:
@@ -324,10 +339,10 @@ class WeatherRepository:
                 "city": {"$in": missing},
                 "timestamp": {"$gte": start, "$lte": end},
             }
-            raw_cursor = self._raw.find(
-                fallback, _projection(fields, _RAW_FIELD_PATHS, _RAW_IDENTITY)
+            legacy_cursor = self._current.find(
+                fallback, _projection(fields, _CURRENT_FIELD_PATHS, _CURRENT_IDENTITY)
             ).sort(sort)
-            points.extend(_map_all([doc async for doc in raw_cursor], _from_raw_weather))
+            points.extend(_map_all([doc async for doc in legacy_cursor], _from_weather_data))
 
         points.sort(key=lambda point: (point.city, point.observed_at))
         return _downsample_by_step(points, step_hours)
@@ -342,15 +357,16 @@ class WeatherRepository:
         computed in Python over a bounded window (≤ ``30 * 24`` hourly rows per
         city).
 
-        The city set is the fixed ``DEFAULT_CITIES`` registry in
-        ``app.core.cities`` (15 stations, incl. Pasadena),
-        not ``distinct("city")``: a city whose feature rows vanished entirely
+        The city set is the Mongo ``cities`` registry (``registry_names``, with
+        the ``DEFAULT_CITIES`` seed tuple as its fallback), not
+        ``distinct("city")``: a city whose feature rows vanished entirely
         (ingestion/feature outage) must still be reported ``bad`` instead of
-        silently disappearing from the meter. Queries run concurrently with
-        ``asyncio.gather``; the list is bounded, so is the fan-out.
+        silently disappearing from the meter, and a station deleted from the
+        registry must stop being reported. Queries run concurrently with
+        ``asyncio.gather``; the registry is bounded, so is the fan-out.
         """
         start = now - timedelta(days=days)
-        names = sorted(name for name, _, _ in DEFAULT_CITIES)
+        names = await registry_names(self._db)
         return await asyncio.gather(*(self._city_quality(city, start, now, days) for city in names))
 
     async def _city_quality(

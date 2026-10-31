@@ -16,6 +16,8 @@ explicitly instead of inheriting whatever the runner happens to set — without 
 
 from __future__ import annotations
 
+import ast
+import importlib
 import json
 import os
 import re
@@ -285,6 +287,91 @@ def test_coverage_14_of_15_reports_ratio():
     assert coverage.value.startswith("0.933")
     assert coverage.is_bad is False
     assert verdict.triggered is False
+
+
+# ---------------------------------------------------------------------------
+# One authority: the numbers come from backend/app/core/thresholds.py
+# ---------------------------------------------------------------------------
+
+#: Every threshold the watchdog grades with, as declared in the shared module.
+SHARED_THRESHOLD_NAMES = (
+    "QUALITY_OK_AGE_HOURS",
+    "QUALITY_WARN_AGE_HOURS",
+    "QUALITY_BAD_COMPLETENESS_BELOW",
+    "PREDICTION_OK_AGE_HOURS",
+    "PREDICTION_WARN_AGE_HOURS",
+    "PREDICTION_COVERAGE_WARN_RATIO",
+    "SKILL_SCORE_ADVISORY_AT_OR_BELOW",
+)
+
+
+def test_thresholds_are_the_shared_module_objects():
+    """Identity, not equality: the names must *be* the shared values (audit 5)."""
+    shared = importlib.import_module("app.core.thresholds")
+    assert wd.QUALITY_OK_AGE_HOURS is shared.QUALITY_OK_AGE_HOURS
+    assert wd.QUALITY_WARN_AGE_HOURS is shared.QUALITY_WARN_AGE_HOURS
+    assert wd.QUALITY_BAD_COMPLETENESS_BELOW is shared.QUALITY_BAD_COMPLETENESS_BELOW
+    assert wd.PREDICTION_OK_AGE_HOURS is shared.PREDICTION_OK_AGE_HOURS
+    assert wd.SKILL_SCORE_ADVISORY_AT_OR_BELOW is shared.SKILL_SCORE_ADVISORY_AT_OR_BELOW
+    # The two local names the rest of the file uses are aliases, not copies.
+    assert wd.PREDICTION_BAD_AGE_HOURS is shared.PREDICTION_WARN_AGE_HOURS
+    assert wd.PREDICTION_BAD_COVERAGE_BELOW is shared.PREDICTION_COVERAGE_WARN_RATIO
+
+
+def test_watchdog_declares_no_threshold_literal_of_its_own():
+    """Source-level guard: drift back into a local copy is impossible, not tested."""
+    tree = ast.parse((REPO_ROOT / "scripts" / "watchdog.py").read_text())
+    literal_assigns = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+        and target.id in SHARED_THRESHOLD_NAMES
+        and isinstance(node.value, ast.Constant)
+    }
+    assert literal_assigns == set(), f"local threshold literals in watchdog.py: {literal_assigns}"
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "app.core.thresholds"
+        for alias in node.names
+    }
+    assert imported == set(SHARED_THRESHOLD_NAMES)
+
+
+def test_verdict_follows_a_retune_of_the_shared_threshold():
+    """Patch the shared module and reload: the verdict must move with it.
+
+    20 h behind used to be ``bad`` (18 h gate). Retune the one authority to 24 h
+    and the same evidence is ``ok`` -- proof that the watchdog reads the shared
+    number at import time instead of carrying its own.
+    """
+    shared = importlib.import_module("app.core.thresholds")
+    payloads = {
+        wd.PATH_CURRENT: current_payload({"Madrid": 1.0}),
+        wd.PATH_QUALITY: quality_payload({"Madrid": 0.99}),
+        wd.PATH_PREDICTIONS: predictions_payload({"Madrid": 20.0}),
+        wd.PATH_MODELS: models_payload([]),
+    }
+    assert status_of(verdict_for(**payloads), "prediction_age") == "bad"
+
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(shared, "PREDICTION_WARN_AGE_HOURS", 24.0)
+    try:
+        importlib.reload(wd)
+        assert wd.PREDICTION_BAD_AGE_HOURS == 24.0
+        verdict = wd.gather_verdict(
+            api_base=wd.DEFAULT_API_BASE, fetch=fake_fetch(payloads), now=NOW
+        )
+        assert status_of(verdict, "prediction_age") == "ok"
+        assert "24 h" in next(
+            signal.threshold for signal in verdict.signals if signal.key == "prediction_age"
+        )
+    finally:
+        patcher.undo()
+        importlib.reload(wd)
+    assert wd.PREDICTION_BAD_AGE_HOURS == 18.0
 
 
 # ---------------------------------------------------------------------------

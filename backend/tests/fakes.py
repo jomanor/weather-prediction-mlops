@@ -197,6 +197,19 @@ class FakeMongoCollection:
                 documents = [doc.get(path) for doc in documents]
         return FakeMongoCursor(documents)
 
+    async def find_one(self, query, sort=None):
+        """First match, honouring ``sort`` like Motor's ``find_one``.
+
+        Without it a read-order test could not tell ``latest_for_city``'s two
+        collection lookups apart.
+        """
+        self.find_calls.append((query, None))
+        cursor = FakeMongoCursor([doc for doc in self.documents if _matches(doc, query)])
+        if sort:
+            cursor.sort(sort)
+        resolved = cursor._resolved()
+        return resolved[0] if resolved else None
+
     async def distinct(self, key):
         seen: list = []
         for doc in self.documents:
@@ -216,11 +229,16 @@ class FakeMongoDb:
         weather_features: FakeMongoCollection | None = None,
         model_registry: FakeMongoCollection | None = None,
         weather_predictions: FakeMongoCollection | None = None,
+        cities: FakeMongoCollection | None = None,
     ) -> None:
         self._collections = {
             "weather_data": weather_data or FakeMongoCollection(),
             "raw_weather": raw_weather or FakeMongoCollection(),
             "weather_features": weather_features or FakeMongoCollection(),
+            #: The station registry. Empty means "not seeded": the repositories
+            #: fall back to ``DEFAULT_CITIES`` (the seed list), as production
+            #: does on a brand-new database.
+            "cities": cities or FakeMongoCollection(),
         }
         if model_registry is not None:
             self._collections["model_registry"] = model_registry
@@ -312,8 +330,11 @@ class FakeWeatherRepository:
 class FakePredictionRepository:
     def __init__(self, predictions: list[Prediction] | None = None) -> None:
         self.predictions = list(predictions or [])
+        #: Method names in call order, so tests can prove a cache hit skipped Mongo.
+        self.calls: list[str] = []
 
     async def latest_per_city(self, horizon: int | None = None) -> list[Prediction]:
+        self.calls.append("latest_per_city")
         latest: dict[tuple[str, int], Prediction] = {}
         for prediction in self.predictions:
             if horizon is not None and prediction.horizon_hours != horizon:
@@ -327,6 +348,7 @@ class FakePredictionRepository:
     async def for_city(
         self, city: str, limit: int = 48, horizon: int | None = None
     ) -> list[Prediction]:
+        self.calls.append("for_city")
         matches = [
             p
             for p in self.predictions

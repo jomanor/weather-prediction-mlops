@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+from app.core.thresholds import PREDICTION_STALE_AFTER_HOURS
 from app.repositories.prediction_repo import get_prediction_repo
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.schemas.predictions import Prediction, freshness_fields
@@ -302,13 +303,15 @@ async def test_predictions_freshness_fields_survive_both_prefixes(client):
 
 
 def test_freshness_fields_never_invent_an_age(now):
-    assert freshness_fields(None, now, 24.0) == {"source_age_hours": None, "stale": False}
+    threshold = PREDICTION_STALE_AFTER_HOURS
+    assert freshness_fields(None, now, threshold) == {"source_age_hours": None, "stale": False}
     # Exactly at the threshold is not stale; past it is.
-    assert freshness_fields(now - timedelta(hours=24), now, 24.0) == {
-        "source_age_hours": 24.0,
+    assert freshness_fields(now - timedelta(hours=threshold), now, threshold) == {
+        "source_age_hours": threshold,
         "stale": False,
     }
-    assert freshness_fields(now - timedelta(hours=1), now, 24.0)["stale"] is False
+    assert freshness_fields(now - timedelta(hours=threshold + 0.1), now, threshold)["stale"] is True
+    assert freshness_fields(now - timedelta(hours=1), now, threshold)["stale"] is False
 
 
 async def test_benchmark_for_city(client):
@@ -833,3 +836,134 @@ async def test_range_caps_limit(client, now):
         },
     )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Finding 11(b): the two heaviest reads go through the shared TTL cache, and the
+# key covers every query parameter that changes the payload.
+# ---------------------------------------------------------------------------
+
+
+async def test_predictions_latest_is_cached_for_30s(client, prediction_repo):
+    first = await client.get("/api/predictions/latest")
+    second = await client.get("/api/predictions/latest")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert "max-age=30" in first.headers["cache-control"]
+    assert first.headers["etag"] == second.headers["etag"]
+    # One aggregate for two requests.
+    assert prediction_repo.calls.count("latest_per_city") == 1
+
+
+async def test_predictions_latest_304_is_served_from_the_cached_payload(client, prediction_repo):
+    first = await client.get("/api/predictions/latest")
+
+    second = await client.get(
+        "/api/predictions/latest", headers={"If-None-Match": first.headers["etag"]}
+    )
+
+    assert second.status_code == 304
+    assert second.headers["etag"] == first.headers["etag"]
+    assert prediction_repo.calls.count("latest_per_city") == 1
+
+
+async def test_predictions_latest_cache_key_includes_the_horizon(
+    client, app, multi_horizon_predictions
+):
+    repository = FakePredictionRepository(multi_horizon_predictions)
+    app.dependency_overrides[get_prediction_repo] = lambda: repository
+
+    every_horizon = await client.get("/api/predictions/latest")
+    one_horizon = await client.get("/api/predictions/latest", params={"horizon": 1})
+    repeat = await client.get("/api/predictions/latest", params={"horizon": 1})
+
+    # Different horizon -> different key -> different payload.
+    assert every_horizon.json()["count"] == 2
+    assert one_horizon.json()["count"] == 1
+    assert repeat.json() == one_horizon.json()
+    assert repository.calls.count("latest_per_city") == 2
+
+
+async def test_weather_series_is_cached_for_30s(client, weather_repo):
+    first = await client.get("/api/weather/series", params={"cities": "Madrid", "hours": 24})
+    second = await client.get("/api/weather/series", params={"cities": "Madrid", "hours": 24})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert "max-age=30" in first.headers["cache-control"]
+    assert weather_repo.calls.count("find_many_in_range") == 1
+
+
+async def test_weather_series_cache_key_covers_every_payload_parameter(client, weather_repo):
+    base = {"cities": "Madrid", "hours": 24, "fields": "temperature", "step_hours": 1}
+    await client.get("/api/weather/series", params=base)
+
+    # A repeat of the same request is a hit.
+    await client.get("/api/weather/series", params=base)
+    assert weather_repo.calls.count("find_many_in_range") == 1
+
+    # Each differing parameter is a miss: hours, step_hours, fields, cities.
+    for override in (
+        {"hours": 48},
+        {"step_hours": 3},
+        {"fields": "temperature,humidity"},
+        {"cities": "Madrid,Alicante"},
+    ):
+        await client.get("/api/weather/series", params={**base, **override})
+    assert weather_repo.calls.count("find_many_in_range") == 5
+
+
+async def test_weather_series_key_normalises_the_city_list(client, weather_repo):
+    await client.get("/api/weather/series", params={"cities": "Madrid", "fields": "temperature"})
+
+    # Same payload, different spelling: blanks and a duplicate are normalised
+    # away by ``_parse_cities`` and must hit the same entry.
+    response = await client.get(
+        "/api/weather/series", params={"cities": " Madrid , Madrid", "fields": "temperature"}
+    )
+
+    assert response.status_code == 200
+    assert weather_repo.calls.count("find_many_in_range") == 1
+
+
+async def test_weather_series_key_treats_the_field_list_as_a_set(client, weather_repo):
+    await client.get(
+        "/api/weather/series", params={"cities": "Madrid", "fields": "temperature,humidity"}
+    )
+
+    # A reordered projection produces the same payload, so it must not miss.
+    response = await client.get(
+        "/api/weather/series", params={"cities": "Madrid", "fields": "humidity,temperature"}
+    )
+
+    assert response.status_code == 200
+    assert weather_repo.calls.count("find_many_in_range") == 1
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: the freshness badge reads the one shared threshold, never 24 h
+# ---------------------------------------------------------------------------
+
+
+async def test_the_stale_badge_uses_the_shared_12_hour_threshold(client, app, now):
+    def row(city: str, age_hours: float) -> Prediction:
+        return Prediction(
+            city=city,
+            source_timestamp=now - timedelta(hours=age_hours),
+            prediction_timestamp=now,
+            horizon_hours=1,
+            predicted_temperature=20.0,
+        )
+
+    app.dependency_overrides[get_prediction_repo] = lambda: FakePredictionRepository(
+        [row("Fresh", 11.0), row("Old", 13.0)]
+    )
+
+    body = (await client.get("/api/predictions/latest")).json()
+    rows = {prediction["city"]: prediction for prediction in body["predictions"]}
+
+    # 13 h is stale: the old 24 h setting would have called it fresh.
+    assert PREDICTION_STALE_AFTER_HOURS == 12.0
+    assert rows["Fresh"]["stale"] is False
+    assert rows["Old"]["stale"] is True
