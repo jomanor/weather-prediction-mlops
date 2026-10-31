@@ -13,8 +13,9 @@ import type { StationCollection } from '@/api/schemas'
 import { usePreferences, type BasemapId } from '@/app/preferences'
 import { MAP_PAINT } from '@/lib/chart-theme'
 import { cn } from '@/lib/cn'
-import { RAMP_DOMAINS, rampBreaks, rampHex, rampToken, type RampName } from '@/lib/ramps'
+import { RAMP_DOMAINS, rampBreaks, rampHex, type RampName } from '@/lib/ramps'
 
+import { MapLayersPanel, MobileMapLayers, type LayerKey } from './MapLayersControl'
 import { RadarControls } from './RadarControls'
 import { radarTileUrl, useRadar } from './radar'
 import { stationSourceSpec, toStationGeoJSON } from './station-geojson'
@@ -557,12 +558,25 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
     if (radarUrlRef.current) applyRadar(map, radarUrlRef.current)
   }, [mapLayers.radar, radar.current, radar.host, basemap])
 
-  const layerOptions = [
-    { key: 'hillshade' as const, label: 'Relieve' },
-    { key: 'radar' as const, label: 'Radar de lluvia' },
-    { key: 'terrain3d' as const, label: 'Terreno 3D' },
-    { key: 'buildings3d' as const, label: 'Edificios 3D' },
-  ]
+  /* Relief and 3D terrain are the same DEM presented two ways: keep exactly
+     one active (radio-like). Radar and buildings are independent. */
+  const changeLayer = (key: LayerKey, checked: boolean) => {
+    if (key === 'terrain3d' && checked) {
+      setMapLayers({ ...mapLayers, terrain3d: true, hillshade: false })
+    } else if (key === 'hillshade' && checked) {
+      setMapLayers({ ...mapLayers, hillshade: true, terrain3d: false })
+    } else {
+      setMapLayers({ ...mapLayers, [key]: checked })
+    }
+  }
+
+  const layerControlProps = {
+    mapLayers,
+    onLayerChange: changeLayer,
+    basemap,
+    onBasemapChange: setBasemap,
+    radarUnavailable: radar.status === 'unavailable',
+  }
 
   return (
     <div className={cn('relative h-full w-full', className)}>
@@ -572,79 +586,9 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
         aria-label="Mapa de estaciones meteorológicas"
       />
 
-      <div className="absolute right-2 top-2 z-10 w-44 rounded-[3px] border border-line bg-panel p-2.5">
-        <div className="label mb-1.5">Capas</div>
-        <div className="flex flex-col gap-1">
-          {layerOptions.map((option) => (
-            <label
-              key={option.key}
-              className="flex cursor-pointer items-center gap-2 text-xs text-fg-2 hover:text-fg"
-            >
-              <input
-                type="checkbox"
-                className="h-3.5 w-3.5 accent-[var(--accent)]"
-                checked={mapLayers[option.key]}
-                onChange={(event) => {
-                  /* Relief and 3D terrain are the same DEM presented two ways:
-                     keep exactly one active (radio-like). Radar and buildings
-                     are independent. */
-                  if (option.key === 'terrain3d' && event.target.checked) {
-                    setMapLayers({ ...mapLayers, terrain3d: true, hillshade: false })
-                  } else if (option.key === 'hillshade' && event.target.checked) {
-                    setMapLayers({ ...mapLayers, hillshade: true, terrain3d: false })
-                  } else {
-                    setMapLayers({ ...mapLayers, [option.key]: event.target.checked })
-                  }
-                }}
-              />
-              {option.label}
-            </label>
-          ))}
-        </div>
-
-        <label className="label mt-2.5 block" htmlFor="basemap-select">
-          Base
-        </label>
-        <select
-          id="basemap-select"
-          value={basemap}
-          onChange={(event) => setBasemap(event.target.value as BasemapId)}
-          className="mt-1 h-7 w-full rounded-[3px] border border-line bg-panel-2 px-1.5 text-[16px] leading-none text-fg-2 focus:border-accent focus:outline-none sm:text-xs"
-        >
-          <option value="positron">Claro (Carto)</option>
-          <option value="dark">Oscuro (Carto)</option>
-          <option value="topo">Relieve (OpenTopoMap)</option>
-        </select>
-
-        <div className="mt-2.5 border-t border-line pt-2">
-          <div className="label mb-1">Temperatura</div>
-          <div className="flex h-2 overflow-hidden rounded-[2px]" aria-hidden="true">
-            {Array.from({ length: 7 }, (_, step) => (
-              <span key={step} className="flex-1" style={{ background: rampToken('temp', step) }} />
-            ))}
-          </div>
-          <div className="nums mt-0.5 flex justify-between text-[9px] text-fg-3">
-            <span>{RAMP_DOMAINS.temp[0]}°</span>
-            <span>icono = temp.</span>
-            <span>{RAMP_DOMAINS.temp[1]}°</span>
-          </div>
-          <div className="label mb-1 mt-2">Viento (flecha)</div>
-          <div className="flex h-2 overflow-hidden rounded-[2px]" aria-hidden="true">
-            {Array.from({ length: 4 }, (_, step) => (
-              <span key={step} className="flex-1" style={{ background: rampToken('wind', step) }} />
-            ))}
-          </div>
-          <div className="nums mt-0.5 flex justify-between text-[9px] text-fg-3">
-            <span>0</span>
-            <span>tamaño = vel.</span>
-            <span>{RAMP_DOMAINS.wind[1]} km/h</span>
-          </div>
-        </div>
-
-        {mapLayers.radar && radar.status === 'unavailable' ? (
-          <p className="mt-1.5 text-[10px] leading-tight text-warn">Radar no disponible ahora.</p>
-        ) : null}
-      </div>
+      {/* Desktop: the fixed panel. Phone: the same content behind "Capas". */}
+      <MapLayersPanel {...layerControlProps} />
+      <MobileMapLayers {...layerControlProps} />
 
       {mapLayers.radar ? (
         <RadarControls

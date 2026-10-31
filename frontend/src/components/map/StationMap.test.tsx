@@ -1,4 +1,5 @@
-import { render, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StationCollection } from '@/api/schemas'
@@ -104,6 +105,7 @@ const COLLECTION: StationCollection = {
         wind_direction: 210,
         precipitation: 0,
         weather_code: 0,
+        is_day: 1,
         observed_at: '2026-09-25T11:00:00Z',
       },
     },
@@ -200,5 +202,47 @@ describe('StationMap cluster source (U5)', () => {
     expect(serialised).toContain('["!=",["get","wind_speed"],null]')
     expect(serialised).toContain('["!=",["get","wind_direction"],null]')
     expect(serialised).not.toContain('"has","wind_speed"')
+  })
+})
+
+describe('StationMap layer controls on a phone', () => {
+  /* The sheet and the desktop panel are the same controls; the phone reaches
+     them through "Capas" and the map still owns the DEM/3D exclusivity rule. */
+  beforeEach(() => localStorage.clear())
+  afterEach(() => localStorage.clear())
+
+  it('keeps relief and 3D terrain mutually exclusive from the sheet', async () => {
+    const user = userEvent.setup()
+    renderMap()
+
+    /* Every query is scoped to the sheet: the desktop panel is still mounted
+       (CSS hides it, jsdom does not resolve the media query). */
+    const trigger = () => screen.getByRole('button', { name: /^capas$/i })
+    const sheet = () => within(screen.getByRole('dialog', { name: 'Capas del mapa' }))
+
+    await user.click(trigger())
+    await user.click(sheet().getByLabelText('Terreno 3D'))
+    /* A selection closes the sheet. */
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    await user.click(trigger())
+    expect(sheet().getByLabelText('Terreno 3D')).toBeChecked()
+    expect(sheet().getByLabelText('Relieve')).not.toBeChecked()
+
+    await user.click(sheet().getByLabelText('Relieve'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    await user.click(trigger())
+    expect(sheet().getByLabelText('Relieve')).toBeChecked()
+    expect(sheet().getByLabelText('Terreno 3D')).not.toBeChecked()
+  })
+
+  it('renders the desktop panel and the phone trigger from one set of controls', () => {
+    renderMap()
+
+    expect(screen.getByRole('button', { name: /^capas$/i })).toBeInTheDocument()
+    /* Closed sheet: only the desktop panel's content is mounted. */
+    expect(screen.getAllByLabelText('Edificios 3D')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Base')).toHaveLength(1)
   })
 })
