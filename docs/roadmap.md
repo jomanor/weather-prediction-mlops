@@ -45,7 +45,7 @@ Note: ingest and AEMET coverage of Pasadena is by design, not a defect.
 | L3 | Slim cold start: `ensure_indexes`/seed after `yield` | S |
 | L4 | `GET /api/weather/series?cities=&from=&to=` (bulk, projection), `GET /api/map/stations` GeoJSON, `GET /api/weather/summary` for sparklines | M |
 | L5 | `GET /api/weather/range/{city}?from=&to=` (removes the 168 h / 500-point ceiling); `X-Data-Age-Seconds` header | S |
-| L6 | Optional `POST /api/refresh` (rate-limited, server-side fetch, never a browser-triggered workflow dispatch). SSE only as polish; **WebSocket rejected** | M |
+| ~~L6~~ | ~~Optional `POST /api/refresh` (rate-limited, server-side fetch, never a browser-triggered workflow dispatch)~~ **deleted 2026-10-31** (audit finding 7): the hatch wrote one `raw_weather` row and could not refresh features or predictions. SSE only as polish; **WebSocket rejected** | ~~M~~ |
 | L7 | Prefetch + focus refetch + skeletons; keep-warm pinger only if the Render 750 h pool is otherwise unused | S |
 
 ## 3. Frontend - map, colour, interactivity

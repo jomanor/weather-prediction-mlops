@@ -1,10 +1,10 @@
 # Handoff — operational notes for the next session
 
 **Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
-items, batches A–F, and five owner decisions). Pick a batch from its *Suggested order* table,
-fall back to `docs/roadmap.md` *Accepted follow-ups* when it is exhausted. Do not start a batch
-before answering the owner questions that batch depends on (Spark for E, `/refresh` for A/C,
-Analítica and Pasadena for D).
+items, batches A–F, and the owner decisions). Batches A and B are done, and finding 7 (`POST /refresh`)
+is resolved by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
+`docs/roadmap.md` *Accepted follow-ups* when it is exhausted. Do not start a batch before answering
+the owner questions that batch depends on (Spark for E, Analítica and Pasadena for D).
 
 Read this **before** `docs/roadmap.md`. The roadmap holds the plan and the status
 checklist; this file holds the environment, the hard rules and the traps that are not
@@ -18,7 +18,7 @@ live in `docs/batch4-contract.md`.
 | Repo | `jomanor/weather-prediction-mlops`, branch `main` | Public repo → standard GitHub Actions minutes are unlimited. |
 | API | Render service `meteoml-api`, deployed from `main` | `render.yaml`: docker, `backend/Dockerfile`, free plan, `autoDeploy: true`, health `GET /api/health`. Dashboard branch was the trap that caused stale deploys; it is now `main`. A deploy hook exists in the Render dashboard to force a deploy; the key is a secret, so it must never be committed to this public repo. |
 | Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing is currently **off** (`ignore = "exit 0"`); see the 2026-10-31 entry. |
-| DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** (includes Pasadena). Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL. Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
+| DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** (includes Pasadena). Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL (that endpoint was deleted 2026-10-31, so the charge is spare headroom now, not a cost). Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
 | Cron | GitHub Actions | `ingest.yml` declared hourly `:50` (see the live caveat below); `ml-pipeline.yml` inference hourly `:05`, features `20 */6`, train nightly `35 2`; `backfill.yml` manual. |
 
 Deleted branch: `rebuild/v2` is gone (it caused a stale Render deploy). `main` is the
@@ -218,14 +218,15 @@ and training now share one implementation.
   loads GridFS first and MLflow only for a legacy doc without a file id, never for metadata. MLflow logging
   is opt-in on `MLFLOW_TRACKING_URI`, imports lazily and cannot fail a run; `ml-pipeline.yml` no longer sets
   the CI file store or installs mlflow. The feature index is recreated after the write.
-- **L6 refresh**: `POST /api/refresh` (and `/api/v1/refresh`) fetches one registered city from Open-Meteo,
-  upserts the identical `raw_weather` document and returns
+- **L6 refresh** (removed 2026-10-31 — see `docs/audit-2026-10-31.md` finding 7): `POST /api/refresh`
+  (and `/api/v1/refresh`) fetched one registered city from Open-Meteo, upserted the identical `raw_weather`
+  document and returned
   `{city, source_timestamp, fetched_at, features_refreshed:false, predictions_refreshed:false}`. It never
-  runs Spark. **Opt-in**: `REFRESH_ENABLED` defaults to `false` because this is an unauthenticated write
-  surface. When enabled, a process-local limiter applies 900 s per city, 6/min, 48/day — rejections do not
-  consume budget, attempts do; exceeded → 429 + `Retry-After`, disabled → 503, unknown city → 404, upstream
-  → 502. Caps are per process lifetime and reset when the free-tier instance sleeps: they are a storage
-  guard, not a distributed quota.
+  ran Spark. **Opt-in**: `REFRESH_ENABLED` defaulted to `false` because this was an unauthenticated write
+  surface. When enabled, a process-local limiter applied 900 s per city, 6/min, 48/day — rejections did not
+  consume budget, attempts did; exceeded → 429 + `Retry-After`, disabled → 503, unknown city → 404, upstream
+  → 502. Caps were per process lifetime and reset when the free-tier instance slept: they were a storage
+  guard, not a distributed quota. **The owner chose deletion over gating (`decaba5`)**; nothing replaced it.
 - **Follow-ups closed**: shared `mongo_retry` helper, LRU cache bound + city validation, feature-index
   repair, Pasadena in the derived city lists, tz-independent prediction `_id`, MLflow no longer a dependency
   of CI, mobile sheet/map touch fixes (tap tolerance, focus/Escape, swipe axis lock, safe-area layout).
@@ -243,9 +244,9 @@ and training now share one implementation.
   `await` between check and increment — kept as defence-in-depth, docstring corrected.
 
 **Decisions/assumptions to keep:** `/api` stays the served alias (removing it is a coordinated frontend +
-Render change); the refresh endpoint is opt-in because it is unauthenticated, and its caps reset on instance
-sleep; promotion stays a human CLI action, not an API; shadow A/B measures production↔challenger
-disagreement, not accuracy, and only runs after a real promote.
+Render change); promotion stays a human CLI action, not an API; shadow A/B measures production↔challenger
+disagreement, not accuracy, and only runs after a real promote. The refresh endpoint was **deleted**
+(2026-10-31), so its opt-in/limiter caveat no longer applies to anything.
 
 **Deploy notes:** a fresh deploy serves both `/api/health` and `/api/v1/health` (either proving the image
 shipped, unlike `/api/health/ready`); the hourly `job=inference` will log the staging-fallback warning until
@@ -321,7 +322,7 @@ the cut list live in `docs/app-rethink.md`.
 - **Security** — `POST /cities` and `DELETE /cities/{name}` now require
   `Authorization: Bearer $CITY_WRITES_TOKEN`; unset → 503 `city_writes_disabled`,
   wrong/missing → 401 `unauthorized` + `WWW-Authenticate`. Reads are unaffected.
-  The public `POST /refresh` remains opt-in/off by default.
+  The public `POST /refresh` that used to sit beside it was deleted on 2026-10-31 (`decaba5`).
 - **Data** — the 35-day hourly backfill fixed the 6 h gaps: 12,090 rows inserted
   (Pasadena 2 → 841 consecutive hours), quality went from completeness 0.216 /
   max-gap 8 h / all-`bad` to **1.000 / 1 h / all-`ok`** for 15 cities, and
