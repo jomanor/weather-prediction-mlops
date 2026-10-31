@@ -543,12 +543,14 @@ paused (2026-10-31 entry), so neither half is live.
 
 ## 2026-10-31 — Batch 6c: read-API metrics, /series on the station page, k6 cold burst
 
-All three halves are in the working tree and **not on `main`**. New files: `backend/app/core/metrics.py`,
-`backend/app/routers/metrics.py`, `backend/tests/test_metrics.py`, `scripts/load/cold-burst.js`,
-`.github/workflows/loadtest.yml`, `frontend/src/features/station/StationPageRequests.test.tsx`. Nothing is
-live: `GET /api/v1/metrics` answers **404 on production** (checked 2026-10-31), the frontend change is
-uncommitted with auto-publish paused (2026-10-31 entry), and the load workflow does not exist until it
-lands on `main`. **Review verdict: CLOSED** — the first pass found two defects (unbounded method cardinality
+Shipped 2026-10-31 on `main` in `3049b36` → `81c2682` and **deployed**. New files:
+`backend/app/core/metrics.py`, `backend/app/routers/metrics.py`, `backend/tests/test_metrics.py`,
+`scripts/load/cold-burst.js`, `.github/workflows/loadtest.yml`,
+`frontend/src/features/station/StationPageRequests.test.tsx`. The API half is live — `GET /api/v1/metrics`
+answers **200 on production** (checked after the deploy) and the load workflow has been dispatched once and
+is **green** (run `41200504597`). The frontend half is committed but not published: auto-publish is paused
+(2026-10-31 entry), so the station page changes only when a Netlify deploy is triggered deliberately.
+**Review verdict: CLOSED** — the first pass found two defects (unbounded method cardinality
 in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-measured, see *fixed* below.
 
 **`GET /metrics` — contract (`backend/app/core/metrics.py`, `backend/app/routers/metrics.py`)**
@@ -579,16 +581,21 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
   current instance's life, never a 28-day window; do not report them as one. A durable window needs an
   exporter or a store (deliberately out of scope). `/metrics` is counted like every other route, so it
   appears from the next call on.
-- **How to read it** (no scraper; it is a `curl | jq` surface). `/metrics` is not on production yet, so run
-  it against a local instance on `weather_db`; the filter is the part that matters:
+- **How to read it** (no scraper; it is a `curl | jq` surface, live now):
 
   ```bash
-  curl -s http://localhost:8123/api/v1/metrics | jq -c '.slo, (.requests | {total, errors_5xx}), (.routes[:5] | map({route, p95_ms, max_ms}))'
+  curl -s https://weather-prediction-mlops.onrender.com/api/v1/metrics | jq -c '.slo, (.requests | {total, errors_5xx}), (.routes[:5] | map({route, p95_ms, max_ms}))'
   ```
 
-  Executed against the documented payload (`jq` 1.7, filter unchanged): `{"latency_p95_ms_target":2000,"p95_ms":250.0,"met":true}` /
-  `{"total":9,"errors_5xx":0}` / one route object. `slo.met` is `p95_ms <= 2000` for the whole process, and
-  `true` while no request has been recorded (nothing has violated it yet).
+  Run today against production: `{"latency_p95_ms_target":2000,"p95_ms":100.0,"met":true}` /
+  `{"total":4308,"errors_5xx":0}` / the analytics routes, `/api/v1/health` and `/api/v1/metrics`.
+  `slo.met` is `p95_ms <= 2000` for the whole process, and `true` while no request has been recorded
+  (nothing has violated it yet).
+- **A `p95_ms` above `max_ms` is the convention, not a bug — do not file it.** No interpolation: the value is
+  the bucket upper bound for the quantile's rank, so on a low-count route it can sit above every sample that
+  route saw. Live sample today: `/api/weather/current` with 1 request reported `p95_ms: 2500.0` against
+  `max_ms: 1143.1`, and `/api/cities` reported `p95_ms: 250.0` against `max_ms: 187.0`. Read `max_ms` when
+  you want the true tail; treat `p50/p95/p99` as upper bounds.
 - **Fixed (blocker): bounded for any client input.** Method is normalized before keying — `KNOWN_METHODS`
   is `GET`/`HEAD`/`POST`/`PUT`/`PATCH`/`DELETE`/`OPTIONS` and `normalize_method()`
   (`backend/app/core/metrics.py:98`) keeps a token only on **exact** uppercase membership, so lowercase
@@ -666,10 +673,10 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
 - **Dispatch-only, never on push or a schedule**: the target is a free Render instance that sleeps after
   ~15 min idle, so a scheduled run would be a load test against production on a timer, and RED there means
   the API missed the budget, not that CI broke. `workflow_dispatch` inputs `base_url` / `vus` / `duration`,
-  `permissions: contents: read`, k6 pinned `v2.3.0` via `grafana/setup-k6-action@v1`,
-  `--summary-export=summary.json` uploaded as the `k6-summary` artifact `if: always()` (14 days). Verified
-  without running it: `yaml.safe_load` → triggers `['workflow_dispatch']`, `permissions {'contents': 'read'}`,
-  4 steps; `node --check` on the script passes.
+  `permissions: contents: read`, k6 pinned `2.3.0` via `grafana/setup-k6-action@v1` (no leading `v`, see
+  below), `--summary-export=summary.json` uploaded as the `k6-summary` artifact `if: always()` (14 days).
+  Statics: `yaml.safe_load` → triggers `['workflow_dispatch']`, `permissions {'contents': 'read'}`, 4 steps;
+  `node --check` on the script passes; `k6 inspect` resolves the four thresholds.
 - **Observed runs (production, 2026-10-31)** — no k6 installed system-wide, release tarballs unpacked into
   `/tmp`, all exit **0**, no threshold crossed:
 
@@ -689,14 +696,29 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
   kill. `VUS=0` → exit `104` (k6 rejects the run, so there is no "no sample, still green" hole either).
   `--summary-export` is written even when a gate crosses, and its per-threshold boolean reports **crossed**
   — `false` in `summary.json` means the run passed, not the reverse.
-- **The workflow has never been dispatched** — it is not on `main`. After it lands:
+- **Dispatched 2026-10-31 and green.** Run `41200504597` on `main` (`81c2682`), 3 VUs / 45 s, every job
+  step success including the `k6-summary` artifact upload: **4300 requests / 1075 iterations / 95.2 req/s**;
+  `analytics_ms` p95 **181.97 ms** (avg 112.99, med 97.43, **max 4.89 s** — the cold hit); `cold_start_ms`
+  **4.89 s** with `cold_start_ok` **1/1**; `health_failed` 0/1075; `http_req_failed` 0/4300; checks
+  4300/4300; `summary.json` attached as `k6-summary`. Read a run with (both run here):
 
   ```bash
-  gh workflow run loadtest.yml --ref main -f vus=3 -f duration=45s
   gh run list --workflow=loadtest.yml --limit 1
-  gh run download <run-id> -n k6-summary && head -40 summary.json
+  gh run view 41200504597 --log | grep -E 'analytics_ms\.|cold_start_ms|cold_start_ok|health_failed|http_req_failed|http_reqs'
   ```
 
+- **The first dispatch failed for a CI reason — keep the k6 version without a leading `v`.** Run
+  `41200392533` (`15cf013`) died in `grafana/setup-k6-action@v1` with `Unexpected HTTP response: 404`: the
+  action prefixes the release tag itself, so `k6-version: v2.3.0` asks for
+  `…/releases/download/vv2.3.0/k6-vv2.3.0-linux-amd64.tar.gz`. Fixed in `81c2682` to `k6-version: 2.3.0`,
+  with that reason in a comment in `.github/workflows/loadtest.yml`.
+- **CI on `main` had been red since the Batch 6b watchdog landed, for a test-only reason.**
+  `tests/unit/test_watchdog.py::test_missing_repo_exits_1` passed locally only because no `GITHUB_*`
+  variable was set there; on Actions `GITHUB_REPOSITORY` is ambient, so `run()` resolved a repo instead of
+  exiting `1`. Fixed in `15cf013`: an autouse fixture (`_hermetic_env`, over `ENV_DERIVED_DEFAULTS`) clears
+  `GITHUB_REPOSITORY`/`GITHUB_TOKEN` for every watchdog test, plus a regression test pinning both the cleared
+  and the Actions-shaped environment — the suite is 94 tests. CI run `41200090999` is green end to end,
+  including **Deploy (Render)**.
 - **Fixed (should-fix): the cold probe is now a gate.** `cold_start_ok: ['rate>0']` in
   `scripts/load/cold-burst.js`; one sample per run, so `0/1` fails the run where the three rate thresholds
   and the p95 could not see it. The `loadtest.yml` RED-condition comment names it. It is **not** an
@@ -704,11 +726,16 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
 
 **What remains unmeasured**
 
-- **A real Render boot (30–60 s) is still unseen.** Every production run so far hit an already-warm
-  instance (`cold_start_ms` 4445.07 / 237.73 / 4340 ms). The 60 s timeout branch itself is now exercised
-  (stalled TCP listener → all four probes `1m0s`, exit 99), so the mechanism is proven; what is unproven is
-  how long an actual sleeping Render instance takes to answer, and by extension whether 60 s is the right
-  timeout. That stays unproven until a dispatch lands on a sleeping instance.
+- **A real Render boot (30–60 s) is still unseen.** Every run so far hit an already-warm instance —
+  `cold_start_ms` 4445.07 / 237.73 / 4340 / 4890 ms — including the dispatched one, which started a few
+  minutes after the deploy finished. The 60 s timeout branch itself is exercised (stalled TCP listener →
+  all four probes `1m0s`, exit 99), so the mechanism is proven; what is unproven is how long a genuinely
+  sleeping Render instance takes to answer, and by extension whether 60 s is the right timeout. To measure
+  it, dispatch after the instance has idled ~15 min — and note the 4.89 s cold hit above already sits inside
+  the `analytics_ms` p95 as designed.
+- **One dispatch is a sample, not a trend.** A single 45 s run at 3 VUs says nothing about drift, and
+  nothing runs this on a cadence (deliberately: see *dispatch-only*). Compare runs by re-dispatching, not by
+  reading a time series.
 - **No SLO exists, only a snapshot.** `/metrics` reports `p95_ms` against a literal 2000 ms target, but an SLO
   needs an agreed target and a reporting habit, and it has neither: the counters are per process and reset
   when the free instance sleeps, nothing reads them on a schedule, and no window is defined. Needs a durable
@@ -727,9 +754,10 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
 
 No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups* —
 read that list, not this paragraph. Two of them moved in Batch 6c: the station page now consumes `/series`
-(`/summary`, `/range` and `/api/map/stations` are untouched), and the k6 cold-burst script exists but has
-never been dispatched. The read-API SLO still does not exist: `/metrics` gives a per-instance snapshot, not
-the agreed target + reporting habit an SLO needs. The Resumen freshness line is guarded by the `max()`
+(`/summary`, `/range` and `/api/map/stations` are untouched), and the k6 cold-burst workflow has now been
+dispatched once and is green — what is left there is a cold-instance measurement, not a harness. The read-API
+SLO still does not exist: `/metrics` gives a per-instance snapshot, not the agreed target + reporting habit
+an SLO needs. The Resumen freshness line is guarded by the `max()`
 invariant above; it understates only for a client clock behind true time. Browser verification still needs
 the desktop app session.
 
