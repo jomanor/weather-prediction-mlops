@@ -29,7 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: grafana/setup-k6-action@v1
-        with: {k6-version: v2.3.0}
+        # No leading `v`: the action already prefixes the release tag with one
+        # (`v2.3.0` as input becomes vv2.3.0 and 404s).
+        with: {k6-version: 2.3.0}
       - name: k6 run
         env:
           BASE_URL: ${{ inputs.base_url }}
