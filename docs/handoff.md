@@ -541,15 +541,197 @@ paused (2026-10-31 entry), so neither half is live.
   900 s worst-case model counts 4 GitHub calls where `GitHubClient.comments()` can issue 5 (needs a
   hanging GitHub plus >100 comments).
 
+## 2026-10-31 — Batch 6c: read-API metrics, /series on the station page, k6 cold burst
+
+All three halves are in the working tree and **not on `main`**. New files: `backend/app/core/metrics.py`,
+`backend/app/routers/metrics.py`, `backend/tests/test_metrics.py`, `scripts/load/cold-burst.js`,
+`.github/workflows/loadtest.yml`, `frontend/src/features/station/StationPageRequests.test.tsx`. Nothing is
+live: `GET /api/v1/metrics` answers **404 on production** (checked 2026-10-31), the frontend change is
+uncommitted with auto-publish paused (2026-10-31 entry), and the load workflow does not exist until it
+lands on `main`. **Review verdict: CLOSED** — the first pass found two defects (unbounded method cardinality
+in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-measured, see *fixed* below.
+
+**`GET /metrics` — contract (`backend/app/core/metrics.py`, `backend/app/routers/metrics.py`)**
+
+- Public, unauthenticated, JSON, `Cache-Control: no-store` (no `ETag`, no `X-Data-Age-Seconds`: a replayed
+  verdict is worse than none). No new dependency, no exporter, no scraper, no collection, no background
+  task; the counters live in `app.state.metrics`, one instance per app. Mounted on the aggregate router in
+  `backend/app/main.py`, so `/api/v1/metrics` and the deprecated `/api/metrics` both answer. Full field
+  reference in `docs/api-contract.md` ("Metrics"); this section records the limits and what they mean.
+- Shape: `started_at`, `uptime_seconds`, `requests{total, by_status_class, errors_5xx, cache_hits,
+  cache_hit_rate}`, `routes[{method, route, count, error_count, cache_hit_rate, p50_ms, p95_ms, p99_ms,
+  max_ms}]` sorted count-desc, `slo{latency_p95_ms_target, p95_ms, met}`. `error_count`/`errors_5xx` are
+  **5xx only** — a 4xx is a client error, not an availability failure.
+- **Bounded buckets, not samples.** Latency is counted into 12 counters per route: 11 finite edges
+  (5/10/25/50/100/250/500/1000/2500/5000/10000 ms) plus `+Inf`, so memory is O(routes × 12) and cannot grow
+  with traffic. A list of durations would grow without bound on the 512 MB instance.
+- **Percentile resolution is the bucket edge, no interpolation.** A reported `p95_ms` is the upper bound of
+  the first bucket whose cumulative count covers the rank: 30 ms reports 50, 120 ms reports 250, and a rank
+  in `+Inf` reports that route's `max_ms`. The estimate is never below the true value, which is what an SLO
+  verdict wants; it is not a number to quote as "the p95 was 121 ms".
+- **Route templates only.** The key is `(normalized method, route template)` — `/api/v1/weather/history/{city}`, never
+  the served path — so no city name, query string, request id or client address reaches the payload. The
+  mount prefix is resolved from the served path, not from the route object: FastAPI 0.138.1 shares one
+  `APIRoute` across both mounts, so `scope["route"].path` is *unprefixed*. Consequence: `/api/v1/cities`
+  and `/api/cities` are separate entries. A 404 raised before routing (and a CORS preflight) is
+  `<unmatched>`; a routed failure keeps its template.
+- **Per process, resets on restart — and when the free instance sleeps.** These numbers describe the
+  current instance's life, never a 28-day window; do not report them as one. A durable window needs an
+  exporter or a store (deliberately out of scope). `/metrics` is counted like every other route, so it
+  appears from the next call on.
+- **How to read it** (no scraper; it is a `curl | jq` surface). `/metrics` is not on production yet, so run
+  it against a local instance on `weather_db`; the filter is the part that matters:
+
+  ```bash
+  curl -s http://localhost:8123/api/v1/metrics | jq -c '.slo, (.requests | {total, errors_5xx}), (.routes[:5] | map({route, p95_ms, max_ms}))'
+  ```
+
+  Executed against the documented payload (`jq` 1.7, filter unchanged): `{"latency_p95_ms_target":2000,"p95_ms":250.0,"met":true}` /
+  `{"total":9,"errors_5xx":0}` / one route object. `slo.met` is `p95_ms <= 2000` for the whole process, and
+  `true` while no request has been recorded (nothing has violated it yet).
+- **Fixed (blocker): bounded for any client input.** Method is normalized before keying — `KNOWN_METHODS`
+  is `GET`/`HEAD`/`POST`/`PUT`/`PATCH`/`DELETE`/`OPTIONS` and `normalize_method()`
+  (`backend/app/core/metrics.py:98`) keeps a token only on **exact** uppercase membership, so lowercase
+  `get`, `TRACE`, a crafted `M4711` and the empty token all report `<other>` and no client text can reach
+  the payload. The key is `(normalize_method(method), route)`; `MAX_ROUTES = 256` and the cap now covers
+  **every** row including `<unmatched>` and `<other>`, with one slot always kept free for the single sink
+  row `SINK_KEY = ("<other>", "<other>")`: at most 255 real rows + 1 sink, whatever is sent. `MAX_ROUTES`
+  moved 64 → 256 because the cap now counts method×route combinations (the app declares ~54 mount+path
+  combinations); `test_default_cap_leaves_room_for_every_documented_route` trips if real traffic ever has
+  to compete for slots. **Do not go back to a per-path cap with a raw method key** — that is exactly the
+  hole this closed.
+- **Fixed, measured** (real `create_app()` over ASGI, before → after): 20 000 crafted methods at
+  `/api/v1/nope` → **3 entries / 684 B** (was 20 002 entries / 2 809 439 B, +9.5 MB RSS); the RSS delta after
+  the fix (+980 kB) equals the control of 20 000 identical `GET`s (+992 kB), i.e. per-request churn, not
+  table growth; crafted tokens present **0/3**. Same probe on `/api/v1/health` → 3 entries / 687 B.
+  Exhaustive pressure (8 method labels × 500 templates = 4 000 candidates) → **256 entries, one sink row,
+  `_admitted = 255`**; +10 000 repeats → still 256. `max_routes=2` with reserved labels → 2; `max_routes=0`
+  → 1. Real uvicorn on `weather_db`: 500 crafted methods + 2 real `GET`s → 4 entries / 845 B, with
+  `("<other>", "<unmatched>") = 500`. Re-checked here with the recorder alone: 20 000 crafted methods → 1
+  entry; 700 real routes + 8 method labels × 500 templates → 256 entries, the sink row
+  `("<other>", "<other>")` absorbing 4 445 of them.
+
+**Station page — one request instead of two**
+
+- `frontend/src/features/station/queries.ts`: `useStationSeries(city, hours)` calls
+  `/weather/series?cities=<city>&hours=<hours>&fields=<STATION_SERIES_FIELDS>` and replaces both
+  `useCurrentWeather` and `useHistory` (`queryKeys.station`/`queryKeys.history` collapse into
+  `queryKeys.series`). `StationPage.tsx` renders one payload twice: hero = `points.at(-1)`, chart = the
+  ordered points, so the two cannot disagree about the newest observation. Polling stays at 5 min (the
+  faster of the two removed queries).
+- `STATION_SERIES_FIELDS` is exactly the 10 columns the surface reads (hero: `temperature`,
+  `apparent_temperature`, `humidity`, `pressure`, `wind_speed`, `wind_direction`, `precipitation`,
+  `cloud_cover`, `weather_code`, `is_day`; the chart adds nothing). That union *is* the whole
+  `WEATHER_FIELDS` contract today, so the projection saves 0 bytes — it is pinned so an extra column cannot
+  start arriving in a payload nobody reads. `step_hours` is left at the backend default (1 h, no
+  downsampling), which is what keeps point parity with `/history`.
+- **Measured point parity** (live API, 15 cities × 24 h and × 48 h, plus Madrid 168 h): `series.count ==
+  history.count` and `points.at(-1) == /current.observed_at` in every case, mismatches = none. Madrid 24 h:
+  27 points both, newest `2026-10-31T08:15:00Z` in all three endpoints.
+- **Bytes**: Madrid 24 h `282 + 7915 = 8197` → **7980** (−217 B, 27 pts); 48 h `282 + 14924 = 15206` →
+  **14989** (51 pts); 168 h `282 + 55668 = 55950` → **55733** (190 pts).
+- **Requests**: 2 observation calls (`/weather/current/{city}` + `/weather/history/{city}?hours=&limit=500`)
+  → **1**. `StationPageRequests.test.tsx` pins the recorded paths as exactly `['/cities',
+  /^\/weather\/series\?/, /^\/predictions\//]` and asserts `/weather/current` and `/weather/history` are
+  never requested, including on the 404/failure path (no silent fallback).
+- Verified live today (`curl`, 2026-10-31): the exact `fields=` list → `200`, 7980 B, 27 points, all 10 keys
+  present; `fields=temperature,bogus_field` → `422 {"code":"validation_error","message":"Unknown
+  field(s): bogus_field"}`:
+
+  ```bash
+  curl -s "https://weather-prediction-mlops.onrender.com/api/v1/weather/series?cities=Madrid&hours=24&fields=temperature,apparent_temperature,humidity,pressure,wind_speed,wind_direction,precipitation,cloud_cover,weather_code,is_day" | jq -c '.cities[0] | {count, latest_timestamp, points: (.points|length)}'
+  # {"count":27,"latest_timestamp":"2026-10-31T08:15:00Z","points":27}
+  ```
+- **Behaviour change, inherent to one request**: `/series` answers 200 with an empty city (no per-city 404),
+  so a station with no row inside the selected window renders the new "Sin observaciones recientes" empty
+  state instead of `/current`'s out-of-window hero. Not reachable on live data (all 15 stations have rows
+  < 24 h old). `historyResponseSchema` stays in `frontend/src/api/schemas.ts` as the still-live `/history`
+  contract; `useStats` is still an unused export (pre-existing).
+- Deliberately skipped: `/summary` (temperature-only sparkline, the hero would still need a second request)
+  and `/range` (per-city keyset paging = more round trips for one city). `X-Data-Age-Seconds` untouched —
+  `/series` does not set it and the station surface never read it.
+
+**k6 cold burst — `scripts/load/cold-burst.js` + `.github/workflows/loadtest.yml`**
+
+- Per iteration one `http.batch` of the three cached analytics views the dashboard opens with plus
+  `/api/v1/health`: `analytics/daily?city=<CITY>&days=<DAYS>` (`city` is required), `analytics/diurnal`,
+  `analytics/correlation`, `health`. Defaults 3 VUs / 45 s `constant-vus`, `gracefulStop: 120s`, 60 s
+  per-request timeout, **no retries** (a cold failure must be recorded, not papered over), bodies discarded.
+  Env overrides `BASE_URL`, `VUS`, `DURATION`, `CITY`, `DAYS`.
+- Thresholds: `analytics_ms: p(95)<2000`, `health_failed: rate<0.01`, `http_req_failed: rate<0.05`,
+  **`cold_start_ok: rate>0`**. The cold samples are **not** exempt from `analytics_ms` — the budget is the
+  budget; `cold_start_ms` (slowest of VU 1 / iter 0's four responses) stays diagnostic, while `cold_start_ok`
+  (all four probe responses 200) is a gate, because four 60 s timeouts on a sleeping instance are ~4 requests
+  in ~2400 (~0.2 %) and stay silent inside all three rate/latency budgets.
+- **Dispatch-only, never on push or a schedule**: the target is a free Render instance that sleeps after
+  ~15 min idle, so a scheduled run would be a load test against production on a timer, and RED there means
+  the API missed the budget, not that CI broke. `workflow_dispatch` inputs `base_url` / `vus` / `duration`,
+  `permissions: contents: read`, k6 pinned `v2.3.0` via `grafana/setup-k6-action@v1`,
+  `--summary-export=summary.json` uploaded as the `k6-summary` artifact `if: always()` (14 days). Verified
+  without running it: `yaml.safe_load` → triggers `['workflow_dispatch']`, `permissions {'contents': 'read'}`,
+  4 steps; `node --check` on the script passes.
+- **Observed runs (production, 2026-10-31)** — no k6 installed system-wide, release tarballs unpacked into
+  `/tmp`, all exit **0**, no threshold crossed:
+
+  | k6 | requests / iters | req/s | `analytics_ms` p95 (max) | `cold_start_ms` | `cold_start_ok` | `health_failed` | `http_req_failed` |
+  |---|---|---|---|---|---|---|---|
+  | v0.54.0 (pre-gate) | 2352 / 588 | 52.2 | 222.19 ms (4450.10) | 4445.07 ms | 1/1 | 0/588 | 0/2352 |
+  | v2.3.0 (pre-gate) | 2552 / 638 | 56.5 | 225.41 ms (577.94) | 237.73 ms | 1/1 | 0/638 | 0/2552 |
+  | v2.3.0 (with the gate) | 2360 / 590 | 51.98 | 229.52 ms (4340) | 4340 ms | 1/1 | 0/590 | 0/2360 |
+
+- Gates proven live, each on a real run (exit **99**): `analytics_ms` via a tuned `p(95)<1` copy;
+  `cold_start_ok` via the repo script against a stalled TCP listener (`VUS=1`, `DURATION=1s`) → all four
+  probes `1m0s`, `cold_start_ok 0/1`, and the cold samples still inside `analytics_ms` (p95 `1m0s`) and
+  `http_req_failed` (4/4); and against `BASE_URL=http://127.0.0.1:9 VUS=1 DURATION=2s` → exit **99**,
+  `thresholds on metrics 'cold_start_ok, health_failed, http_req_failed' have been crossed`. Isolation
+  checked on `/tmp` copies of the script: only `cold_start_ok` left → exit **99**; gate removed → exit
+  **0** while `cold_start_ok` still read `0.00% 0 out of 1` — which is the silent green the gate exists to
+  kill. `VUS=0` → exit `104` (k6 rejects the run, so there is no "no sample, still green" hole either).
+  `--summary-export` is written even when a gate crosses, and its per-threshold boolean reports **crossed**
+  — `false` in `summary.json` means the run passed, not the reverse.
+- **The workflow has never been dispatched** — it is not on `main`. After it lands:
+
+  ```bash
+  gh workflow run loadtest.yml --ref main -f vus=3 -f duration=45s
+  gh run list --workflow=loadtest.yml --limit 1
+  gh run download <run-id> -n k6-summary && head -40 summary.json
+  ```
+
+- **Fixed (should-fix): the cold probe is now a gate.** `cold_start_ok: ['rate>0']` in
+  `scripts/load/cold-burst.js`; one sample per run, so `0/1` fails the run where the three rate thresholds
+  and the p95 could not see it. The `loadtest.yml` RED-condition comment names it. It is **not** an
+  exemption: the cold samples still count in `analytics_ms` and `http_req_failed`.
+
+**What remains unmeasured**
+
+- **A real Render boot (30–60 s) is still unseen.** Every production run so far hit an already-warm
+  instance (`cold_start_ms` 4445.07 / 237.73 / 4340 ms). The 60 s timeout branch itself is now exercised
+  (stalled TCP listener → all four probes `1m0s`, exit 99), so the mechanism is proven; what is unproven is
+  how long an actual sleeping Render instance takes to answer, and by extension whether 60 s is the right
+  timeout. That stays unproven until a dispatch lands on a sleeping instance.
+- **No SLO exists, only a snapshot.** `/metrics` reports `p95_ms` against a literal 2000 ms target, but an SLO
+  needs an agreed target and a reporting habit, and it has neither: the counters are per process and reset
+  when the free instance sleeps, nothing reads them on a schedule, and no window is defined. Needs a durable
+  window (exporter or an agreed sampling rule over `/metrics`), a signed-off target, and an owner/cadence.
+- **The frontend was not seen in a browser.** No harness in this repo: the chart, zoom/pan and the 5-min
+  polling were not visually confirmed. `HistoryChart` is unchanged and receives the same point shape/order
+  (its own tests cover ordering and zoom).
+- **`/series` has no `limit`**: a multi-city 168 h request is unbounded (parity with `/history`, not a
+  regression) — that is the future truncation axis and the backend owner's call.
+- **Frontend gates** (passes say nothing about correctness): 49 files / 370 tests (was 351), typecheck clean,
+  lint 0 errors (one pre-existing `vite.config.ts` warning), build ok, `StationPage-*.js` 20.57 kB / 7.26 kB
+  gzip. Backend: `312 passed`, `ruff`/`black --check` clean (67 files unchanged); `backend/tests/test_metrics.py`
+  covers method normalisation, the sink row, the cap and the hostile-input probes.
+
 ## Next: Batch 6
 
-No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups*:
-consume `/series`/`/summary`/`/range` (the map still reads `/api/map/stations`), k6 cold-burst, a read-API
-latency/availability SLO (the JSON access log now has the fields an OTel histogram would need), and a
-pageable production-drift signal (sustained `skill_score <= 0.0` or temperature-feature drift → GitHub
-issue, never a page — the Batch 6b watchdog surfaces skill **advisory-only**). The Resumen freshness line
-is guarded by the `max()` invariant above; it understates only for a client clock behind true time. Browser
-verification still needs the desktop app session.
+No scope frozen yet. The cheapest remaining items are in `docs/roadmap.md` under *Accepted follow-ups* —
+read that list, not this paragraph. Two of them moved in Batch 6c: the station page now consumes `/series`
+(`/summary`, `/range` and `/api/map/stations` are untouched), and the k6 cold-burst script exists but has
+never been dispatched. The read-API SLO still does not exist: `/metrics` gives a per-instance snapshot, not
+the agreed target + reporting habit an SLO needs. The Resumen freshness line is guarded by the `max()`
+invariant above; it understates only for a client clock behind true time. Browser verification still needs
+the desktop app session.
 
 **L1 (15-min ingest) is deferred, not cancelled.** Measured projection with 15-min ingest is ~637 MiB at a 180-day raw window (~890 MiB if features densify too), which breaks the 512 MB M0 cap. Three ways forward when it is picked up: shorten the raw window to ~90 d (free, ~350 MiB, halves the training window), upgrade the Atlas tier (2 GB, paid), or keep hourly ingest. Do not start L1 without re-measuring storage first.
 
