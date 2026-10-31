@@ -87,9 +87,6 @@ OTHER_METHOD = OTHER_ROUTE
 SINK_KEY = (OTHER_METHOD, OTHER_ROUTE)
 #: Hard bound on table entries — every ``(method, route template)`` combination,
 #: reserved labels included. The app declares ~54 mount+path combinations and a
-#: real client uses one method on most of them (plus ``POST /refresh``,
-#: ``POST/DELETE /cities`` and the odd preflight), so a healthy table is far
-#: below this; 256 leaves room for that and for a scanner's method sweep, and
 #: ``test_default_cap_leaves_room_for_every_documented_route`` trips if a route
 #: explosion ever makes real traffic compete for slots.
 MAX_ROUTES = 256

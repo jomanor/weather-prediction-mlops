@@ -207,37 +207,6 @@ through from the registry document (also nullable).
 }
 ```
 
-## Refresh (optional, rate-limited)
-
-### `POST /api/v1/refresh` (alias: `POST /api/refresh`)
-
-Server-side Open-Meteo fetch for one registered station. Writes one `raw_weather`
-document; never runs Spark, so features and predictions are not refreshed.
-
-```json
-{ "city": "Madrid" }
-```
-
-```json
-{
-  "city": "Madrid",
-  "source_timestamp": "2026-10-19T18:00:00Z",
-  "fetched_at": "2026-10-19T18:00:04Z",
-  "features_refreshed": false,
-  "predictions_refreshed": false
-}
-```
-
-- `404 city_not_found` when the name is not in the station registry.
-- `429 refresh_rate_limited` with `Retry-After` (seconds): one fetch per city
-  per 900 s, at most 6/minute and 48/day per process. Rejected requests do not
-  consume budget; attempts do.
-- `503 refresh_disabled` when `REFRESH_ENABLED` is unset or false — the endpoint is opt-in
-  because it is an unauthenticated write surface. Enabled caps are per process
-  lifetime (they reset when the free-tier instance sleeps).
-- `502 refresh_upstream_error` when Open-Meteo fails or returns no usable
-  observation.
-
 ## Metrics (process-local, public)
 
 ### `GET /api/v1/metrics` (alias: `GET /api/metrics`)

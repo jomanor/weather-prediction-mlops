@@ -75,7 +75,7 @@ class APIError(StarletteHTTPException):
 
     The status -> code map below covers the generic failures; routes whose
     contract names a more specific code (``city_not_found``,
-    ``refresh_rate_limited``, ...) raise this instead of a bare HTTPException.
+    ``city_writes_disabled``, ...) raise this instead of a bare HTTPException.
     """
 
     def __init__(

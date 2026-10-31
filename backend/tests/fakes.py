@@ -14,48 +14,6 @@ from app.schemas.weather import CurrentWeather
 from app.services.aemet import AemetForecast
 from app.services.geo import GeocodingError
 
-#: Fixed observation time for the default payload: 2026-09-23T12:00:00Z.
-OPEN_METEO_TIME = 1790164800
-
-
-def open_meteo_payload(
-    current_time: int = OPEN_METEO_TIME,
-    temperature: float = 22.0,
-) -> dict:
-    """A minimal but realistic Open-Meteo ``/forecast`` response (no city tag).
-
-    ``OpenMeteoService`` tags the payload with the city itself, so the fixture
-    must not: the success test asserts the stored document is the untouched
-    response plus exactly that tag.
-    """
-    return {
-        "latitude": 40.4168,
-        "longitude": -3.7038,
-        "generationtime_ms": 0.12,
-        "utc_offset_seconds": 7200,
-        "timezone": "Europe/Madrid",
-        "timezone_abbreviation": "CEST",
-        "elevation": 667.0,
-        "current_units": {
-            "time": "unixtime",
-            "temperature_2m": "°C",
-            "wind_speed_10m": "m/s",
-        },
-        "current": {
-            "time": current_time,
-            "temperature_2m": temperature,
-            "relative_humidity_2m": 60,
-            "apparent_temperature": 21.5,
-            "is_day": 1,
-            "wind_speed_10m": 5.0,
-            "wind_direction_10m": 200,
-            "weather_code": 2,
-            "cloud_cover": 30,
-            "surface_pressure": 1014.0,
-            "precipitation": 0.0,
-        },
-    }
-
 
 class FakeMongoCursor:
     """Async cursor double that honours ``sort()``, ``limit()`` and ``projection``.
@@ -287,12 +245,6 @@ class FakeWeatherRepository:
         self.last_step_hours = 1
         #: Last ``(days, now)`` the quality meter was asked for.
         self.last_quality_window: tuple[int, datetime] | None = None
-        #: Documents a refresh wrote, in order.
-        self.saved_raw: list[dict] = []
-
-    async def save_raw_observation(self, document: dict) -> None:
-        self.calls.append("save_raw_observation")
-        self.saved_raw.append(document)
 
     async def list_cities(self) -> list[str]:
         self.calls.append("list_cities")

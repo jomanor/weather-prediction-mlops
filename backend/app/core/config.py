@@ -57,17 +57,6 @@ class Settings(BaseSettings):
     #: one ingest/rebuild cycle plus jitter.
     prediction_stale_after_hours: float = Field(default=24.0, ge=0)
 
-    #: Optional ``POST /refresh``, off unless the operator sets
-    #: ``REFRESH_ENABLED=true``. The endpoint is unauthenticated and writes a
-    #: document to ``raw_weather`` (the largest collection on the free tier), so
-    #: exposing it is a deliberate choice. The limiter that caps those writes is
-    #: per process: its counters reset whenever the free-tier instance restarts
-    #: or sleeps, so it bounds a wake's writes, not a billing period's.
-    refresh_enabled: bool = False
-    refresh_city_cooldown_seconds: int = 900
-    refresh_max_per_minute: int = 6
-    refresh_max_per_day: int = 48
-
     @field_validator("city_writes_token", mode="before")
     @classmethod
     def _blank_token_is_unset(cls, value: object) -> object:

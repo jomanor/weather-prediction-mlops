@@ -44,8 +44,7 @@ CITIES_COLLECTION = "cities"
 MAX_WORKERS = 5
 
 #: Current-conditions variables: what the API maps for the UI plus the fields
-#: the Spark batch job reads. Mirrors the backend's ``services/openmeteo.py``
-#: list, which a test asserts.
+#: the Spark batch job reads.
 CURRENT_VARIABLES = [
     "temperature_2m",
     "relative_humidity_2m",

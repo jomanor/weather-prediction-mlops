@@ -587,11 +587,13 @@ async def test_cache_hit_rate_is_recorded_for_a_cached_route(client):
     assert body["requests"]["cache_hits"] == 1
 
 
-async def test_post_requests_are_their_own_route_entry(client):
-    response = await client.post("/api/v1/refresh", json={"city": "Madrid"})
-    assert response.status_code == 200
+async def test_non_get_requests_are_their_own_route_entry(client):
+    # The registry writes are authenticated, so this 401s — the point is that a
+    # DELETE is recorded under its own (method, route template) key.
+    response = await client.delete("/api/v1/cities/Madrid")
+    assert response.status_code == 401
 
     body = await _metrics_body(client)
 
-    assert _route(body, "POST", "/api/v1/refresh")["count"] == 1
-    assert body["requests"]["by_status_class"] == {"2xx": 1}
+    assert _route(body, "DELETE", "/api/v1/cities/{name}")["count"] == 1
+    assert body["requests"]["by_status_class"] == {"4xx": 1}

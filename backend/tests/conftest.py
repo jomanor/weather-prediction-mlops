@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from httpx import ASGITransport, AsyncClient, MockTransport, Response
+from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -17,7 +17,6 @@ from app.schemas.predictions import Prediction
 from app.schemas.weather import CurrentWeather
 from app.services.aemet import get_aemet_service
 from app.services.geo import get_geo_service
-from app.services.openmeteo import OpenMeteoService, get_openmeteo_service
 from tests.fakes import (
     FakeAemetService,
     FakeCityRepository,
@@ -25,7 +24,6 @@ from tests.fakes import (
     FakeModelRepository,
     FakePredictionRepository,
     FakeWeatherRepository,
-    open_meteo_payload,
 )
 
 #: Token the ``settings`` fixture enables the registry writes with. A write test
@@ -39,10 +37,7 @@ def settings() -> Settings:
         _env_file=None,
         mongo_uri="mongodb://localhost:27017",
         cors_origins="http://localhost:5173,http://example.com",
-        # Shipped default is off (unauthenticated write surface); tests that need
-        # the endpoint opt in here, and the default-off case builds its own app.
-        refresh_enabled=True,
-        # The registry writes are gated too: this app has them enabled, and the
+        # The registry writes are gated: this app has them enabled, and the
         # unset/default case builds its own app (see ``tests/test_cities.py``).
         city_writes_token=CITY_WRITES_TOKEN,
     )
@@ -240,13 +235,6 @@ def geo() -> FakeGeocodingService:
 
 
 @pytest.fixture
-def openmeteo() -> OpenMeteoService:
-    """Real service, offline: the MockTransport serves the canonical payload."""
-    transport = MockTransport(lambda _request: Response(200, json=open_meteo_payload()))
-    return OpenMeteoService(transport=transport)
-
-
-@pytest.fixture
 def app(
     settings,
     weather_repo,
@@ -255,7 +243,6 @@ def app(
     aemet,
     city_repo,
     geo,
-    openmeteo,
 ):
     application = create_app(settings)
     application.dependency_overrides[get_weather_repo] = lambda: weather_repo
@@ -264,7 +251,6 @@ def app(
     application.dependency_overrides[get_aemet_service] = lambda: aemet
     application.dependency_overrides[get_city_repo] = lambda: city_repo
     application.dependency_overrides[get_geo_service] = lambda: geo
-    application.dependency_overrides[get_openmeteo_service] = lambda: openmeteo
     return application
 
 
