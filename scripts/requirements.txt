@@ -1,0 +1,14 @@
+# Runtime dependencies of the scripts in this directory that CI and operators
+# run (ingest_weather.py, backfill_historical_data.py, pipeline_summary.py,
+# promote_model.py, prune_models.py, sync_to_atlas.py, sync_to_supabase.py,
+# watchdog.py -- the last one is stdlib-only and needs nothing here).
+# Not the backend (backend/requirements.txt) and not the Spark jobs
+# (spark/requirements.txt): those have their own files.
+# Installed by .github/workflows/ingest.yml, backfill.yml and ml-pipeline.yml.
+# gridfs/bson are imported too but ship inside pymongo.
+requests>=2.32
+pymongo>=4.6
+python-dotenv>=1.0
+# The backfill derives each row's local-hour offset with zoneinfo; without an
+# IANA database _zone_for() returns None and finding 6 regresses silently.
+tzdata>=2025.2

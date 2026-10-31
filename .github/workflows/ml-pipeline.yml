@@ -123,6 +123,7 @@ jobs:
           cache-dependency-path: |
             spark/requirements.txt
             spark/spark-scheduler/requirements.txt
+            scripts/requirements.txt
 
       - uses: actions/setup-java@v4
         with:
@@ -138,10 +139,11 @@ jobs:
           # installed: it is an optional, opt-in side channel in ml_training.py
           # and nothing in this job needs it.
           pip install pyspark==3.5.5
-          # scripts/ingest_weather.py (the step below) is an HTTP client; it is
-          # not a Spark dependency, so it is pinned here rather than in the
-          # image's requirements.
-          pip install requests
+          # scripts/ingest_weather.py (the step below) and the other workflow
+          # scripts are HTTP/Mongo clients, not Spark dependencies: their
+          # runtime deps live in scripts/requirements.txt, the same file
+          # ingest.yml and backfill.yml install.
+          pip install -r scripts/requirements.txt
 
       - name: Ingest current observations
         # Runs once, before the feature rebuild and before inference.
@@ -159,8 +161,15 @@ jobs:
         # the short-range charts (and rolling features) dense without new
         # infrastructure. Idempotent: rows are skipped by _id, so steady state
         # is one row per city-hour, not per run. ~1-2 min.
+        # Best-effort by design: this top-up is a density improvement, not a
+        # correctness gate, so a lagging archive/forecast API warns
+        # (--best-effort) and never blocks the feature rebuild or inference
+        # below; continue-on-error also absorbs a genuine write failure, which
+        # the step still reports in its log. The strict default (exit 1) is
+        # what backfill.yml's repair run uses.
         if: needs.resolve.outputs.features == '1'
-        run: python scripts/backfill_historical_data.py --days 2 --recent 2
+        continue-on-error: true
+        run: python scripts/backfill_historical_data.py --days 2 --recent 2 --best-effort
 
       - name: Feature engineering
         if: needs.resolve.outputs.features == '1'

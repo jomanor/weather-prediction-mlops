@@ -68,9 +68,7 @@ jobs:
           pip install \
             pytest pytest-cov \
             pyspark==3.5.5 \
-            pymongo \
-            requests \
-            python-dotenv \
+            -r scripts/requirements.txt \
             mlflow==2.19.0 \
             httpx \
             mongomock
@@ -153,9 +151,7 @@ jobs:
             pytest \
             pytest-asyncio \
             pyspark==3.5.5 \
-            pymongo \
-            requests \
-            python-dotenv \
+            -r scripts/requirements.txt \
             mongomock
       - name: Run integration tests
         run: pytest tests/integration/ -q

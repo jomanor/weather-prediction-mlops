@@ -786,3 +786,66 @@ Gate before done: `code-reviewer` on the diff, `qa-engineer` when tests change, 
 - Healthchecks.io checks for the ingest/inference/train crons (optional now: the repo-local `watchdog.yml` from Batch 6b covers ingest + features + inference staleness, so Healthchecks.io would only add an out-of-band liveness ping; the in-repo `::warning` is ephemeral).
 - Atlas project alerts (disk >80%, connections >80%, query targeting).
 - Browser verification needs this session open in the desktop app, otherwise the browser tools report `disconnected`.
+
+## 2026-10-31 — Batch A: the writers tell the truth (audit findings 1, 2, 6, 12, S4, S5)
+
+In the working tree, **not committed**: `scripts/backfill_historical_data.py`,
+`tests/unit/test_backfill.py`, `scripts/requirements.txt` (new), `backend/app/repositories/weather_repo.py`
+(one docstring), `.github/workflows/{ingest,backfill,ml-pipeline,ci}.yml`. No backend/runtime code path
+changed; `spark/` untouched. Reviewer verdict **CLOSED** after three passes (blocker + should-fix fixed,
+listed below); no database-engineer or sre gate applies (no index, TTL, schema or SLO change).
+
+- **F1 — a failed write is no longer a "skip".** `upsert_batch` treats *only* BulkWriteError entries with
+  code 11000 as duplicates (like `$setOnInsert` intend); any other code, a mixed batch, or a
+  `BulkWriteError` with no `writeErrors` raises `RuntimeError` chained from the original. `main` now splits
+  `api_failures` (fetch returned None, or a 200 whose response yields zero hourly docs, in both the archive
+  and the recent-fill loops) from `write_failures` (that RuntimeError, or inserted+skipped != len(docs)),
+  aborts on a write failure, always closes the client, always prints the summary, and exits **1** for any
+  write failure and — by default — for any API failure. "Backfill complete." is only printed on a clean
+  run, so a green `backfill.yml` run now means rows were actually written.
+- **F2 — the default range fits the tier.** Default is the last **90 days** (`DEFAULT_DAYS`, computed with
+  `today - timedelta(days=90)`, so the old `date(year-4, 2, 29)` leap-day crash is gone), `MAX_RANGE_DAYS`
+  = **180** refuses anything longer (the `raw_weather` TTL would delete it on arrival) with exit 1 *before*
+  any `MongoClient` is built, and `--chunk-days` is validated (`>= 1`).
+- **F6 — the local hour is DST-correct at the writer.** `build_documents` no longer stamps one response's
+  `utc_offset_seconds` on a multi-month chunk: it recomputes the offset **per document** from
+  `payload["timezone"]` (IANA) and that row's own timestamp via stdlib `zoneinfo`, with a per-name cache and
+  a never-raising fallback chain (payload offset, then `None`). `spark/spark-jobs/batch_processing.py` was
+  deliberately NOT changed: `_local_timestamp_col` already prefers the stored offset and falls back to its
+  longitude solar offset, so fixing the writer is the whole fix. `tzdata` is now declared in
+  `scripts/requirements.txt` — without an IANA database the fix would silently revert.
+- **F12 — behaviour tests, not source greps.** `tests/unit/test_backfill.py` went 20 → **68** tests: real
+  calls to `upsert_batch`/`upsert_documents` (duplicate vs real write error, mixed, empty `writeErrors`,
+  batching), the DST regression, `resolve_range`, the exit matrix, the per-city empty-response case, the
+  recent-fill write path (success + future-row filter + RuntimeError + mismatch), and the dry-run
+  Mongo-unreachable fallback. Source-text assertions (`"$setOnInsert" in source`) are gone. Suite is
+  TZ-independent (passes under `TZ=UTC` and `TZ=Pacific/Auckland`) and offline; QA mutations on five
+  boundaries each killed at least one test.
+- **S4** `already_exists` deleted; the module docstring's Idempotency/Defaults/Options sections rewritten to
+  match the code; `weather_repo.quality_report`'s "fixed 14-station registry" → `DEFAULT_CITIES` (15, incl.
+  Pasadena).
+- **S5** new `scripts/requirements.txt` (`requests`, `pymongo`, `python-dotenv`, `tzdata`) installed by
+  `ingest.yml`, `backfill.yml`, `ml-pipeline.yml` and both `ci.yml` jobs; no workflow hand-installs those
+  any more. Still compatible with `backend/requirements.txt` (pymongo==4.17.0) and `spark/requirements.txt`
+  in the same job.
+- **`--dry-run`** (added because the audit's gate asks for a 90-day dry run) validates the range, resolves
+  the station set best-effort (`serverSelectionTimeoutMS=750`, falls back to the bundled list when Mongo is
+  unreachable) and prints the plan, document and chunk counts — no Open-Meteo call, no write.
+- **`--best-effort` + `continue-on-error: true` on ml-pipeline's `--days 2 --recent 2` step.** This was the
+  reviewer's blocker: with the new strict exit, one archive hiccup would have skipped the feature rebuild,
+  training and inference (the step is a density top-up, not a correctness gate). Under `--best-effort` an
+  API failure becomes `::warning title=Backfill partial::` and exit 0; a write failure still exits 1 and now
+  also emits `::error title=Backfill write failure::`. The repair run in `backfill.yml` keeps the strict
+  default on purpose.
+- **Gates measured here:** backend `312 passed`; root `457 passed, 7 skipped` (`PYSPARK_PYTHON=$PWD/.venv/bin/python`);
+  frontend 370 tests, typecheck clean, lint 0 errors (one pre-existing `vite.config.ts` warning), build ok;
+  `ruff` + `black --check` clean over `backend scripts spark` (83 files); `yaml.safe_load` on the four
+  workflows; `--days 90 --dry-run` exit 0, `--days 200 --dry-run` exit 1, `--chunk-days 0` exit 2.
+- **Residuals (deliberate, do not "fix" blind):** (1) rows already in `raw_weather` keep their old
+  single-stamp offset until the 180-day TTL removes them — `$setOnInsert` never overwrites, so the fix only
+  applies to newly backfilled ranges; repairing the stored field would be a data write needing the owner's
+  go-ahead. (2) A 200 whose `hourly` series is truncated but non-empty still counts as success (only a
+  zero-row response is a failure). (3) The `nothing was written` guard is defence-in-depth: with an honest
+  writer, a real failure is already counted by the two counters above. (4) **No retrain was run**: feature
+  *semantics* did not change, so hard rule 1 is not triggered yet — it becomes mandatory after the first
+  `job=features` that ingests rows from a DST-spanning backfill (the audit's F6 note).

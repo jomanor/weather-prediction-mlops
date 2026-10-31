@@ -224,15 +224,6 @@ class WeatherRepository:
     def _raw(self):
         return self._db["raw_weather"]
 
-    async def save_raw_observation(self, document: dict[str, Any]) -> None:
-        """Upsert one ``raw_weather`` document on its ``_id``.
-
-        ``_id`` is ``{city}_{observation epoch}`` (see
-        ``app.services.openmeteo.build_document``), so a re-fetch of the same
-        observation replaces the row instead of appending a duplicate.
-        """
-        await self._raw.replace_one({"_id": document["_id"]}, document, upsert=True)
-
     @property
     def _features(self):
         return self._db["weather_features"]
@@ -351,7 +342,8 @@ class WeatherRepository:
         computed in Python over a bounded window (≤ ``30 * 24`` hourly rows per
         city).
 
-        The city set is the fixed 14-station registry in ``app.core.cities``,
+        The city set is the fixed ``DEFAULT_CITIES`` registry in
+        ``app.core.cities`` (15 stations, incl. Pasadena),
         not ``distinct("city")``: a city whose feature rows vanished entirely
         (ingestion/feature outage) must still be reported ``bad`` instead of
         silently disappearing from the meter. Queries run concurrently with

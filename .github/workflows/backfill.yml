@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: Days of hourly history to backfill from the archive API
+        description: Days of hourly history to backfill from the archive API (max 180, the raw_weather TTL)
         default: "90"
       recent:
         description: Most-recent days to fill from the forecast API
@@ -44,7 +44,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pymongo
+          pip install -r scripts/requirements.txt
 
       - name: Backfill hourly observations
         run: |

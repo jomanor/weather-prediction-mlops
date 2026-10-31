@@ -10,6 +10,7 @@ Usage
     python scripts/backfill_historical_data.py [--start YYYY-MM-DD] [--end YYYY-MM-DD]
     python scripts/backfill_historical_data.py --days 90 --recent 5
     python scripts/backfill_historical_data.py --days 35 --recent 5 --city Pasadena
+    python scripts/backfill_historical_data.py --days 90 --dry-run
 
 Options
 -------
@@ -25,10 +26,21 @@ Options
     --recent : additionally fill the last N days from the forecast API. The
                archive (ERA5) lags real time by a few days, so without this the
                most recent days — the ones the UI charts — stay missing.
+    --dry-run: validate the requested range, resolve the station set and print
+               the plan (plus the document/chunk counts), then exit without
+               calling Open-Meteo and without writing to MongoDB. Works with
+               MongoDB unreachable: the bundled city list is used instead.
+    --best-effort: an API failure for one city/chunk (the archive and the
+               forecast API are documented to lag and to hiccup) becomes a
+               ``::warning`` instead of a non-zero exit. Write failures and
+               accounting mismatches still fail. Used by the ml-pipeline
+               top-up step, where a missing hour must not block the feature
+               rebuild or inference.
 
 Defaults
 --------
-    --start : 4 years before today
+    --start : last 90 days (``DEFAULT_DAYS``, ``today - 90 days``); the range is
+              capped at ``MAX_RANGE_DAYS`` = 180 days, the ``raw_weather`` TTL.
     --end   : yesterday (the Historical API does not serve today)
 
 Cities
@@ -38,9 +50,14 @@ Cities
 
 Idempotency
 -----------
-    Before inserting a date-city pair the script checks whether a document
-    with that _id already exists in raw_weather and skips it.  Running the
-    script multiple times is safe.
+    Every hourly document is written with an ``$setOnInsert`` upsert keyed on
+    ``_id`` (``"{city}_{unix_ts}"``), so an existing document is never
+    overwritten and a re-run simply skips it: duplicate keys (code 11000) are
+    counted as ``skipped`` and do not abort the run. Any *other* bulk write
+    error raises and aborts the run, so a genuine write failure can never be
+    mistaken for "already existed". ``main`` exits non-zero when a chunk fails,
+    when the per-chunk accounting does not add up, or when nothing at all was
+    written — unless ``--best-effort`` explicitly downgrades an API failure.
 
 Environment
 -----------
@@ -48,19 +65,31 @@ Environment
 """
 
 import argparse
+import math
 import os
 import sys
 import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from pymongo import MongoClient, UpdateOne
-from pymongo.errors import BulkWriteError
+from pymongo.errors import BulkWriteError, PyMongoError
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+#: ``raw_weather`` is TTL-capped at 180 days, so backfilling more would be
+#: immediately expired data.
+MAX_RANGE_DAYS = 180
+#: Default backfill window: the last 90 days.
+DEFAULT_DAYS = 90
+#: MongoDB duplicate-key error code — the only code treated as "already there".
+DUPLICATE_KEY_ERROR = 11000
+#: Short timeout so ``--dry-run`` never hangs on an unreachable MongoDB.
+DRY_RUN_TIMEOUT_MS = 750
 
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 #: Serves the most recent days, which the archive API does not cover yet.
@@ -253,8 +282,20 @@ def load_cities(db) -> dict[str, tuple[float, float]]:
     return cities
 
 
+def _positive_int(value: str) -> int:
+    """argparse ``type`` for counters that would otherwise divide by zero."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {number}")
+    return number
+
+
 def upsert_documents(collection, docs: list[dict]) -> tuple[int, int]:
-    """Upsert *docs* in fixed-size batches. Returns (inserted, skipped)."""
+    """Upsert *docs* in fixed-size batches. Returns (inserted, skipped).
+
+    Propagates :class:`RuntimeError` raised by :func:`upsert_batch` for any
+    non-duplicate write error: a broken write must abort the run.
+    """
     inserted = 0
     skipped = 0
     for i in range(0, len(docs), BATCH_UPSERT_SIZE):
@@ -264,9 +305,44 @@ def upsert_documents(collection, docs: list[dict]) -> tuple[int, int]:
     return inserted, skipped
 
 
-def already_exists(collection, city: str, unix_ts: int) -> bool:
-    """Check whether a specific city+timestamp document is already in MongoDB."""
-    return collection.count_documents({"_id": f"{city}_{unix_ts}"}, limit=1) > 0
+#: Cache of resolved IANA zones (and of the names that do *not* resolve), so a
+#: multi-year chunk does not build tens of thousands of ``ZoneInfo`` objects.
+_ZONE_CACHE: dict[str, ZoneInfo | None] = {}
+
+
+def _zone_for(tz_name: object) -> ZoneInfo | None:
+    """Resolve an IANA timezone name to a cached :class:`ZoneInfo`, else None."""
+    if not isinstance(tz_name, str) or not tz_name:
+        return None
+    if tz_name in _ZONE_CACHE:
+        return _ZONE_CACHE[tz_name]
+    try:
+        zone: ZoneInfo | None = ZoneInfo(tz_name)
+    except Exception:  # unknown name / missing tzdata / bogus value — never raise
+        zone = None
+    _ZONE_CACHE[tz_name] = zone
+    return zone
+
+
+def _utc_offset_seconds(unix_ts: int, tz_name: object, fallback: object) -> object:
+    """UTC offset (seconds) of *tz_name* at the instant *unix_ts*.
+
+    DST-aware and computed per document, because one multi-month Open-Meteo
+    response spans both sides of a DST change and its single top-level
+    ``utc_offset_seconds`` is only valid for the hour it was sampled at.
+    Falls back to *fallback* (the payload's own offset, possibly ``None``) when
+    the timezone is unknown/missing or tzdata is unavailable. Never raises.
+    """
+    zone = _zone_for(tz_name)
+    if zone is None:
+        return fallback
+    try:
+        offset = datetime.fromtimestamp(int(unix_ts), tz=zone).utcoffset()
+    except (OverflowError, OSError, ValueError):
+        return fallback
+    if offset is None:
+        return fallback
+    return int(offset.total_seconds())
 
 
 def build_documents(city: str, payload: dict) -> list[dict]:
@@ -274,12 +350,19 @@ def build_documents(city: str, payload: dict) -> list[dict]:
     Expand an Open-Meteo historical response into one document per hour.
     Each document mirrors the same shape used by the live ingest script so that
     batch_processing.py can read from a single collection.
+
+    ``payload.utc_offset_seconds`` is recomputed *per document* from the
+    payload's IANA ``timezone`` and that document's own UTC timestamp, so hours
+    on either side of a DST change carry the offset that was actually in force.
     """
     hourly = payload.get("hourly", {})
     times = hourly.get("time", [])
 
     if not times:
         return []
+
+    tz_name = payload.get("timezone")
+    fallback_offset = payload.get("utc_offset_seconds")
 
     docs = []
     for i, unix_ts in enumerate(times):
@@ -304,7 +387,7 @@ def build_documents(city: str, payload: dict) -> list[dict]:
                 "city": city,
                 "latitude": payload.get("latitude"),
                 "longitude": payload.get("longitude"),
-                "utc_offset_seconds": payload.get("utc_offset_seconds"),
+                "utc_offset_seconds": _utc_offset_seconds(unix_ts, tz_name, fallback_offset),
                 "timezone": payload.get("timezone"),
                 # Store the per-hour snapshot under "current" so that
                 # downstream code can treat it the same way as live data.
@@ -323,24 +406,39 @@ def build_documents(city: str, payload: dict) -> list[dict]:
 
 
 def upsert_batch(collection, docs: list[dict]) -> tuple[int, int]:
-    """Bulk-upsert a list of documents. Returns (inserted, skipped)."""
+    """Bulk-upsert *docs* by ``_id``. Returns (inserted, skipped).
+
+    ``$setOnInsert`` keyed on ``_id`` means re-running never duplicates and
+    never overwrites. Duplicate-key errors (11000) are the only write errors
+    treated as "already existed"; any other error raises ``RuntimeError`` so a
+    real write failure cannot be silently reported as a skip.
+    """
     if not docs:
         return 0, 0
 
     ops = [UpdateOne({"_id": d["_id"]}, {"$setOnInsert": d}, upsert=True) for d in docs]
 
-    inserted = 0
-    skipped = 0
     try:
         result = collection.bulk_write(ops, ordered=False)
-        inserted = result.upserted_count
-        skipped = len(docs) - inserted
     except BulkWriteError as bwe:
-        # Duplicate key errors are expected and safe to ignore
-        inserted = bwe.details.get("nUpserted", 0)
-        skipped = len(docs) - inserted
+        details = bwe.details or {}
+        write_errors = details.get("writeErrors") or []
+        codes = [err.get("code") for err in write_errors]
+        if write_errors and all(code == DUPLICATE_KEY_ERROR for code in codes):
+            # Every rejected document was already present: a plain skip.
+            inserted = details.get("nUpserted", 0)
+            return inserted, len(docs) - inserted
 
-    return inserted, skipped
+        unique_codes = sorted({code for code in codes if code is not None})
+        first_message = write_errors[0].get("errmsg") if write_errors else str(bwe)
+        raise RuntimeError(
+            f"bulk upsert failed with non-duplicate write error(s) for {len(docs)} "
+            f"document(s): codes={unique_codes or 'unknown'}; "
+            f"first error: {first_message}"
+        ) from bwe
+
+    inserted = result.upserted_count
+    return inserted, len(docs) - inserted
 
 
 # ---------------------------------------------------------------------------
@@ -350,14 +448,14 @@ def upsert_batch(collection, docs: list[dict]) -> tuple[int, int]:
 
 def parse_args():
     today = date.today()
-    four_years_ago = date(today.year - 4, today.month, today.day)
+    default_start = today - timedelta(days=DEFAULT_DAYS)
     yesterday = today - timedelta(days=1)
 
     parser = argparse.ArgumentParser(description="Backfill historical weather data")
     parser.add_argument(
         "--start",
-        default=four_years_ago.isoformat(),
-        help="Start date YYYY-MM-DD (default: 4 years ago)",
+        default=default_start.isoformat(),
+        help=f"Start date YYYY-MM-DD (default: {DEFAULT_DAYS} days ago)",
     )
     parser.add_argument(
         "--end",
@@ -368,13 +466,29 @@ def parse_args():
         "--days",
         type=int,
         default=None,
-        help="Backfill the last N days (overrides --start)",
+        help=f"Backfill the last N days (overrides --start; max {MAX_RANGE_DAYS})",
     )
     parser.add_argument(
         "--recent",
         type=int,
         default=0,
         help="Also fill the last N days from the forecast API (default: 0)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Validate the range and print the plan without calling Open-Meteo "
+            "and without writing to MongoDB"
+        ),
+    )
+    parser.add_argument(
+        "--best-effort",
+        action="store_true",
+        help=(
+            "Downgrade an Open-Meteo failure (one city/chunk) to a warning; "
+            "write failures still make the run fail"
+        ),
     )
     parser.add_argument(
         "--city",
@@ -388,7 +502,7 @@ def parse_args():
     )
     parser.add_argument(
         "--chunk-days",
-        type=int,
+        type=_positive_int,
         default=180,
         help="Days per API request chunk (default: 180)",
     )
@@ -409,6 +523,80 @@ def parse_args():
     return args
 
 
+def resolve_range(args) -> tuple[date, date]:
+    """Parse and validate ``--start``/``--end``.
+
+    Runs before any ``MongoClient`` is constructed, so a bad range fails fast and
+    offline. Exits with status 1 on an invalid or over-long range.
+    """
+    start_date = date.fromisoformat(args.start)
+    end_date = date.fromisoformat(args.end)
+
+    if start_date > end_date:
+        print(f"[ERROR] start ({start_date}) must be before end ({end_date})")
+        sys.exit(1)
+
+    span_days = (end_date - start_date).days + 1
+    if span_days > MAX_RANGE_DAYS:
+        print(
+            f"[ERROR] range {start_date} → {end_date} spans {span_days} days, "
+            f"over MAX_RANGE_DAYS={MAX_RANGE_DAYS} (the raw_weather TTL). "
+            f"Narrow it with --days/--start/--end."
+        )
+        sys.exit(1)
+
+    return start_date, end_date
+
+
+def print_plan(args, start_date: date, end_date: date, cities, registry, wanted) -> None:
+    """The human-readable plan header shared by a real run and ``--dry-run``."""
+    print(f"Backfill range : {start_date} → {end_date}")
+    print(f"Recent fill    : {args.recent} day(s) from the forecast API")
+    if wanted:
+        print(f"Cities         : {len(cities)} of {len(registry)} (filtered: {', '.join(cities)})")
+    else:
+        print(f"Cities         : {len(cities)}")
+    print(f"Chunk size     : {args.chunk_days} days")
+    print(f"MongoDB        : {args.mongo_url.split('@')[-1]}")  # hide credentials
+
+
+def dry_run(args, start_date: date, end_date: date) -> None:
+    """Print what a real run would do and exit 0 — no API call, no write.
+
+    The station set is resolved best-effort: an unreachable MongoDB falls back to
+    the bundled ``CITIES`` list instead of aborting, so the flag works offline.
+    """
+    registry = dict(CITIES)
+    try:
+        with MongoClient(args.mongo_url, serverSelectionTimeoutMS=DRY_RUN_TIMEOUT_MS) as client:
+            registry = load_cities(client["weather_db"]) or dict(CITIES)
+    except PyMongoError as exc:
+        print(f"[WARN] MongoDB unreachable ({exc.__class__.__name__}); using the bundled list")
+
+    wanted = parse_city_filter(args.city)
+    try:
+        cities = select_cities(registry, wanted)
+    except KeyError as exc:
+        print(f"[ERROR] {exc.args[0] if exc.args else exc}")
+        print(f"        known cities: {', '.join(sorted(registry))}")
+        sys.exit(1)
+
+    range_days = (end_date - start_date).days + 1
+    docs_per_city = range_days * 24
+    chunks_per_city = math.ceil(range_days / args.chunk_days)
+
+    print_plan(args, start_date, end_date, cities, registry, wanted)
+    print(f"Range length   : {range_days} day(s)")
+    print(f"Docs per city  : {docs_per_city} hourly documents ({range_days} days × 24 h)")
+    print(
+        f"API chunks     : {chunks_per_city} per city, "
+        f"{chunks_per_city * len(cities)} total ({args.chunk_days}-day chunks)"
+    )
+    print(f"Planned writes : {docs_per_city * len(cities)} hourly documents (estimate)")
+    print()
+    print("[DRY RUN] range validated — no Open-Meteo request, no MongoDB write.")
+
+
 def main():
     args = parse_args()
 
@@ -416,12 +604,12 @@ def main():
         print("[ERROR] MONGO_URI is not set. Pass --mongo-url or export the env var.")
         sys.exit(1)
 
-    start_date = date.fromisoformat(args.start)
-    end_date = date.fromisoformat(args.end)
+    # Validate before touching MongoDB so an offline/ill-formed run fails fast.
+    start_date, end_date = resolve_range(args)
 
-    if start_date > end_date:
-        print(f"[ERROR] start ({start_date}) must be before end ({end_date})")
-        sys.exit(1)
+    if args.dry_run:
+        dry_run(args, start_date, end_date)
+        sys.exit(0)
 
     client = MongoClient(args.mongo_url)
     db = client["weather_db"]
@@ -441,21 +629,17 @@ def main():
         client.close()
         sys.exit(1)
 
-    print(f"Backfill range : {start_date} → {end_date}")
-    print(f"Recent fill    : {args.recent} day(s) from the forecast API")
-    if wanted:
-        print(f"Cities         : {len(cities)} of {len(registry)} (filtered: {', '.join(cities)})")
-    else:
-        print(f"Cities         : {len(cities)}")
-    print(f"Chunk size     : {args.chunk_days} days")
-    print(f"MongoDB        : {args.mongo_url.split('@')[-1]}")  # hide credentials
+    print_plan(args, start_date, end_date, cities, registry, wanted)
     print()
 
-    # Create a compound index to speed up existence checks
+    # Create the compound index the reads and the per-hour lookups use.
     collection.create_index([("city", 1), ("timestamp", -1)], background=True)
 
     total_inserted = 0
     total_skipped = 0
+    api_failures = 0  # the API did not serve a chunk/city
+    write_failures = 0  # our writes are suspect: never downgraded
+    aborted = False
 
     for city, (lat, lon) in cities.items():
         print(f"── {city} ({lat}, {lon})")
@@ -469,6 +653,7 @@ def main():
 
             if payload is None:
                 print("FAILED — skipping chunk")
+                api_failures += 1
                 chunk_start = chunk_end + timedelta(days=1)
                 time.sleep(REQUEST_DELAY_SECONDS)
                 continue
@@ -476,16 +661,43 @@ def main():
             docs = build_documents(city, payload)
             print(f"{len(docs)} hourly records … ", end="", flush=True)
 
-            city_inserted, city_skipped = upsert_documents(collection, docs)
+            if not docs:
+                # A 200 with no hourly rows is a missing chunk, not a success:
+                # nothing about this range was written.
+                print("EMPTY — no hourly rows in the response")
+                api_failures += 1
+                chunk_start = chunk_end + timedelta(days=1)
+                time.sleep(REQUEST_DELAY_SECONDS)
+                continue
+
+            try:
+                city_inserted, city_skipped = upsert_documents(collection, docs)
+            except RuntimeError as exc:
+                print(f"\n   [ERROR] write failed for {city} {chunk_start} → {chunk_end}: {exc}")
+                print(f"::error title=Backfill write failure::{city}: {exc}")
+                write_failures += 1
+                aborted = True
+                break
+
             print(f"inserted={city_inserted}, skipped(already existed)={city_skipped}")
             total_inserted += city_inserted
             total_skipped += city_skipped
+            if city_inserted + city_skipped != len(docs):
+                write_failures += 1
+                print(
+                    f"   [ERROR] accounting mismatch for {city} {chunk_start} → "
+                    f"{chunk_end}: inserted({city_inserted}) + skipped({city_skipped}) "
+                    f"!= fetched({len(docs)})"
+                )
 
             chunk_start = chunk_end + timedelta(days=1)
             time.sleep(REQUEST_DELAY_SECONDS)
 
+        if aborted:
+            break
+
     # The archive lags real time by a few days; fill the window the UI charts.
-    if args.recent > 0:
+    if args.recent > 0 and not aborted:
         now = datetime.now(tz=timezone.utc)
         print(f"\n── Recent fill (last {args.recent} days, forecast API)")
         for city, (lat, lon) in cities.items():
@@ -493,24 +705,69 @@ def main():
             payload = fetch_recent_chunk(city, lat, lon, args.recent)
             if payload is None:
                 print("FAILED — skipping")
+                api_failures += 1
                 time.sleep(REQUEST_DELAY_SECONDS)
                 continue
 
             # The response also carries tomorrow's forecast; keep only what
             # has already happened.
             docs = [doc for doc in build_documents(city, payload) if doc["timestamp"] <= now]
-            city_inserted, city_skipped = upsert_documents(collection, docs)
+            if not docs:
+                print("EMPTY — no past hourly rows in the response")
+                api_failures += 1
+                time.sleep(REQUEST_DELAY_SECONDS)
+                continue
+
+            try:
+                city_inserted, city_skipped = upsert_documents(collection, docs)
+            except RuntimeError as exc:
+                print(f"\n   [ERROR] write failed for {city} (recent fill): {exc}")
+                print(f"::error title=Backfill write failure::{city} (recent fill): {exc}")
+                write_failures += 1
+                aborted = True
+                break
+
             print(f"inserted={city_inserted}, skipped={city_skipped}")
             total_inserted += city_inserted
             total_skipped += city_skipped
+            if city_inserted + city_skipped != len(docs):
+                write_failures += 1
+                print(
+                    f"   [ERROR] accounting mismatch for {city} (recent fill): "
+                    f"inserted({city_inserted}) + skipped({city_skipped}) "
+                    f"!= fetched({len(docs)})"
+                )
             time.sleep(REQUEST_DELAY_SECONDS)
 
+    client.close()
+
     print()
-    print("Backfill complete.")
+    if api_failures and args.best_effort:
+        # Deliberately not fatal: a lagging/erroring API for one city must not
+        # block the caller's feature rebuild. Annotated so the run is not silent.
+        print(
+            f"::warning title=Backfill partial::"
+            f"{api_failures} city/chunk API failure(s); continuing (--best-effort)"
+        )
+
+    nothing_written = total_inserted == 0 and total_skipped == 0
+    failed = bool(write_failures) or (api_failures and not args.best_effort)
+    if nothing_written and not (args.best_effort and api_failures):
+        print("[ERROR] Nothing was written: no documents were inserted or skipped.")
+        failed = True
+
     print(f"  Total inserted : {total_inserted}")
     print(f"  Total skipped  : {total_skipped}")
+    if api_failures:
+        print(f"  API failures   : {api_failures}")
+    if write_failures:
+        print(f"  Write failures : {write_failures}")
 
-    client.close()
+    if failed:
+        print("Backfill FAILED.")
+        sys.exit(1)
+    print("Backfill complete.")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
