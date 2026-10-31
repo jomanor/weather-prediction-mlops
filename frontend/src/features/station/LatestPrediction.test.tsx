@@ -124,8 +124,10 @@ describe('LatestPrediction age and stale badge', () => {
   })
 
   it('pins the 12 h stale fallback the API also uses', () => {
-    // Cross-language contract: backend/app/core/thresholds.py
-    // PREDICTION_STALE_AFTER_HOURS (audit finding 5: one authority, not 24 vs 12).
+    // A literal on purpose: TypeScript cannot import backend/app/core/thresholds.py.
+    // This pins the contract in the one place a retune of
+    // PREDICTION_STALE_AFTER_HOURS (audit finding 5: one authority, not 24 vs 12)
+    // would otherwise silently leave the UI behind.
     expect(PREDICTION_STALE_HOURS).toBe(12)
   })
 

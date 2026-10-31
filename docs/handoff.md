@@ -925,12 +925,13 @@ review/QA pass and are fixed, not waived:
 
 1. **The frontend was a fifth judge of prediction age.** `LatestPrediction.tsx` still had its own
    `PREDICTION_STALE_HOURS = 24` for the legacy-payload fallback, so the badge could say "Más de 24 h"
-   while the API flagged `stale` at 12 h. Now 12, with two tests: one pins the literal to the shared
-   backend constant (a cross-language contract test) and one proves a 13 h legacy payload is flagged.
+   while the API flagged `stale` at 12 h. Now 12, with two tests: one pins the literal (TypeScript
+   cannot import the Python module, so this test *is* the cross-language contract) and one proves a
+   13 h legacy payload is flagged.
 2. **The Spark image could not import the shared module.** `spark/Dockerfile` copies only `spark-jobs/`
    to `/opt/spark-jobs/`, so the bootstrap resolved to `/backend`, which did not exist →
    `ModuleNotFoundError` at import (and the compose scheduler only logs a subprocess failure). Fixed
-   by (a) `docker-compose.yml` bind-mounting `backend/app` at `/backend/app` read-only for
+   by (a) `docker-compose.yml` bind-mounting `./backend/app` at `/backend/app` read-only for
    `spark-scheduler`, and (b) `inference.py` trying `<repo>/backend` then `/backend` and, if neither
    exists, raising a message that names the rule ("do not restate the numbers here"). The repo layout
    was verified by importing the module from `/tmp`; CI (`ml-pipeline.yml`) is unaffected.

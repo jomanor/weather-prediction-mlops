@@ -17,6 +17,7 @@ Usage:
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne
@@ -40,10 +41,12 @@ def local_mongo_url() -> str:
         return explicit
     user = os.getenv("MONGO_USERNAME", "admin")
     password = os.getenv("MONGO_PASSWORD", "weatherpass123")
-    url = f"mongodb://{user}:{password}@localhost:27017/weather_db?authSource=admin"
-    if "@mongodb:27017" in url and not os.path.exists("/.dockerenv"):
-        url = url.replace("@mongodb:27017", "@localhost:27017")
-    return url
+    # Percent-encode both: these passwords routinely contain ``&``/``@``/``:``
+    # (the handoff warns about ``&``), which would otherwise break the URI.
+    return (
+        f"mongodb://{quote_plus(user)}:{quote_plus(password)}"
+        "@localhost:27017/weather_db?authSource=admin"
+    )
 
 
 LOCAL_MONGO_URL = local_mongo_url()

@@ -125,7 +125,7 @@ services:
       # thresholds.py) is imported, never copied. The image has no backend/ tree,
       # so inference.py resolves it at /backend. Batch E removes the Spark
       # services entirely.
-      - ../backend/app:/backend/app:ro
+      - ./backend/app:/backend/app:ro
     networks:
       - weather-network
     restart: unless-stopped
