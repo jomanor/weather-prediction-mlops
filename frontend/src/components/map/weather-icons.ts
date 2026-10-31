@@ -9,7 +9,9 @@ import { WEATHER_ICONS, type WeatherIconName } from '@/lib/weather'
  * Rasterises the lucide glyphs into MapLibre SDF images so a single image can
  * be tinted by the temperature/wind ramps (`icon-color` only applies to SDF).
  * No second icon set: the paths come from the same lucide components the rest
- * of the UI uses.
+ * of the UI uses, which is why the night glyphs (`moon`, `moon-star`,
+ * `cloud-moon`) need no code here — they are keys of `WEATHER_ICONS` and are
+ * selected per station by `weatherIconName(code, is_day)` in `lib/weather.ts`.
  */
 
 export const WEATHER_IMAGE_PREFIX = 'meteoml-wc-'

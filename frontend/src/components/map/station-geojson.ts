@@ -13,6 +13,8 @@ export interface StationProperties {
   wind_direction: number | null
   precipitation: number | null
   weather_code: number | null
+  /** Per-station day/night flag; `null` when the API cannot tell. */
+  is_day: number | null
   observed_at: string
   /** Derived client-side: SDF image suffix (`wc-sun`, `wc-rain`, …). */
   weather_icon: string
@@ -51,7 +53,7 @@ function toFeature(feature: StationFeature): Feature<Point, StationProperties> {
     geometry: { type: 'Point', coordinates: feature.geometry.coordinates },
     properties: {
       ...properties,
-      weather_icon: weatherIconName(properties.weather_code),
+      weather_icon: weatherIconName(properties.weather_code, properties.is_day),
     },
   }
 }

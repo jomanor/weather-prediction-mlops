@@ -20,6 +20,7 @@ const STATION: CurrentWeather = {
   precipitation: 0,
   cloud_cover: 10,
   weather_code: 0,
+  is_day: 1,
   observed_at: '2026-09-25T10:00:00Z',
 }
 
@@ -64,6 +65,19 @@ describe('StationTable navigation', () => {
       'href',
       '/stations?hours=72&city=Madrid',
     )
+  })
+})
+
+describe('StationTable day/night labels', () => {
+  it('uses each station’s own is_day, not the viewer clock', () => {
+    renderTable([
+      { name: 'Madrid', station: { ...STATION, city: 'Madrid', is_day: 1 } },
+      { name: 'Pasadena', station: { ...STATION, city: 'Pasadena', is_day: 0 } },
+    ])
+    const madrid = screen.getByRole('row', { name: /Madrid/ })
+    expect(within(madrid).getByText('Despejado')).toBeInTheDocument()
+    const pasadena = screen.getByRole('row', { name: /Pasadena/ })
+    expect(within(pasadena).getByText('Cielo despejado (noche)')).toBeInTheDocument()
   })
 })
 

@@ -19,6 +19,16 @@ const nullableString = z
 
 const isoDate = z.string()
 
+/**
+ * Open-Meteo's day/night flag: `1` daytime, `0` night. Additive and nullable —
+ * payloads served before the backend deploy omit the key, and any other value
+ * is treated as unknown rather than trusted.
+ */
+const isDayFlag = z
+  .number()
+  .nullish()
+  .transform((value) => (value === 0 || value === 1 ? value : null))
+
 export const currentWeatherSchema = z.object({
   city: z.string(),
   latitude: nullableNumber,
@@ -32,6 +42,9 @@ export const currentWeatherSchema = z.object({
   precipitation: nullableNumber,
   cloud_cover: nullableNumber,
   weather_code: nullableNumber,
+  /* Batch 6 (night icons): `is_day` is the per-station flag, never the viewer's
+     clock. Missing/absent → null, which `describeWeather` handles. */
+  is_day: isDayFlag,
   observed_at: isoDate,
 })
 export type CurrentWeather = z.infer<typeof currentWeatherSchema>
@@ -257,6 +270,8 @@ export const stationFeatureSchema = z.object({
     wind_direction: nullableNumber,
     precipitation: nullableNumber,
     weather_code: nullableNumber,
+    /* Same nullable day/night flag as `currentWeatherSchema`. */
+    is_day: isDayFlag,
     observed_at: isoDate,
   }),
 })

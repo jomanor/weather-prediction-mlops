@@ -3,9 +3,12 @@ import {
   CloudDrizzle,
   CloudFog,
   CloudLightning,
+  CloudMoon,
   CloudRain,
   CloudSnow,
   CloudSun,
+  Moon,
+  MoonStar,
   Sun,
   type LucideIcon,
 } from 'lucide-react'
@@ -51,8 +54,43 @@ const DESCRIPTORS: Record<number, WeatherDescriptor> = {
   99: { label: 'Tormenta con granizo fuerte', icon: CloudLightning, tone: 'storm' },
 }
 
-export function describeWeather(code: number | null | undefined): WeatherDescriptor {
+/*
+ * Night variants for the four clear/cloud codes. Only these four change with the
+ * sun; rain, snow, fog and storms keep their glyph and label at night. Tones are
+ * deliberately identical to the daytime entry so ramps/colours do not shift.
+ */
+const NIGHT_DESCRIPTORS: Record<number, WeatherDescriptor> = {
+  0: { label: 'Cielo despejado (noche)', icon: Moon, tone: 'clear' },
+  1: { label: 'Mayormente despejado (noche)', icon: MoonStar, tone: 'clear' },
+  2: { label: 'Parcialmente nuboso (noche)', icon: CloudMoon, tone: 'cloud' },
+  3: { label: 'Cubierto (noche)', icon: CloudMoon, tone: 'cloud' },
+}
+
+/**
+ * `is_day` is the API's per-station flag: `1` daytime, `0` night, `null`/absent
+ * unknown (payloads served before the backend deploy omit the field).
+ *
+ * The local-hour fallback exists only for the unknown case so the UI keeps
+ * looking right until `is_day` ships. It is a viewer-clock guess — never use it
+ * for a station whose flag is known — and it becomes dead code once every
+ * payload carries `is_day`. Day is 07:00–21:59 local, matching the handoff.
+ */
+function isNight(isDay: number | null | undefined): boolean {
+  if (isDay === 0) return true
+  if (isDay === 1) return false
+  const hour = new Date().getHours()
+  return hour < 7 || hour > 21
+}
+
+export function describeWeather(
+  code: number | null | undefined,
+  isDay: number | null = null,
+): WeatherDescriptor {
   if (typeof code !== 'number') return UNKNOWN
+  if (isNight(isDay)) {
+    const night = NIGHT_DESCRIPTORS[code]
+    if (night) return night
+  }
   return DESCRIPTORS[code] ?? UNKNOWN
 }
 
@@ -69,6 +107,9 @@ export type WeatherIconName =
   | 'rain'
   | 'snow'
   | 'storm'
+  | 'moon'
+  | 'moon-star'
+  | 'cloud-moon'
 
 export const WEATHER_ICONS: Record<WeatherIconName, LucideIcon> = {
   sun: Sun,
@@ -79,6 +120,9 @@ export const WEATHER_ICONS: Record<WeatherIconName, LucideIcon> = {
   rain: CloudRain,
   snow: CloudSnow,
   storm: CloudLightning,
+  moon: Moon,
+  'moon-star': MoonStar,
+  'cloud-moon': CloudMoon,
 }
 
 const ICON_NAMES = new Map<LucideIcon, WeatherIconName>([
@@ -90,10 +134,16 @@ const ICON_NAMES = new Map<LucideIcon, WeatherIconName>([
   [CloudRain, 'rain'],
   [CloudSnow, 'snow'],
   [CloudLightning, 'storm'],
+  [Moon, 'moon'],
+  [MoonStar, 'moon-star'],
+  [CloudMoon, 'cloud-moon'],
 ])
 
-export function weatherIconName(code: number | null | undefined): WeatherIconName {
-  return ICON_NAMES.get(describeWeather(code).icon) ?? 'cloud'
+export function weatherIconName(
+  code: number | null | undefined,
+  isDay: number | null = null,
+): WeatherIconName {
+  return ICON_NAMES.get(describeWeather(code, isDay).icon) ?? 'cloud'
 }
 
 export const toneClass: Record<WeatherTone, string> = {

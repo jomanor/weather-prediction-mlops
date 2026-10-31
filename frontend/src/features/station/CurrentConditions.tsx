@@ -23,7 +23,9 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
   const { units } = usePreferences()
   const { isFresh } = useFreshness(station.observed_at)
   const reducedMotion = usePrefersReducedMotion()
-  const weather = describeWeather(station.weather_code)
+  /* `is_day` belongs to the station, so the icon is right for Pasadena even when
+     the viewer's own clock says something else. */
+  const weather = describeWeather(station.weather_code, station.is_day)
   const WeatherIcon = weather.icon
 
   return (

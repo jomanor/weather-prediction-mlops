@@ -27,6 +27,7 @@ describe('currentWeatherSchema', () => {
       precipitation: 0,
       cloud_cover: 15,
       weather_code: 0,
+      is_day: 1,
       observed_at: '2026-09-23T14:00:00Z',
     })
     expect(parsed.city).toBe('Madrid')
@@ -41,6 +42,23 @@ describe('currentWeatherSchema', () => {
     expect(parsed.temperature).toBeNull()
     expect(parsed.wind_speed).toBeNull()
     expect(parsed.weather_code).toBeNull()
+    /* Payloads served before `is_day` shipped omit the key entirely. */
+    expect(parsed.is_day).toBeNull()
+  })
+
+  it('accepts the is_day day/night flag and rejects anything else', () => {
+    const payload = {
+      city: 'Madrid',
+      weather_code: 0,
+      observed_at: '2026-09-23T14:00:00Z',
+    }
+    expect(currentWeatherSchema.parse({ ...payload, is_day: 1 }).is_day).toBe(1)
+    expect(currentWeatherSchema.parse({ ...payload, is_day: 0 }).is_day).toBe(0)
+    expect(currentWeatherSchema.parse({ ...payload, is_day: null }).is_day).toBeNull()
+    /* Not a 0/1: unknown, never trusted as daytime. */
+    expect(currentWeatherSchema.parse({ ...payload, is_day: 2 }).is_day).toBeNull()
+    /* A non-numeric flag fails the parse rather than silently rendering day. */
+    expect(currentWeatherSchema.safeParse({ ...payload, is_day: '1' }).success).toBe(false)
   })
 
   it('rejects a non-numeric temperature', () => {
@@ -204,6 +222,7 @@ describe('stationCollectionSchema (GET /map/stations)', () => {
             wind_direction: 210,
             precipitation: 0,
             weather_code: 0,
+            is_day: 1,
             observed_at: '2026-09-25T11:00:00Z',
           },
         },
@@ -226,6 +245,23 @@ describe('stationCollectionSchema (GET /map/stations)', () => {
     })
     expect(parsed.features[0].properties.temperature).toBeNull()
     expect(parsed.features[0].properties.weather_code).toBeNull()
+    expect(parsed.features[0].properties.is_day).toBeNull()
+  })
+
+  it('parses the per-station is_day flag on map features', () => {
+    const feature = (is_day: unknown) => ({
+      type: 'FeatureCollection' as const,
+      features: [
+        {
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [0, 0] },
+          properties: { city: 'X', weather_code: 0, is_day, observed_at: '2026-09-25T11:00:00Z' },
+        },
+      ],
+    })
+    expect(stationCollectionSchema.parse(feature(0)).features[0].properties.is_day).toBe(0)
+    expect(stationCollectionSchema.parse(feature(1)).features[0].properties.is_day).toBe(1)
+    expect(stationCollectionSchema.parse(feature(undefined)).features[0].properties.is_day).toBeNull()
   })
 })
 

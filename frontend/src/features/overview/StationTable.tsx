@@ -134,7 +134,10 @@ export function StationTable({ rows }: StationTableProps) {
         <tbody>
           {sorted.map((row) => {
             const station = row.station
-            const weather = station ? describeWeather(station.weather_code) : null
+            /* Per-station day/night flag; never the viewer's clock. */
+            const weather = station
+              ? describeWeather(station.weather_code, station.is_day)
+              : null
             const Icon = weather?.icon
 
             return (

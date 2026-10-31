@@ -32,6 +32,7 @@ function station(city: string, minutesAgo: number) {
     precipitation: 0,
     cloud_cover: 10,
     weather_code: 0,
+    is_day: 1,
     observed_at: new Date(NOW - minutesAgo * 60_000).toISOString(),
   }
 }
