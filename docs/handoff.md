@@ -798,7 +798,7 @@ Gate before done: `code-reviewer` on the diff, `qa-engineer` when tests change, 
 
 ## 2026-10-31 — Batch A: the writers tell the truth (audit findings 1, 2, 6, 12, S4, S5)
 
-Committed as **`ab9ee4c`** on `main` (batch B sits on top as `b3e57a2`).
+Committed as **`df39022`** on `main` (batch B sits on top as `cfabdf3`).
 Files: `scripts/backfill_historical_data.py`,
 `tests/unit/test_backfill.py`, `scripts/requirements.txt` (new), `backend/app/repositories/weather_repo.py`
 (one docstring), `.github/workflows/{ingest,backfill,ml-pipeline,ci}.yml`. No backend/runtime code path
@@ -862,8 +862,9 @@ listed below); no database-engineer or sre gate applies (no index, TTL, schema o
 
 ## 2026-10-31 — Batch B: one authority per rule (audit findings 3, 4, 5, 11 + S1)
 
-Committed as **`b3e57a2`** (built in the `batch-b` worktree, fast-forwarded into `main` because the
-`/refresh` deletion was in flight in the main tree). `docs/api-contract.md` updated for the changed
+Committed as **`cfabdf3`**, review fixes **`645ba16`** and **`04ad956`** (**CLOSED**: three review
+passes, 4 should-fix items + 1 compose path fixed, none waived). Built in the `batch-b` worktree,
+fast-forwarded into `main` because the `/refresh` deletion was in flight in the main tree. `docs/api-contract.md` updated for the changed
 threshold, the new cache headers and the additive `/metrics` key.
 
 - **F3 — `raw_weather` is read first, `weather_data` is the fallback.** `latest_for_city`,
