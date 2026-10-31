@@ -47,6 +47,7 @@ async def _collect(repo: WeatherRepository) -> StationCollection:
                     wind_direction=station.wind_direction,
                     precipitation=station.precipitation,
                     weather_code=station.weather_code,
+                    is_day=station.is_day,
                     observed_at=station.observed_at,
                 ),
             )

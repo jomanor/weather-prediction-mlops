@@ -19,6 +19,7 @@ class StationProperties(BaseModel):
     wind_direction: float | None = None
     precipitation: float | None = None
     weather_code: int | None = None
+    is_day: int | None = None  # 1 = day, 0 = night, null when unknown
     observed_at: datetime
 
 

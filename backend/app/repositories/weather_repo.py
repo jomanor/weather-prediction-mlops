@@ -92,6 +92,7 @@ def _from_raw_weather(doc: dict[str, Any]) -> CurrentWeather | None:
         precipitation=to_float(current.get("precipitation")),
         cloud_cover=to_float(current.get("cloud_cover")),
         weather_code=to_int(current.get("weather_code")),
+        is_day=to_int(current.get("is_day")),
         observed_at=observed_at,
     )
 
@@ -125,6 +126,7 @@ _RAW_FIELD_PATHS: dict[str, tuple[str, ...]] = {
     "precipitation": ("payload.current.precipitation",),
     "cloud_cover": ("payload.current.cloud_cover",),
     "weather_code": ("payload.current.weather_code",),
+    "is_day": ("payload.current.is_day",),
 }
 
 #: Columns ``_from_weather_data`` / ``_from_raw_weather`` need regardless of the

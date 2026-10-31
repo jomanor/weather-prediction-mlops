@@ -76,6 +76,7 @@ def weather_points(now: datetime) -> list[CurrentWeather]:
             precipitation=0.0,
             cloud_cover=30.0,
             weather_code=2,
+            is_day=1,
             observed_at=now - timedelta(hours=offset),
         )
         for offset, temperature in ((0, 22.0), (1, 21.0), (2, 20.0))

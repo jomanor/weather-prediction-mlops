@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.cities import DEFAULT_CITIES
 from app.repositories.weather_repo import (
+    _CURRENT_FIELD_PATHS,
     _CURRENT_IDENTITY,
+    _RAW_FIELD_PATHS,
     _RAW_IDENTITY,
     MS_TO_KMH,
     QUALITY_OK_AGE_HOURS,
@@ -16,7 +18,7 @@ from app.repositories.weather_repo import (
     _projection,
     _quality_status,
 )
-from app.schemas.weather import CurrentWeather
+from app.schemas.weather import WEATHER_FIELDS, CurrentWeather
 from tests.fakes import FakeMongoCollection, FakeMongoDb
 
 UTC = timezone.utc
@@ -54,6 +56,51 @@ def test_raw_weather_wind_is_converted_from_ms_to_kmh():
 def test_missing_wind_stays_none():
     assert _from_weather_data({"city": "Madrid", "timestamp": OBSERVED_AT}).wind_speed is None
     assert _from_raw_weather({"city": "Madrid", "timestamp": OBSERVED_AT}).wind_speed is None
+
+
+# ---------------------------------------------------------------------------
+# ``is_day``: only raw_weather carries it (``payload.current.is_day``)
+# ---------------------------------------------------------------------------
+
+
+def test_raw_weather_is_day_round_trips_for_both_values():
+    for value in (0, 1):
+        doc = {
+            "city": "Madrid",
+            "timestamp": OBSERVED_AT,
+            "payload": {"current": {"is_day": value}},
+        }
+
+        point = _from_raw_weather(doc)
+
+        assert point is not None
+        assert point.is_day == value
+        # The field is part of the public payload, so it must survive serialization.
+        assert point.model_dump(mode="json")["is_day"] == value
+
+
+def test_missing_is_day_stays_none():
+    raw = _from_raw_weather({"city": "Madrid", "timestamp": OBSERVED_AT})
+    legacy = _from_weather_data({"city": "Madrid", "timestamp": OBSERVED_AT})
+
+    assert raw is not None and raw.is_day is None
+    # ``weather_data`` never stored it: legacy rows serialize ``is_day: null``.
+    assert legacy is not None and legacy.is_day is None
+    assert legacy.model_dump(mode="json")["is_day"] is None
+
+
+def test_is_day_is_a_selectable_field_and_kept_by_the_raw_projection():
+    assert "is_day" in WEATHER_FIELDS
+    projection = _projection(["is_day"], _RAW_FIELD_PATHS, _RAW_IDENTITY)
+    assert projection is not None
+    assert projection["payload.current.is_day"] == 1
+    # No legacy spelling exists, so requesting it from ``weather_data`` adds no path.
+    assert _projection(["is_day"], _CURRENT_FIELD_PATHS, _CURRENT_IDENTITY) == {
+        "city": 1,
+        "timestamp": 1,
+        "latitude": 1,
+        "longitude": 1,
+    }
 
 
 # ---------------------------------------------------------------------------

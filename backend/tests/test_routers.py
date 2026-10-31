@@ -88,8 +88,10 @@ async def test_current_weather_for_city_has_every_contract_field(client):
         "precipitation",
         "cloud_cover",
         "weather_code",
+        "is_day",
         "observed_at",
     }
+    assert body["is_day"] == 1
     assert body["observed_at"].endswith("Z")
 
 
@@ -618,7 +620,7 @@ async def test_series_raw_fallback_returns_coordinates(client, app, now):
                 "payload": {
                     "latitude": 38.3452,
                     "longitude": -0.481,
-                    "current": {"temperature_2m": 25.0},
+                    "current": {"temperature_2m": 25.0, "is_day": 0},
                 },
             }
         ]
@@ -633,6 +635,16 @@ async def test_series_raw_fallback_returns_coordinates(client, app, now):
     assert point["latitude"] == 38.3452
     assert point["longitude"] == -0.481
     assert point["temperature"] == 25.0
+    # ``is_day`` is part of the public payload and survives the projection used
+    # when ``fields`` is passed.
+    assert point["is_day"] == 0
+
+    projected = await client.get(
+        "/api/weather/series",
+        params={"cities": "Alicante", "hours": 24, "fields": "is_day"},
+    )
+    assert projected.status_code == 200
+    assert projected.json()["cities"][0]["points"][0]["is_day"] == 0
 
     summary = await client.get("/api/weather/summary", params={"cities": "Alicante", "hours": 24})
     assert summary.status_code == 200
@@ -675,6 +687,8 @@ async def test_map_stations_returns_geojson_and_caches(client, weather_repo):
     assert properties["city"] == "Madrid"
     assert properties["temperature"] == 22.0
     assert properties["relative_humidity"] == 60.0
+    # The map glyph set needs the station's own day/night flag, not the viewer's clock.
+    assert properties["is_day"] == 1
     assert properties["observed_at"].endswith("Z")
 
     second = await client.get("/api/map/stations", headers={"If-None-Match": first.headers["etag"]})

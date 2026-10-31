@@ -254,6 +254,7 @@ type CurrentWeather = {
   precipitation: number | null;      // mm
   cloud_cover: number | null;        // %
   weather_code: number | null;       // WMO code
+  is_day: number | null;             // 1 = day, 0 = night, null when unknown
   observed_at: string;               // ISO-8601 UTC
 };
 

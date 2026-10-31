@@ -20,6 +20,7 @@ class CurrentWeather(BaseModel):
     precipitation: float | None = None  # mm
     cloud_cover: float | None = None  # %
     weather_code: int | None = None  # WMO code
+    is_day: int | None = None  # 1 = day, 0 = night; None when unknown
     observed_at: datetime  # ISO-8601 UTC
 
     model_config = ConfigDict(
@@ -37,6 +38,7 @@ class CurrentWeather(BaseModel):
                 "precipitation": 0.0,
                 "cloud_cover": 40.0,
                 "weather_code": 2,
+                "is_day": 1,
                 "observed_at": "2026-09-23T14:00:00Z",
             }
         }
@@ -66,6 +68,7 @@ WEATHER_FIELDS: frozenset[str] = frozenset(
         "precipitation",
         "cloud_cover",
         "weather_code",
+        "is_day",
     }
 )
 
