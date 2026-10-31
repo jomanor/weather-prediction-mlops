@@ -2,10 +2,13 @@
 
 Goal: a **free**, highly customizable, comprehensive weather + ML platform.
 > UI/IA rethink proposal (3 surfaces, mobile-first): `docs/app-rethink.md`.
+> Full repo audit (2026-10-31, 20 findings + 12 smaller items, batches A–F):
+> `docs/audit-2026-10-31.md` — fixes to schedule in the next sessions.
 Environment, hard rules and deploy-verification steps live in `docs/handoff.md` —
 read that first.
 Stack stays as-is (FastAPI/Mongo Atlas M0 on Render free, Vite/React on Netlify,
-PySpark batch jobs on GitHub Actions). Public repo => standard Actions minutes are
+PySpark batch jobs on GitHub Actions) — **except** the PySpark decision, which
+`docs/audit-2026-10-31.md` §8 recommends reversing; that is an open owner call. Public repo => standard Actions minutes are
 unlimited, so cron density is free; the binding constraints are Atlas M0 512 MB,
 the Render 750 h/month free pool and its ~15 min idle spin-down.
 
