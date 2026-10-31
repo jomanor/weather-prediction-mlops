@@ -1,4 +1,4 @@
-import { queryKeys, useApiQuery } from '@/api/queries'
+import { queryKeys, useApiQuery, useApiQueryWithDataAge } from '@/api/queries'
 import { stationCollectionSchema, stationsResponseSchema } from '@/api/schemas'
 
 /**
@@ -10,7 +10,7 @@ import { stationCollectionSchema, stationsResponseSchema } from '@/api/schemas'
  */
 
 export const useStations = () =>
-  useApiQuery(queryKeys.stations, '/weather/current', stationsResponseSchema, {
+  useApiQueryWithDataAge(queryKeys.stations, '/weather/current', stationsResponseSchema, {
     refetchInterval: 5 * 60_000,
   })
 

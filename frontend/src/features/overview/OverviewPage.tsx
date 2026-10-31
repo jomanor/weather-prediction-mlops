@@ -10,7 +10,7 @@ import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useMapStations, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
-import { useFreshness } from '@/hooks/useFreshness'
+import { FRESH_WINDOW_SECONDS, useFreshness, type ServerAge } from '@/hooks/useFreshness'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { useStationSelection } from '@/hooks/useStationSelection'
 import { formatTime } from '@/lib/format'
@@ -61,8 +61,25 @@ export function OverviewPage() {
       ),
     [stations],
   )
-  const { isFresh } = useFreshness(newest)
-  const stale = newest !== null && !isFresh
+  /* The API's `X-Data-Age-Seconds` can only raise the freshness estimate, never
+     lower it: `/weather/current` is cacheable, so a stalled pipeline keeps
+     answering 304 with the stored header replayed and `ageCapturedAt` reset,
+     which would otherwise freeze this value while the data ages. `useFreshness`
+     keeps the larger of it and the `observed_at` math below. */
+  const dataAge = stationsQuery.dataAgeSeconds
+  const ageCapturedAt = stationsQuery.ageCapturedAt
+  const serverAge = useMemo<ServerAge | null>(
+    () =>
+      dataAge === null || ageCapturedAt === null
+        ? null
+        : { ageSeconds: dataAge, receivedAt: ageCapturedAt },
+    [dataAge, ageCapturedAt],
+  )
+  const { ageSeconds, isFresh } = useFreshness(newest, FRESH_WINDOW_SECONDS, serverAge)
+  /* Keyed on the derived age, not on `newest`: the age can exist (from the
+     server) while there is no payload timestamp to compare it against, and the
+     '>12 h' line must still appear in that case. */
+  const stale = ageSeconds !== null && !isFresh
   const reducedMotion = usePrefersReducedMotion()
 
   if (stationsQuery.isError || citiesQuery.isError) {
