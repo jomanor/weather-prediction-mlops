@@ -4,11 +4,20 @@ tests/unit/test_watchdog.py
 Unit tests for scripts/watchdog.py — the pipeline dead-man's switch.
 
 Pure logic plus an injected fake transport: no network, no GitHub, no token.
+
+**Hermetic by construction.** ``build_parser()`` reads ``GITHUB_REPOSITORY`` and
+``GITHUB_TOKEN`` from the environment *at call time* (that is the documented CLI
+behaviour), and GitHub Actions exports both into every job. The autouse
+``_hermetic_env`` fixture below clears them, so each test states its inputs
+explicitly instead of inheriting whatever the runner happens to set — without it
+``test_missing_repo_exits_1`` passed locally and failed on CI, where
+``GITHUB_REPOSITORY`` is ambient.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -28,6 +37,18 @@ NOW = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+#: Every environment variable ``watchdog.build_parser`` reads a default from.
+#: Keep this list equal to the ``os.environ`` reads in scripts/watchdog.py.
+ENV_DERIVED_DEFAULTS = ("GITHUB_REPOSITORY", "GITHUB_TOKEN")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """Strip the ambient GitHub env so no test depends on the runner's environment."""
+    for name in ENV_DERIVED_DEFAULTS:
+        monkeypatch.delenv(name, raising=False)
+    yield
 
 
 def iso(hours_ago: float, *, now: datetime = NOW) -> str:
@@ -638,6 +659,55 @@ def test_missing_repo_exits_1():
     )
     assert code == 1
     assert any("GITHUB_REPOSITORY" in line for line in lines)
+
+
+def test_env_defaults_are_hermetic(monkeypatch):
+    """Regression: the suite must not inherit GITHUB_REPOSITORY / GITHUB_TOKEN.
+
+    CI exports both, so an un-cleared environment makes ``--repo``/``--token``
+    resolve to the runner's values and turns the documented exit-1 paths green
+    (or worse, lets a test reach the real GitHub API). This asserts both
+    directions: cleared -> the documented outcomes, set -> the defaults really do
+    come from the environment, which is why the fixture must clear them.
+    """
+    seen_clients: list[dict] = []
+
+    def client_factory(**kwargs):
+        seen_clients.append(kwargs)
+        return FakeGitHub()
+
+    def run_path(*argv: str):
+        lines: list[str] = []
+        code = wd.run(
+            parse_args(*argv),
+            fetch=fake_fetch(healthy_payloads()),
+            client_factory=client_factory,
+            now=NOW,
+            out=lines.append,
+            err=lines.append,
+        )
+        return code, lines
+
+    # 1. Cleared environment (the fixture's state): no repo -> exit 1, no client.
+    assert "GITHUB_REPOSITORY" not in os.environ
+    code, lines = run_path("--token", "t")
+    assert code == 1
+    assert any("GITHUB_REPOSITORY" in line for line in lines)
+    assert seen_clients == []
+
+    # 2. Cleared environment: no token -> exit 1 even with an explicit repo.
+    code, lines = run_path("--repo", "o/r")
+    assert code == 1
+    assert any("GITHUB_TOKEN" in line for line in lines)
+    assert seen_clients == []
+
+    # 3. Ambient env as GitHub Actions sets it: the defaults are picked up at
+    #    parse time, so only the fixture keeps the suite deterministic.
+    monkeypatch.setenv("GITHUB_REPOSITORY", "jomanor/weather-prediction-mlops")
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-token")
+    code, lines = run_path()
+    assert code == 0
+    assert seen_clients == [{"repo": "jomanor/weather-prediction-mlops", "token": "ambient-token"}]
 
 
 def test_api_failure_after_retries_is_api_down_not_a_check_failure():
