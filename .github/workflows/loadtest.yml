@@ -1,0 +1,44 @@
+name: Load test (cold burst)
+
+# Manual only -- never on push, never on a schedule: the target is a free Render
+# instance that sleeps after ~15 min idle. RED means the API missed the budget
+# (analytics p95 >= 2 s, health failures >= 1 %, http_req_failed >= 5 %, or the
+# cold probe did not get four 200s), NOT that CI broke.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: API base URL
+        required: false
+        default: https://weather-prediction-mlops.onrender.com
+      vus:
+        description: Virtual users
+        required: false
+        default: "3"
+      duration:
+        description: Test duration (e.g. 45s, 2m)
+        required: false
+        default: 45s
+permissions:
+  contents: read
+jobs:
+  cold-burst:
+    name: Cold-burst load check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+        with: {k6-version: v2.3.0}
+      - name: k6 run
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          VUS: ${{ inputs.vus }}
+          DURATION: ${{ inputs.duration }}
+        run: k6 run scripts/load/cold-burst.js --summary-export=summary.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-summary
+          path: summary.json
+          retention-days: 14
