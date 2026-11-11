@@ -2,12 +2,9 @@
   base = "frontend"
   publish = "dist"
   command = "npm ci && npm run build"
-  # DEPLOYS TEMPORARILY DISABLED (2026-10-31): auto-publishing on every push
-  # burns through the Netlify tokens, so git-triggered builds are skipped.
-  # `ignore` skips the build when it exits 0; delete this line to re-enable.
-  # A manual dashboard deploy ("Deploy site" / "Clear cache and deploy") and an
-  # API or build-hook deploy still build, so the site can ship on demand.
-  ignore = "exit 0"
+  # Deploys re-enabled 2026-11-11 on the owner's go-ahead (Batch F). The
+  # `ignore = "exit 0"` pause from 2026-10-31 is gone, so a push to `main`
+  # publishes. To pause again, restore that line.
 
 [build.environment]
   NODE_VERSION = "22"
