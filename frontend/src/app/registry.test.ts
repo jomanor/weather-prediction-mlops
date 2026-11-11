@@ -3,13 +3,23 @@ import { describe, expect, it } from 'vitest'
 import { FEATURES, NAV_ITEMS, REDIRECTS, ROUTES } from '@/app/registry'
 
 describe('feature registry', () => {
-  it('exposes exactly the three surfaces', () => {
+  it('exposes exactly the four surfaces, Panel last', () => {
     expect(NAV_ITEMS.map((item) => [item.label, item.to])).toEqual([
       ['Resumen', '/'],
       ['Estación', '/stations'],
       ['Sistema', '/sistema'],
+      /* The user-composed dashboard sits after the three read surfaces: it is
+         something you build, not something the backend serves. */
+      ['Panel', '/panel'],
     ])
-    expect(FEATURES).toHaveLength(3)
+    expect(FEATURES).toHaveLength(4)
+  })
+
+  it('routes /panel to its own lazy page, in one list', () => {
+    const panel = ROUTES.find((route) => route.to === '/panel')
+    expect(panel?.id).toBe('dashboard')
+    /* One list: the nav is the manifests' own items, never a parallel array. */
+    expect(NAV_ITEMS).toHaveLength(FEATURES.filter((feature) => feature.navItem).length)
   })
 
   it('resolves every nav item to a registered route', () => {

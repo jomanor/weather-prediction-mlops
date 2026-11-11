@@ -1,9 +1,8 @@
 # Handoff — operational notes for the next session
 
 **Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
-items, batches A–F, and the owner decisions). Batches A, B, C and D are done (C is local and uncommitted as
-of 2026-11-01; D is local and uncommitted as of 2026-11-11), and finding 7 (`POST /refresh`) is resolved
-by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
+items, batches A–F, and the owner decisions). Batches A, B, C, D and D2 (the user-composable `/panel`
+dashboard) are done and on `main`; finding 7 (`POST /refresh`) is resolved by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
 `docs/roadmap.md` *Accepted follow-ups* when it is exhausted. **Next is E** (drop Spark), blocked on the
 owner's Spark answer; **F** (reopen deploys) stays paused until the owner asks for a deliberate deploy.
 Do not start a batch before answering the owner questions that batch depends on.
@@ -1121,3 +1120,35 @@ deployed*. No `gh workflow run` was issued and nothing was pushed. Reviewer/QA v
   unknown tab, so a refresh stays stable); there is **no fit-bounds on the map** — removing Pasadena
   removed the need for a camera that spans two continents, so the camera is untouched; `/analytics`
   redirects to `/stations` rather than 404ing; `useAnalyticsDaily` is gone with the daily route.
+
+## 2026-11-11 — Batch D2: a dashboard the user composes (browser-local)
+
+Owner request the same day: keep the climate views the Analitica tab used to hold, and let the user build
+their own dashboard from them, **persisted in the browser, not on a server**.
+
+- **Fourth surface, from the registry.** `features/dashboard/` is registered in `app/registry.ts` as
+  `panel` / nav label "Panel", last. Routes and nav still derive from `FEATURES` — there is no second
+  list, and the manifest test pins four surfaces.
+- **Tiles are data plus an existing component.** `widgets.tsx` holds `{type, title, defaultConfig,
+  controls}` and a `Record<WidgetType, ComponentType>`, so a new tile is one entry and one body
+  (compile-checked). The three tiles: `diurnal` (DiurnalHeatmap + `useAnalyticsDiurnal`), `wind-rose`
+  (WindRose + `useAnalyticsWindRose`) and `series` (HistoryChart + `useStationSeries`). The climate
+  components stay prop-driven and know nothing about the dashboard or the dialog.
+- **Storage.** `features/dashboard/storage.ts`, one versioned key `meteoml.dashboard.v1`:
+  `{version: 1, widgets: [{id, type, city?, days?, hours?}]}`. Parsing is defensive and never throws:
+  malformed JSON / wrong version / non-array → empty; unknown `type` dropped; unknown keys are not
+  copied (they die on the next write); `days`/`hours` only from the offered sets; duplicate or missing
+  ids regenerated; the list caps at `MAX_WIDGETS = 12` (invalid entries do not consume slots). Reads and
+  writes are try/catch'd, so a blocked localStorage degrades to an in-memory session.
+- **Interaction.** Named `<ol aria-label="Vistas del panel">`, so order is announced; every icon button
+  is named (`Subir/Bajar/Quitar <título>`) and disabled at the ends; inline remove/reset confirmations
+  (no `window.confirm`); an empty dashboard renders one action and fires zero requests. A tile's queries
+  mount only for the types actually in the layout.
+- **Deliberate MVP cuts:** drag-and-drop (pointer-only), per-tile span/title, URL deep links, cross-tab
+  `storage` sync, export/import, a model overlay on the series tile (a second request per card).
+- **Gates** (2026-11-11): `cd frontend && npm run test` → `Test Files 50 passed (50)` /
+  `Tests 412 passed (412)`; `npm run typecheck` clean; `npm run lint` 0 errors (the pre-existing
+  `vite.config.ts` warning); `npm run build` ok with `DashboardPage-*.js` 8.89 kB / 3.57 kB gzip.
+  Backend untouched by this batch.
+- **Unverified:** the rendered 320/390 px layout and the focus ring — this repo still has no browser
+  harness, so the check was jsdom plus class inspection.

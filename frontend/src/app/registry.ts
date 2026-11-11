@@ -1,4 +1,5 @@
 import { orderNavItems, type FeatureManifest, type NavItem } from '@/app/nav'
+import { dashboardFeature } from '@/features/dashboard'
 import { overviewFeature } from '@/features/overview'
 import { stationFeature } from '@/features/station'
 import { systemFeature } from '@/features/system'
@@ -10,11 +11,17 @@ import { systemFeature } from '@/features/system'
  * Explicit imports (not `import.meta.glob`) keep the graph statically analysable
  * so each feature still code-splits into its own lazy chunk.
  *
- * Three surfaces only: Resumen, Estación, Sistema. Quality, models and
+ * Four surfaces: Resumen, Estación, Sistema, Panel. Quality, models and
  * benchmark live inside Sistema, behind `?tab=`; the climate views open as a
- * dialog from the station page.
+ * dialog from the station page; Panel is the dashboard the user composes, and
+ * it is stored in the browser, not on the server.
  */
-export const FEATURES: FeatureManifest[] = [overviewFeature, stationFeature, systemFeature]
+export const FEATURES: FeatureManifest[] = [
+  overviewFeature,
+  stationFeature,
+  systemFeature,
+  dashboardFeature,
+]
 
 /** Absolute path of a feature route inside the shell. */
 export function routePath(path: string): string {

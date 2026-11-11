@@ -73,12 +73,12 @@ weather-prediction-mlops/
 │   │   ├── api/                # typed client + zod schemas for the contract
 │   │   ├── app/                # shell, navigation, preferences
 │   │   ├── components/         # ui primitives, charts, map, shell controls
-│   │   ├── features/           # overview, station, benchmark, models, system, analytics
+│   │   ├── features/           # overview, station, dashboard, system (calidad/modelos/benchmark), analytics
 │   │   └── lib/                # formatting, weather helpers, ramps, theme
 │   ├── nginx.conf              # SPA fallback + /api reverse proxy
 │   └── Dockerfile
 ├── spark/                      # feature engineering, training, inference, scheduler
-├── scripts/                    # ingest, backfill, Atlas sync, Supabase sync
+├── scripts/                    # ingest, backfill, Atlas sync, model promotion/pruning
 ├── tests/                      # pipeline unit + integration tests
 ├── docs/api-contract.md        # single source of truth for backend ⇄ frontend
 ├── docker-compose.yml          # full local stack
@@ -160,7 +160,7 @@ always uses the same relative base URL it uses in production.
 ## Testing
 
 ```bash
-make test          # backend (309) + frontend (368)
+make test          # backend (309) + frontend (412)
 make lint          # ruff + black + oxlint + tsc
 make coverage      # backend coverage report
 
@@ -172,7 +172,7 @@ Backend tests are fully offline: routers run against dependency-overridden
 fakes and the AEMET client runs against `httpx.MockTransport`, including a real
 ISO-8859-15 fixture with missing hourly values. Measured 2026-11-11: backend
 `309 passed`; pipeline `468 passed, 7 skipped` (the 7 need a local `mongo:6`);
-frontend 48 files / `368 passed`; `ruff`/`black --check backend scripts` clean
+frontend 50 files / `412 passed`; `ruff`/`black --check backend scripts` clean
 (72 files).
 
 ---

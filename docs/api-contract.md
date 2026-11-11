@@ -512,7 +512,7 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
   ../.venv/bin/python -m pytest tests -q` → `325 passed`; root
   `.venv/bin/python -m pytest tests -q` with
   `PYSPARK_PYTHON=$PWD/.venv/bin/python` → `468 passed, 7 skipped`;
-  `cd frontend && npm run test` → 47 files, `350 passed`. Both sides change in
+  `cd frontend && npm run test` → 50 files, `412 passed`. Both sides change in
   the same PR: a payload shape that moves without this file is a bug, a test
   count that moves without one is not.
 
