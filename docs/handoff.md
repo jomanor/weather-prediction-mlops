@@ -958,7 +958,7 @@ targeted replays; the invariant it asserts is now covered by two deterministic t
 
 ## 2026-11-01 — Batch C: kill the dead weight (audit 13, 14, 17, 18, 19, 20 + S2, S6, S9, S11, S12)
 
-**Local, uncommitted.** No commit id yet, nothing pushed, **no Netlify deployment** — auto publishing
+**Committed as `26d4559`, pushed to `main`; no Netlify deployment** — auto publishing
 stays paused (`netlify.toml` `ignore = "exit 0"`), so the state of this batch is *committed to the
 working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdicts for this batch are
 **not recorded here**; only the gates below were measured, by the docs pass, on this tree.
