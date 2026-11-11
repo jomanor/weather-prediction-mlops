@@ -1006,10 +1006,14 @@ working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdic
 - **S2 / S9 — Spanish UI, Spanish labels.** `ModelsPanel` maps the registry stage through
   `stageLabel` (`production` → "Producción", `staging` → "Staging"); `DataQualityMeter` renders the table
   only when `flagged > 0`.
-- **S6 (partial) / CI — one interpreter.** Every workflow is Python **3.13** (`backfill`, `ingest`,
-  `watchdog`, both `ci.yml` jobs, the pyspark job included) **except `ml-pipeline.yml`, which stays 3.11**
-  because `spark/requirements.txt` pins `pandas==2.0.3` and that release ships only
-  cp38–cp311 wheels — the install would fall back to a source build that does not compile. Unpin pandas
+- **S6 (partial) / CI — one interpreter, minus Spark.** Every job that does not import pyspark is Python
+  **3.13** (`backfill`, `ingest`, `watchdog`, `ci.yml`'s `python-lint` and `backend-test`). Three jobs
+  stay on **3.11**: `ci.yml`'s `pipeline-test` and `integration-tests`, and `ml-pipeline.yml`. Reason:
+  **Spark 3.5.5 imports `distutils`, removed from the stdlib in 3.12** — the first CI run on this batch
+  found it (`ModuleNotFoundError: No module named 'distutils'` in
+  `pyspark/ml/image.py`); it only seemed to work on the local 3.13 venv because setuptools ships a shim
+  there, and a clean runner has none. `ml-pipeline.yml` has a second reason: it installs
+  `spark/requirements.txt`, whose `pandas==2.0.3` ships cp38–cp311 wheels only. All three move to 3.13
   when Batch E drops Spark.
 - **Gates measured on this tree** (2026-11-01, after the repo-half deletions): `cd backend &&
   ../.venv/bin/python -m pytest tests -q` → `325 passed`; `PYSPARK_PYTHON=$PWD/.venv/bin/python
