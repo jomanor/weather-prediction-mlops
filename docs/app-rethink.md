@@ -45,10 +45,10 @@ Mounted once in `backend/app/main.py:_api_routes()`, served under `/api/v1`
 | `GET /weather/current` | `useStations` (OverviewPage, StationTable) | all `CurrentWeather` | National table + freshness | **KEEP** |
 | `GET /weather/current/{city}` | `station/queries.ts useCurrentWeather` | all `CurrentWeather` | Station hero | **KEEP** |
 | `GET /weather/history/{city}` | `useHistory` (HistoryChart) | `points[]` | Station chart | **KEEP** |
-| `GET /weather/stats/{city}` | **none** — `useStats` defined (`station/queries.ts:29`), never called | `temperature/humidity/pressure/wind_speed/precipitation_total` | 0 in UI | **CUT** |
-| `GET /weather/range/{city}` | **none** (grep) | keyset pages | 0 in UI | **CUT** |
-| `GET /weather/series` | **none** (grep) | bulk projection | 0 in UI | **CUT** |
-| `GET /weather/summary` | **none** (grep) | sparklines | 0 in UI | **CUT** |
+| `GET /weather/stats/{city}` | **none** — `useStats` defined (`station/queries.ts:29`), never called | `temperature/humidity/pressure/wind_speed/precipitation_total` | 0 in UI | **CUT** — done 2026-11-01 (route + `useStats` + schema deleted) |
+| `GET /weather/range/{city}` | **none** (grep) | keyset pages | 0 in UI | **CUT** — done 2026-11-01 |
+| `GET /weather/series` | **none** at the time of this review; adopted by the station page in Batch 6c | bulk projection | 1 request per station page | **KEEP** (not cut — the CUT below was superseded) |
+| `GET /weather/summary` | **none** (grep) | sparklines | 0 in UI | **CUT** — done 2026-11-01 |
 | `GET /weather/quality` | `DataQualityMeter` (self-fetching, overview) | `cities[]{completeness,max_gap_hours,age_hours,status}` | MLOps signal, not weather | **MERGE** → Sistema |
 | `GET /map/stations` | `useMapStations` (StationMap) | GeoJSON `temperature/weather_code/wind_speed/wind_direction` | Map pins/temp/wind | **KEEP** |
 | `GET /predictions/latest` | `useLatestPredictions` (OverviewPage +1h column) | one row per city | +1h delta column | **MERGE** → Estación only |
@@ -88,7 +88,7 @@ bloat signal — backend, repo, schema and query hook all exist, no component.
 | — `BenchmarkChart.tsx` / `ResidualChart.tsx` / `MetricsCompare.tsx` / `AemetNotice.tsx` | benchmark | observed/model/aemet | Useful, honest | **MERGE** → Sistema |
 | **Modelos** `ModelsPage.tsx` | models | 11-col table + 8-row expandable detail | Raw registry dump; too dense | **MERGE** → Sistema, production-first |
 | **Analítica** `AnalyticsPage.tsx` | diurnal + daily + wind-rose | 3 charts (of 6 endpoints) | Nice-to-have; not core weather | **MERGE** → Sistema, keep 3, cut 3 |
-| **Shell** `AppShell.tsx` | — | header, 5-item nav, `StationSearch`, `UnitToggle`, `ThemeToggle`, footer, bottom nav, `CommandPalette`, `g`-shortcuts | Search + palette are power-user; 5 nav items are the bloat | **KEEP** search/palette/theme/units, **CUT** to 3 nav items |
+| **Shell** `AppShell.tsx` | — | header, 5-item nav, `StationSearch`, `UnitToggle`, `ThemeToggle`, footer, bottom nav, ~~`CommandPalette`, `g`-shortcuts~~ | Search + palette are power-user; 5 nav items are the bloat | **KEEP** search/palette/theme/units, **CUT** to 3 nav items. **Superseded 2026-11-01:** the palette and the `g` chords were deleted (audit S11); `/` and Cmd/Ctrl-K focus the one `StationSearch` |
 
 URL state today (all via `useUrlState` / `useStationSelection`): `city`
 (app-wide), `tab` (overview), `hours`/`var`/`horizon` (station), `range`
@@ -302,7 +302,7 @@ values are the documented exception (hex literals in `chart-theme.ts`).
 | `components/ui/{Panel,Feedback,Readout,PageHeader,Segmented,Badge,Button}.tsx` | **KEEP** — the a11y primitives (radiogroup segmented, focus ring, `aria-pressed` legend) are the best part of the current UI |
 | `components/charts/{HistoryChart,BenchmarkChart,ResidualChart,ChartTooltip,ChartBrush,SeriesLegend,chart-brush,history-rows}.tsx` | **KEEP** — converge onto `HistoryChart`'s style |
 | `components/charts/Sparkline.tsx` | **REMOVE** — no consumer (grep: only its own file) |
-| `components/shell/{CommandPalette,StationSearch,ThemeToggle,UnitToggle,shortcuts,command-palette}.tsx` | **KEEP** — power-user shortcuts are a differentiator, not bloat |
+| `components/shell/{CommandPalette,StationSearch,ThemeToggle,UnitToggle,shortcuts,command-palette}.tsx` | **KEEP** — power-user shortcuts are a differentiator, not bloat. **Overturned 2026-11-01** (audit S11): `CommandPalette.tsx`, `command-palette.ts` and `shortcuts.ts` are deleted — the palette duplicated a 3-item nav and the search box already on screen. `StationSearch`, `ThemeToggle` and `UnitToggle` stay |
 | `components/map/{StationMap,RadarControls,radar,station-geojson,weather-icons}.tsx` | **KEEP** but collapse the layer panel (below) |
 | `components/DataQualityMeter.tsx` | **MOVE** to Sistema feature |
 | `features/analytics/components/{DiurnalHeatmap,WindRose,DailyAnomalyChart}.tsx` | **KEEP** (move into Sistema) |
@@ -313,7 +313,8 @@ values are the documented exception (hex literals in `chart-theme.ts`).
 
 1. **Gradients / glows** — no `bg-gradient-*`, no `drop-shadow`, no
    `backdrop-blur` overlays. (The one existing `backdrop-blur-[2px]` on
-   `CommandPalette.tsx` goes; the `shimmer` skeleton gradient stays, it's a
+   `CommandPalette.tsx` goes — that file was deleted on 2026-11-01, so the rule is
+   now unconditionally satisfied; the `shimmer` skeleton gradient stays, it's a
    loading state, not decoration.)
 2. **Icon soup** — one icon per row/cell. Drop the triple
    `weather-icon + Check + ArrowUpRight` cluster in `StationTable.tsx`; selection
@@ -394,7 +395,7 @@ After that deletion, the remaining dead weight is:
 | `docker-compose.yml` Kafka broker/zookeeper/`kafka-producer`/`kafka-consumer`/volumes | Kafka is gone | **remove** (keep the local Mongo + API services) |
 | `docker-compose.yml` `mlflow` service + `MLFLOW_TRACKING_URI` | MLflow is now opt-in/ephemeral and dropped from CI (`docs/model-lifecycle.md`) | **remove** or mark local-only |
 | `README.md` tree refs (`kafka/`, `frontend/nginx.conf`, sync scripts) | stale — the frontend no longer ships nginx (Netlify), Kafka is gone | **fix** |
-| `backend/app/routers/weather.py` `/stats`, `/range`, `/series`, `/summary` + `backend/app/services/stats.py` + `backend/app/schemas/weather.py` (`SeriesResponse`, `SummaryResponse`, `WeatherRangeResponse`, `WeatherStats`) + `frontend/src/api/schemas.ts` (`statsResponseSchema`) + `frontend/src/features/station/queries.ts` (`useStats`) | zero frontend consumers (grep) | **remove** in P2, update `docs/api-contract.md` |
+| `backend/app/routers/weather.py` `/stats`, `/range`, ~~`/series`~~, `/summary` + `backend/app/services/stats.py` + `backend/app/schemas/weather.py` (`SeriesResponse`, `SummaryResponse`, `WeatherRangeResponse`, `WeatherStats`) + `frontend/src/api/schemas.ts` (`statsResponseSchema`) + `frontend/src/features/station/queries.ts` (`useStats`) | zero frontend consumers (grep) | **remove** in P2, update `docs/api-contract.md`. **Done 2026-11-01 without `/series`**: Batch 6c made the station page read `/weather/series`, so it lives; `SeriesResponse` stays as well |
 | `frontend/src/components/charts/Sparkline.tsx` | no consumer | **remove** |
 | `useAnalyticsClimatology` / `useAnalyticsCorrelation` / `useAnalyticsErrorByHour` in `frontend/src/features/analytics/queries.ts` + their `schemas.ts` blocks + the three backend routes + repo methods + tests | built, never rendered | **remove** (the clearest "half-built" bloat) |
 | `docs/batch3-contract.md`, `docs/batch4-contract.md` | frozen-interface snapshots, superseded by `docs/api-contract.md` + `docs/roadmap.md` | **remove** after moving any still-unique hard rule into `handoff.md`/`roadmap.md` |
@@ -439,13 +440,20 @@ never surfaces response headers) instead of payload-timestamp inference in
 `useFreshness`; production-first Models table (skill/coverage/drift only);
 trim models metadata; cut the 3 unrendered analytics endpoints end-to-end.
 
+> **Superseded 2026-11-01 (audit 13/14):** the *frontend* half of that last clause shipped —
+> `useAnalyticsClimatology`, `useAnalyticsCorrelation`, `useAnalyticsErrorByHour` and their zod blocks are
+> deleted. The three **backend** routes stay mounted: they are read-only, cached and documented in
+> `docs/api-contract.md`, and removing them is a separate call. What is gone is the UI pretence that they
+> rendered.
+
 Acceptance criteria:
 
 - Freshness pulse keys on the server header, not `observed_at` arithmetic.
 - Sistema "Modelos" shows production first with skill + coverage + drift badge;
   staging/superseded collapsed.
 - `/analytics/{climatology,correlation,error-by-hour}` + their schemas/queries/
-  repo methods/tests removed; `docs/api-contract.md` updated.
+  repo methods/tests removed; `docs/api-contract.md` updated. **Partially done 2026-11-01:** the hooks + zod
+  schemas are gone; the routes, repo methods and tests stay (see the note under *P1*).
 - AEMET Spain-only notice (`AemetNotice.tsx`) still renders for Pasadena.
 
 Risks: header plumbing touches the shared client (schema tests must keep
@@ -454,15 +462,16 @@ consumers — re-verify before cutting.
 
 ### P2 — cuts/renames + hardening (S–M)
 
-What: remove `/stats`, `/range`, `/series`, `/summary` + `services/stats.py` +
-schemas + `useStats`; remove `Sparkline`; remove sync scripts + Kafka tests;
+What: remove `/stats`, `/range`, ~~`/series`~~, `/summary` + `services/stats.py` +
+schemas + `useStats` (done 2026-11-01, `/series` kept); remove `Sparkline`; remove sync scripts + Kafka tests;
 prune `docker-compose.yml`; fix `README.md`; delete `batch3/batch4-contract.md`;
 gate city writes; tighten CORS; split test deps.
 
 Acceptance criteria:
 
-- The four weather endpoints return 404; `docs/api-contract.md` reflects it;
-  `ruff`/`black`/`pytest` (backend + root) green.
+- The three removed weather endpoints (`/stats`, `/range`, `/summary`) return 404 — `/series`
+  stays; `docs/api-contract.md` reflects it **done 2026-11-01**; `ruff`/`black`/`pytest`
+  (backend + root) green.
 - `grep -r` shows no references to removed files.
 - `POST/DELETE /api/cities` gated behind `CITY_WRITES_ENABLED` (default off) or
   an auth boundary; CityManager disabled accordingly.

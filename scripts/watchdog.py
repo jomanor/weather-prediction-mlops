@@ -124,6 +124,13 @@ API_TOTAL_BUDGET_SECONDS = 360.0
 #: NOT inherit the Render boot allowance above.
 GITHUB_TIMEOUT_SECONDS = 30.0
 
+#: GitHub's maximum page size for the issues list, and a hard page bound for the
+#: open-issue scan (5 000 open issues is far beyond any real repo). Scanning only
+#: the first page used to hide the rolling issue once a repo passed 100 open
+#: issues, and every later run then opened a duplicate (audit finding 20).
+GITHUB_PAGE_SIZE = 100
+GITHUB_MAX_PAGES = 50
+
 #: API endpoints used as evidence. Public read routes only.
 PATH_CURRENT = "/api/v1/weather/current"
 PATH_QUALITY = "/api/v1/weather/quality?days=7"
@@ -773,14 +780,21 @@ class GitHubClient:
     def find_open_issue(self) -> dict[str, Any] | None:
         # Match on the title, not the label: the title is the issue's identity, so
         # a hand-removed label cannot fork a second rolling issue.
-        status, payload = self._request("GET", f"/repos/{self.repo}/issues?state=open&per_page=100")
-        if status == 404:
-            raise GitHubError(f"repo {self.repo} no encontrado")
-        if status >= 300:
-            raise GitHubError(f"listar incidencias falló (HTTP {status}): {payload}")
-        for issue in payload or []:
-            if isinstance(issue, dict) and issue.get("title") == ISSUE_TITLE:
-                return issue
+        # Paginated until a short page: the rolling issue is not necessarily on
+        # the first 100 (audit finding 20).
+        for page in range(1, GITHUB_MAX_PAGES + 1):
+            query = f"?state=open&per_page={GITHUB_PAGE_SIZE}&page={page}"
+            status, payload = self._request("GET", f"/repos/{self.repo}/issues{query}")
+            if status == 404:
+                raise GitHubError(f"repo {self.repo} no encontrado")
+            if status >= 300:
+                raise GitHubError(f"listar incidencias falló (HTTP {status}): {payload}")
+            issues = [item for item in payload or [] if isinstance(item, dict)]
+            for issue in issues:
+                if issue.get("title") == ISSUE_TITLE:
+                    return issue
+            if len(issues) < GITHUB_PAGE_SIZE:
+                return None
         return None
 
     def comments(self, number: int) -> list[dict[str, Any]]:

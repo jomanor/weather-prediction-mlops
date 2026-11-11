@@ -23,8 +23,6 @@ export const ANALYTICS_BOUNDS = {
   daily: { min: 7, max: 180, default: 90 },
   windRose: { min: 7, max: 365, default: 90 },
   diurnal: { min: 7, max: 365, default: 90 },
-  correlation: { min: 7, max: 365, default: 90 },
-  errorByHour: { min: 7, max: 90, default: 30 },
 } as const satisfies Record<string, DaysBound>
 
 /** Clamp a caller-supplied `days` to the endpoint bound; non-finite → default. */

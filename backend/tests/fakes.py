@@ -289,15 +289,12 @@ class FakeWeatherRepository:
         end: datetime,
         limit: int = 1000,
         newest_first: bool = True,
-        after: datetime | None = None,
     ) -> list[CurrentWeather]:
         self.calls.append("find_range")
         matches = [
             point
             for point in self.points
-            if point.city == city
-            and start <= point.observed_at <= end
-            and (after is None or point.observed_at > after)
+            if point.city == city and start <= point.observed_at <= end
         ]
         matches.sort(key=lambda point: point.observed_at, reverse=newest_first)
         return matches[:limit]

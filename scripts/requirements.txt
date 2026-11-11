@@ -1,6 +1,6 @@
 # Runtime dependencies of the scripts in this directory that CI and operators
 # run (ingest_weather.py, backfill_historical_data.py, pipeline_summary.py,
-# promote_model.py, prune_models.py, sync_to_atlas.py, sync_to_supabase.py,
+# promote_model.py, prune_models.py, sync_to_atlas.py,
 # watchdog.py -- the last one is stdlib-only and needs nothing here).
 # Not the backend (backend/requirements.txt) and not the Spark jobs
 # (spark/requirements.txt): those have their own files.

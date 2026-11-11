@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1142,6 +1143,42 @@ def test_find_open_issue_matches_title_only():
 
     client = wd.GitHubClient(repo="o/r", token="t", open_url=open_url)
     assert client.find_open_issue()["number"] == 2
+
+
+def test_find_open_issue_paginates_past_the_first_hundred():
+    # The rolling issue is the last of 150 open issues: page 1 is a full page of
+    # unrelated ones, so a single-page scan would report "no issue" and every
+    # later run would open a duplicate.
+    pages: list[str] = []
+    first_page = [{"number": index, "title": f"otra {index}"} for index in range(100)]
+    second_page = [
+        {"number": 100 + index, "title": f"otra {100 + index}"} for index in range(49)
+    ] + [{"number": 150, "title": wd.ISSUE_TITLE}]
+
+    def open_url(request, timeout=None):
+        pages.append(urllib.parse.urlparse(request.full_url).query)
+        return _JsonResponse(200, first_page if len(pages) == 1 else second_page)
+
+    client = wd.GitHubClient(repo="o/r", token="t", open_url=open_url)
+
+    assert client.find_open_issue()["number"] == 150
+    assert pages == [
+        f"state=open&per_page={wd.GITHUB_PAGE_SIZE}&page=1",
+        f"state=open&per_page={wd.GITHUB_PAGE_SIZE}&page=2",
+    ]
+
+
+def test_find_open_issue_stops_on_a_short_page():
+    pages: list[str] = []
+
+    def open_url(request, timeout=None):
+        pages.append(urllib.parse.urlparse(request.full_url).query)
+        return _JsonResponse(200, [{"number": 1, "title": "otra cosa"}])
+
+    client = wd.GitHubClient(repo="o/r", token="t", open_url=open_url)
+
+    assert client.find_open_issue() is None
+    assert pages == [f"state=open&per_page={wd.GITHUB_PAGE_SIZE}&page=1"]
 
 
 def test_last_recorded_verdict_prefers_newest_comment():

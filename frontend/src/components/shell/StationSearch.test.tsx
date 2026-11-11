@@ -50,4 +50,21 @@ describe('StationSearch', () => {
 
     textarea.remove()
   })
+
+  it('is the single search for ⌘K / Ctrl-K, from any focus position', () => {
+    renderSearch()
+    const input = screen.getByRole('combobox', { name: 'Buscar estación' })
+
+    /* A field elsewhere in the shell does not swallow the global command. */
+    const select = document.createElement('select')
+    document.body.appendChild(select)
+    select.focus()
+    fireEvent.keyDown(select, { key: 'k', ctrlKey: true })
+    expect(input).toHaveFocus()
+    select.remove()
+
+    input.blur()
+    fireEvent.keyDown(document.body, { key: 'K', metaKey: true })
+    expect(input).toHaveFocus()
+  })
 })

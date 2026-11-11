@@ -126,26 +126,6 @@ async def test_history_rejects_out_of_range_hours(client):
     assert response.status_code == 422
 
 
-async def test_stats(client):
-    response = await client.get("/api/weather/stats/Madrid", params={"hours": 24})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["city"] == "Madrid"
-    assert body["count"] == 3
-    assert body["temperature"] == {"avg": 21.0, "min": 20.0, "max": 22.0}
-    assert body["humidity"] == {"avg": 60.0, "min": 60.0, "max": 60.0}
-    assert body["pressure"]["avg"] == 1014.0
-    assert body["wind_speed"]["avg"] == 10.0
-    assert body["precipitation_total"] == 0.0
-    assert body["start"].endswith("Z") and body["end"].endswith("Z")
-
-
-async def test_stats_without_data_is_404(client):
-    response = await client.get("/api/weather/stats/Atlantis")
-    assert response.status_code == 404
-
-
 async def test_predictions_latest(client):
     response = await client.get("/api/predictions/latest")
 
@@ -439,10 +419,7 @@ async def test_openapi_documents_every_contract_path(client):
         "/api/weather/current",
         "/api/weather/current/{city}",
         "/api/weather/history/{city}",
-        "/api/weather/stats/{city}",
         "/api/weather/series",
-        "/api/weather/summary",
-        "/api/weather/range/{city}",
         "/api/weather/quality",
         "/api/map/stations",
         "/api/predictions/latest",
@@ -451,6 +428,12 @@ async def test_openapi_documents_every_contract_path(client):
         "/api/benchmark/{city}",
         "/api/models",
     } <= set(schema["paths"])
+    # Finding 13: the zero-caller reads were deleted, not left mounted.
+    assert not {
+        "/api/weather/stats/{city}",
+        "/api/weather/summary",
+        "/api/weather/range/{city}",
+    } & set(schema["paths"])
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +515,7 @@ async def test_current_weather_for_city_data_age_header(client, weather_repo):
 
 
 # ---------------------------------------------------------------------------
-# L4 / L5 - bulk series, summary, map and range
+# L4 - bulk series and the station map
 # ---------------------------------------------------------------------------
 
 
@@ -649,32 +632,6 @@ async def test_series_raw_fallback_returns_coordinates(client, app, now):
     assert projected.status_code == 200
     assert projected.json()["cities"][0]["points"][0]["is_day"] == 0
 
-    summary = await client.get("/api/weather/summary", params={"cities": "Alicante", "hours": 24})
-    assert summary.status_code == 200
-    assert summary.json()["cities"][0]["min"] == 25.0
-
-
-async def test_summary_computes_aggregates_and_sparkline(client):
-    response = await client.get("/api/weather/summary", params={"cities": "Madrid", "hours": 24})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["count"] == 1
-    summary = body["cities"][0]
-    assert summary["city"] == "Madrid"
-    assert summary["min"] == 20.0
-    assert summary["max"] == 22.0
-    assert summary["first"] == 20.0
-    assert summary["last"] == 22.0
-    assert summary["trend"] == 2.0
-    assert summary["points"] == [20.0, 21.0, 22.0]
-
-
-async def test_summary_rejects_too_many_cities(client):
-    cities = ",".join(f"City{index}" for index in range(16))
-    response = await client.get("/api/weather/summary", params={"cities": cities})
-    assert response.status_code == 422
-
 
 async def test_map_stations_returns_geojson_and_caches(client, weather_repo):
     first = await client.get("/api/map/stations")
@@ -771,71 +728,6 @@ async def test_quality_accepts_boundary_days(client, weather_repo):
         response = await client.get("/api/weather/quality", params={"days": days})
         assert response.status_code == 200, days
         assert weather_repo.last_quality_window[0] == days
-
-
-async def test_range_paginates_with_cursor_oldest_first(client, now):
-    start = (now - timedelta(hours=3)).isoformat()
-    end = (now + timedelta(hours=1)).isoformat()
-
-    first = await client.get(
-        "/api/weather/range/Madrid", params={"from": start, "to": end, "limit": 2}
-    )
-
-    assert first.status_code == 200
-    body = first.json()
-    assert [point["temperature"] for point in body["points"]] == [20.0, 21.0]
-    assert body["next_cursor"] is not None
-
-    second = await client.get(
-        "/api/weather/range/Madrid",
-        params={"from": start, "to": end, "limit": 2, "cursor": body["next_cursor"]},
-    )
-
-    assert second.status_code == 200
-    body = second.json()
-    assert [point["temperature"] for point in body["points"]] == [22.0]
-    assert body["next_cursor"] is None
-
-
-async def test_range_rejects_inverted_window(client, now):
-    response = await client.get(
-        "/api/weather/range/Madrid",
-        params={"from": now.isoformat(), "to": (now - timedelta(hours=1)).isoformat()},
-    )
-    assert response.status_code == 422
-
-
-async def test_range_rejects_cursor_outside_window(client, now):
-    start = (now - timedelta(hours=3)).isoformat()
-    end = now.isoformat()
-    for cursor in (
-        (now - timedelta(hours=4)).isoformat(),
-        (now + timedelta(hours=1)).isoformat(),
-    ):
-        response = await client.get(
-            "/api/weather/range/Madrid",
-            params={"from": start, "to": end, "cursor": cursor},
-        )
-        assert response.status_code == 422, cursor
-
-
-async def test_range_rejects_malformed_timestamp(client):
-    response = await client.get(
-        "/api/weather/range/Madrid", params={"from": "not-a-date", "to": "also-bad"}
-    )
-    assert response.status_code == 422
-
-
-async def test_range_caps_limit(client, now):
-    response = await client.get(
-        "/api/weather/range/Madrid",
-        params={
-            "from": (now - timedelta(hours=3)).isoformat(),
-            "to": (now + timedelta(hours=1)).isoformat(),
-            "limit": 2001,
-        },
-    )
-    assert response.status_code == 422
 
 
 # ---------------------------------------------------------------------------

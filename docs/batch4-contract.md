@@ -13,6 +13,10 @@ keyboard shortcuts, mobile affordances; U7 fresh-data pulse, shimmer skeletons, 
 transitions honouring `prefers-reduced-motion`; recalibrated quality-meter age thresholds.
 **L1 (15-min ingest) stays deferred** — do not touch the ingest cadence.
 
+> **Historical snapshot.** U6's command palette and its `g`+key shortcuts were **deleted 2026-11-01**
+> (audit S11); `/` and Cmd/Ctrl-K now focus the single `StationSearch`. Chart brushing lives on in
+> `ChartBrush`, mounted by `BenchmarkChart`.
+
 Decisions taken: **D2 is backend on-demand + the existing `cached()` TTL** (no new Mongo
 collection, no new Spark/CI stage). `GET /api/predictions/latest` returns **all horizons**.
 
@@ -28,7 +32,8 @@ collection, no new Spark/CI stage). `GET /api/predictions/latest` returns **all 
 4. One writer per path. Do not run `git commit`/`git push`; leave changes in the working
    tree. Do not edit files outside your owned path.
 5. No new frontend runtime dependency. Reuse what is installed (React, TanStack Query, zod,
-   lucide-react). Command palette is hand-rolled.
+   lucide-react). Command palette is hand-rolled. **(Moot since 2026-11-01: the palette was deleted;
+   no new dependency was ever added.)**
 
 ## Ownership
 

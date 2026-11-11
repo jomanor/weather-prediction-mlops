@@ -46,6 +46,15 @@ T = TypeVar("T")
 #: is a safety valve rather than a normal path.
 DEFAULT_MAX_ENTRIES = 256
 
+#: TTL of a read whose payload changes as the hourly writers land rows
+#: (``/weather/current``, ``/weather/series``). Short, so an observation is at
+#: most one writer cycle plus this window old.
+CACHE_TTL_LIVE_SECONDS = 30
+#: TTL of a read that computes over a bounded window (``/weather/quality``, the
+#: ``/analytics/*`` routes). The window moves slowly and the compute is the
+#: expensive part, so it is cached ten times longer than a live read.
+CACHE_TTL_AGGREGATE_SECONDS = 300
+
 
 @dataclass
 class _Entry:

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -38,7 +39,11 @@ const BENCHMARK = {
   metrics: { model: { mae: 1.1, n: 24 }, aemet: { mae: 1.4, n: 24 } },
 }
 
-const mocks = vi.hoisted(() => ({ requested: [] as string[] }))
+const mocks = vi.hoisted(() => ({
+  requested: [] as string[],
+  /* A test that needs more than one AEMET-covered station sets this. */
+  summary: null as typeof SUMMARY | null,
+}))
 
 vi.mock('@/api/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/queries')>()
@@ -46,7 +51,7 @@ vi.mock('@/api/queries', async (importOriginal) => {
     ...actual,
     useCities: () => ({ data: REGISTRY, isError: false, error: null }),
     useBenchmarkSummary: () => ({
-      data: SUMMARY,
+      data: mocks.summary ?? SUMMARY,
       isLoading: false,
       isError: false,
       error: null,
@@ -89,6 +94,7 @@ const options = () =>
 
 beforeEach(() => {
   mocks.requested.length = 0
+  mocks.summary = null
 })
 
 describe('BenchmarkPanel city coverage', () => {
@@ -114,5 +120,96 @@ describe('BenchmarkPanel city coverage', () => {
     const table = screen.getByText('Spark GBT MAE').closest('table') as HTMLElement
     expect(within(table).getByText('Madrid')).toBeInTheDocument()
     expect(within(table).queryByText('Pasadena')).not.toBeInTheDocument()
+  })
+})
+
+describe('BenchmarkPanel national table semantics', () => {
+  it('publishes the selected station as a selected row of a grid', () => {
+    renderPanel()
+
+    /* `aria-selected` on a bare <tr> is dropped by screen readers: the table is
+       a single-select grid, so the state is announced. The interaction is
+       unchanged — tab to the row, Enter or Space selects. */
+    const grid = screen.getByRole('grid', { name: 'MAE por estación' })
+    const rows = within(grid).getAllByRole('row')
+    const body = rows.slice(1)
+
+    expect(body).toHaveLength(1)
+    expect(body[0]).toHaveAttribute('aria-selected', 'true')
+    expect(body[0]).toHaveTextContent('Madrid')
+    expect(body[0]).toHaveAttribute('tabindex', '0')
+  })
+
+  it('prints MAE at the same 2 dp as the registry tab', () => {
+    renderPanel()
+    const grid = screen.getByRole('grid', { name: 'MAE por estación' })
+
+    /* PRECISION.error: the row, the verdict and ModelsPanel agree on digits. */
+    expect(within(grid).getByText('1,10')).toBeInTheDocument()
+    expect(within(grid).getByText('1,40')).toBeInTheDocument()
+    expect(screen.queryByText('1,100')).not.toBeInTheDocument()
+  })
+})
+
+/* A second AEMET-covered station, so "the selected row" is a choice and not the
+ * only row in the table. */
+const TWO_CITIES = {
+  ...SUMMARY,
+  cities: [
+    ...SUMMARY.cities,
+    { city: 'Sevilla', n: 30, model: { mae: 1.6, n: 30 }, aemet: { mae: 1.2, n: 30 } },
+  ],
+}
+
+function gridRows(): HTMLElement[] {
+  const grid = screen.getByRole('grid', { name: 'MAE por estación' })
+  return within(grid).getAllByRole('row').slice(1) as HTMLElement[]
+}
+
+describe('BenchmarkPanel national table selection', () => {
+  it('marks the chosen station and leaves the other rows unselected', () => {
+    mocks.summary = TWO_CITIES
+    renderPanel()
+
+    /* Madrid is the resolved city, so exactly one row is selected. Hardcoding
+       `aria-selected` to true would make the grid claim two selections. */
+    expect(gridRows().map((row) => row.getAttribute('aria-selected'))).toEqual(['true', 'false'])
+    expect(gridRows()[0]).toHaveTextContent('Madrid')
+    expect(gridRows()[1]).toHaveTextContent('Sevilla')
+  })
+
+  it('selects the row it was tabbed to on Enter', async () => {
+    mocks.summary = TWO_CITIES
+    renderPanel()
+    const sevilla = gridRows()[1]
+
+    sevilla.focus()
+    expect(sevilla).toHaveFocus()
+    await userEvent.keyboard('{Enter}')
+
+    expect(screen.getByLabelText('Estación')).toHaveValue('Sevilla')
+    expect(mocks.requested).toContain('Sevilla')
+    expect(gridRows()[1]).toHaveAttribute('aria-selected', 'true')
+    expect(gridRows()[0]).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('selects on Space as well, without scrolling or navigating away', async () => {
+    mocks.summary = TWO_CITIES
+    renderPanel()
+
+    gridRows()[1].focus()
+    await userEvent.keyboard(' ')
+
+    expect(screen.getByLabelText('Estación')).toHaveValue('Sevilla')
+  })
+
+  it('prints the verdict difference at the same 2 dp as the table', () => {
+    renderPanel()
+
+    /* Model 1,10 vs AEMET 1,40: the gap is 0,3 and it is printed as 0,30, the
+       same PRECISION.error the two MAE columns use. */
+    expect(
+      screen.getByText('El modelo Spark GBT reduce el MAE en 0,30 °C frente a AEMET.'),
+    ).toBeInTheDocument()
   })
 })

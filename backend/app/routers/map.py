@@ -2,13 +2,11 @@
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.core.cache import TTLCache, cached, get_cache
+from app.core.cache import CACHE_TTL_LIVE_SECONDS, TTLCache, cached, get_cache
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.schemas.map import StationCollection, StationFeature, StationPoint, StationProperties
 
 router = APIRouter(prefix="/map", tags=["map"])
-
-STATIONS_TTL_SECONDS = 30
 
 
 @router.get("/stations", response_model=StationCollection)
@@ -24,7 +22,7 @@ async def map_stations(
         response,
         cache,
         "map:stations",
-        STATIONS_TTL_SECONDS,
+        CACHE_TTL_LIVE_SECONDS,
         lambda: _collect(repo),
     )
 

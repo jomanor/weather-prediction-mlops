@@ -43,29 +43,6 @@ export function windUnit(units: UnitSystem): string {
   return units === 'imperial' ? 'mph' : 'km/h'
 }
 
-/** "22,1°" — a chart value already converted to the chosen unit system. */
-export function formatDegrees(value: number | null | undefined, digits = 0): string {
-  return isNum(value) ? `${fixed(value, digits)}°` : EMPTY
-}
-
-/** "22,1 °C" — a chart value already converted to the chosen unit system. */
-export function formatWithUnit(
-  value: number | null | undefined,
-  unit: string,
-  digits = 1,
-): string {
-  return isNum(value) ? `${fixed(value, digits)} ${unit}` : EMPTY
-}
-
-/** Signed value with its unit: "+1,5 °C" / "−0,8 °C". */
-export function formatSignedWithUnit(
-  value: number | null | undefined,
-  unit: string,
-  digits = 2,
-): string {
-  return isNum(value) ? `${formatSigned(value, digits)} ${unit}` : EMPTY
-}
-
 /** Whole hours elapsed since an ISO timestamp, or null when absent/invalid. */
 export function ageInHours(
   iso: string | null | undefined,
@@ -176,26 +153,6 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
-/** Map a value onto 0..1 across a range, guarding against a zero-width range. */
-export function normalise(value: number, min: number, max: number): number {
-  if (max === min) return 0.5
-  return clamp((value - min) / (max - min), 0, 1)
-}
-
-/** "40,47° N" / "3,56° S" — ISO 6709 hemisphere letters (mono-safe, unambiguous). */
-export function formatLatitude(value: number | null | undefined, digits = 2): string {
-  if (!isNum(value)) return EMPTY
-  const hemisphere = value >= 0 ? 'N' : 'S'
-  return `${fixed(Math.abs(value), digits)}° ${hemisphere}`
-}
-
-/** "3,56° E" / "0,48° W" — ISO 6709 hemisphere letters. */
-export function formatLongitude(value: number | null | undefined, digits = 2): string {
-  if (!isNum(value)) return EMPTY
-  const hemisphere = value >= 0 ? 'E' : 'W'
-  return `${fixed(Math.abs(value), digits)}° ${hemisphere}`
-}
-
 /* ------------------------------------------------------------------------- *
  * Canonical precision and chart metric formatting (docs/app-rethink.md §3).
  *
@@ -269,23 +226,13 @@ export function formatMetricTick(
   return isNum(value) ? fixed(value, digits) : EMPTY
 }
 
-/** Celsius in, display unit out, with the unit: "21,4 °C" / "70,5 °F". */
-export function formatTemperatureWithUnit(
-  celsius: number | null | undefined,
-  units: UnitSystem = 'metric',
-  digits: number = PRECISION.temperature,
-): string {
-  if (!isNum(celsius)) return EMPTY
-  return formatMetric(convertTemperature(celsius, units), 'temperature', units, digits)
-}
-
 /** Signed model error with its unit at the canonical 2 dp: "+0,42 °C". */
 export function formatError(
   value: number | null | undefined,
   unit: string,
   digits: number = PRECISION.error,
 ): string {
-  return formatSignedWithUnit(value, unit, digits)
+  return isNum(value) ? `${formatSigned(value, digits)} ${unit}` : EMPTY
 }
 
 /** Chart data key → metric: the one place the mapping lives. */

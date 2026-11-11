@@ -4,37 +4,31 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from app.core.cache import TTLCache, cached, get_cache
+from app.core.cache import (
+    CACHE_TTL_AGGREGATE_SECONDS,
+    CACHE_TTL_LIVE_SECONDS,
+    TTLCache,
+    cached,
+    get_cache,
+)
 from app.repositories.weather_repo import WeatherRepository, get_weather_repo
 from app.routers.cities import MAX_NAME_LENGTH
 from app.schemas.quality import WeatherQuality
 from app.schemas.weather import (
     WEATHER_FIELDS,
     CitySeries,
-    CitySummary,
     CurrentWeather,
     CurrentWeatherList,
     HistoryResponse,
     SeriesResponse,
-    SummaryResponse,
     WeatherPoint,
-    WeatherRangeResponse,
-    WeatherStats,
 )
-from app.services.stats import compute_stats
 
 router = APIRouter(prefix="/weather", tags=["weather"])
 
 HOURS_QUERY = Query(default=24, ge=1, le=168, description="Hours of data (max 168 = 1 week)")
 
-CURRENT_TTL_SECONDS = 30
-#: ``/series`` runs one bulk read over ``raw_weather`` per request, so it is
-#: cached for the same short window as the other hot reads.
-SERIES_TTL_SECONDS = 30
-QUALITY_TTL_SECONDS = 300
 MAX_BULK_CITIES = 15
-MAX_RANGE_LIMIT = 2000
-MAX_SPARKLINE_POINTS = 48
 
 CITIES_QUERY = Query(
     ...,
@@ -112,7 +106,7 @@ async def current_weather(
         stations = await repo.latest_per_city()
         return CurrentWeatherList(count=len(stations), stations=stations)
 
-    result = await cached(request, response, cache, "weather:current", CURRENT_TTL_SECONDS, load)
+    result = await cached(request, response, cache, "weather:current", CACHE_TTL_LIVE_SECONDS, load)
     if isinstance(result, Response):
         return result
     _set_data_age(
@@ -137,7 +131,7 @@ async def current_weather_for_city(
         return station
 
     result = await cached(
-        request, response, cache, f"weather:current:{city}", CURRENT_TTL_SECONDS, load
+        request, response, cache, f"weather:current:{city}", CACHE_TTL_LIVE_SECONDS, load
     )
     if isinstance(result, Response):
         return result
@@ -161,40 +155,6 @@ async def weather_history(
     # Query newest-first so ``limit`` keeps the most recent window, then flip to
     # chronological order: charts read left-to-right from oldest to newest.
     return HistoryResponse(city=city, hours=hours, count=len(points), points=list(reversed(points)))
-
-
-@router.get("/range/{city}", response_model=WeatherRangeResponse)
-async def weather_range(
-    city: str,
-    from_: datetime = Query(alias="from", description="Range start (ISO-8601 UTC)"),
-    to: datetime = Query(alias="to", description="Range end (ISO-8601 UTC)"),
-    limit: int = Query(default=1000, ge=1, le=MAX_RANGE_LIMIT, description="Page size"),
-    cursor: datetime | None = Query(
-        default=None, description="Keyset cursor: the last timestamp already returned"
-    ),
-    repo: WeatherRepository = Depends(get_weather_repo),
-) -> WeatherRangeResponse:
-    """Arbitrary window, oldest -> newest, keyset-paginated on ``timestamp``."""
-    start, end = _as_utc(from_), _as_utc(to)
-    if start >= end:
-        raise HTTPException(status_code=422, detail="from must be earlier than to")
-
-    after = _as_utc(cursor) if cursor is not None else None
-    if after is not None and not start <= after <= end:
-        raise HTTPException(status_code=422, detail="cursor must fall within [from, to]")
-
-    points: list[WeatherPoint] = await repo.find_range(
-        city,
-        start,
-        end,
-        limit=limit,
-        newest_first=False,
-        after=after,
-    )
-    next_cursor = points[-1].observed_at if len(points) == limit else None
-    return WeatherRangeResponse(
-        city=city, count=len(points), points=points, next_cursor=next_cursor
-    )
 
 
 @router.get("/series", response_model=SeriesResponse)
@@ -224,7 +184,7 @@ async def weather_series(
             cities=[_city_series(name, points) for name in names],
         )
 
-    return await cached(request, response, cache, key, SERIES_TTL_SECONDS, load)
+    return await cached(request, response, cache, key, CACHE_TTL_LIVE_SECONDS, load)
 
 
 def _series_key(names: list[str], hours: int, fields: list[str] | None, step_hours: int) -> str:
@@ -251,52 +211,6 @@ def _city_series(name: str, points: list[WeatherPoint]) -> CitySeries:
     )
 
 
-@router.get("/summary", response_model=SummaryResponse)
-async def weather_summary(
-    cities: str = CITIES_QUERY,
-    hours: int = HOURS_QUERY,
-    repo: WeatherRepository = Depends(get_weather_repo),
-) -> SummaryResponse:
-    """Per-city min/max/first/last/trend plus a downsampled numeric sparkline."""
-    names = _parse_cities(cities)
-    now = datetime.now(timezone.utc)
-    points = await repo.find_many_in_range(
-        names, now - timedelta(hours=hours), now, fields=["temperature"]
-    )
-    return SummaryResponse(
-        hours=hours,
-        count=len(names),
-        cities=[_city_summary(name, points) for name in names],
-    )
-
-
-def _city_summary(name: str, points: list[WeatherPoint]) -> CitySummary:
-    values = [
-        point.temperature
-        for point in points
-        if point.city == name and point.temperature is not None
-    ]
-    if not values:
-        return CitySummary(city=name, points=[])
-    return CitySummary(
-        city=name,
-        min=min(values),
-        max=max(values),
-        first=values[0],
-        last=values[-1],
-        trend=values[-1] - values[0],
-        points=_downsample(values, MAX_SPARKLINE_POINTS),
-    )
-
-
-def _downsample(values: list[float], limit: int) -> list[float]:
-    """Evenly spaced values, always including the first and last."""
-    if len(values) <= limit:
-        return list(values)
-    step = (len(values) - 1) / (limit - 1)
-    return [values[round(index * step)] for index in range(limit)]
-
-
 @router.get("/quality", response_model=WeatherQuality)
 async def weather_quality(
     request: Request,
@@ -320,20 +234,5 @@ async def weather_quality(
         )
 
     return await cached(
-        request, response, cache, f"weather:quality:{days}", QUALITY_TTL_SECONDS, load
+        request, response, cache, f"weather:quality:{days}", CACHE_TTL_AGGREGATE_SECONDS, load
     )
-
-
-@router.get("/stats/{city}", response_model=WeatherStats)
-async def weather_stats(
-    city: str,
-    hours: int = HOURS_QUERY,
-    repo: WeatherRepository = Depends(get_weather_repo),
-) -> WeatherStats:
-    now = datetime.now(timezone.utc)
-    points = await repo.find_range(
-        city, now - timedelta(hours=hours), now, limit=1000, newest_first=False
-    )
-    if not points:
-        raise HTTPException(status_code=404, detail=f"No data found for city '{city}'")
-    return compute_stats(city, hours, points)

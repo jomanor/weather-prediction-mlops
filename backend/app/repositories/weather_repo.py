@@ -28,16 +28,11 @@ from app.core.thresholds import (
     QUALITY_OK_AGE_HOURS,
     QUALITY_WARN_AGE_HOURS,
 )
+from app.core.units import MS_TO_KMH
 from app.db.mongo import get_db
 from app.repositories.city_repo import registry_names
 from app.schemas.quality import CityQuality, QualityStatus
 from app.schemas.weather import CurrentWeather
-
-#: Both writers request ``wind_speed_unit=ms`` (see ``scripts/ingest_weather.py``
-#: and ``scripts/backfill_historical_data.py``), so stored wind speeds are m/s;
-#: the API contract (``CurrentWeather.wind_speed``) is km/h. Convert here, at
-#: the boundary, and nowhere else.
-MS_TO_KMH = 3.6
 
 
 def _wind_kmh(value: Any) -> float | None:
@@ -281,18 +276,14 @@ class WeatherRepository:
         end: datetime,
         limit: int = 1000,
         newest_first: bool = True,
-        after: datetime | None = None,
     ) -> list[CurrentWeather]:
-        """Observations in ``[start, end]``, optionally strictly after ``after`` (keyset).
+        """Observations in ``[start, end]``.
 
         ``raw_weather`` first; ``weather_data`` only when it has no rows in the
         window, so one leftover legacy document cannot shrink the history to a
         single point.
         """
-        window: dict[str, datetime] = {"$gte": start, "$lte": end}
-        if after is not None:
-            window["$gt"] = after
-        query = {"city": city, "timestamp": window}
+        query = {"city": city, "timestamp": {"$gte": start, "$lte": end}}
         direction = -1 if newest_first else 1
 
         cursor = self._raw.find(query).sort("timestamp", direction).limit(limit)

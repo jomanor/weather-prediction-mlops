@@ -5,13 +5,11 @@ import {
   compassPoint,
   convertTemperature,
   formatAgeHours,
-  formatDegrees,
   formatNumber,
   formatSigned,
   formatTemperature,
-  formatWithUnit,
   isNum,
-  normalise,
+  PRECISION,
 } from '@/lib/format'
 
 describe('isNum', () => {
@@ -75,30 +73,19 @@ describe('formatNumber', () => {
   })
 })
 
-describe('normalise', () => {
-  it('clamps into 0..1', () => {
-    expect(normalise(5, 0, 10)).toBe(0.5)
-    expect(normalise(-1, 0, 10)).toBe(0)
-    expect(normalise(99, 0, 10)).toBe(1)
-  })
 
-  it('handles a zero-width range', () => {
-    expect(normalise(5, 5, 5)).toBe(0.5)
+describe('PRECISION', () => {
+  /* The one authority the panels read: one number of decimals per quantity. */
+  it('holds a single precision per quantity', () => {
+    expect(PRECISION.temperature).toBe(1)
+    expect(PRECISION.error).toBe(2)
+    expect(PRECISION.skill).toBe(2)
+    expect(PRECISION.percent).toBe(0)
+    expect(PRECISION.probability).toBe(1)
   })
 })
 
-
-describe('chart formatting helpers', () => {
-  it('formats an already-converted degree value', () => {
-    expect(formatDegrees(21.4, 0)).toBe('21°')
-    expect(formatDegrees(null)).toBe('—')
-  })
-
-  it('appends the unit with a space', () => {
-    expect(formatWithUnit(21.44, '°C', 1)).toBe('21,4 °C')
-    expect(formatWithUnit(2, 'mm', 1)).toBe('2,0 mm')
-  })
-
+describe('formatted ages', () => {
   it('derives a human age from an ISO timestamp', () => {
     const now = new Date('2026-09-25T12:00:00Z').getTime()
     expect(ageInHours('2026-09-25T09:00:00Z', now)).toBe(3)

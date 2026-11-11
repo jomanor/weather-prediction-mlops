@@ -1,10 +1,11 @@
 # Handoff — operational notes for the next session
 
 **Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
-items, batches A–F, and the owner decisions). Batches A and B are done, and finding 7 (`POST /refresh`)
-is resolved by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
-`docs/roadmap.md` *Accepted follow-ups* when it is exhausted. Do not start a batch before answering
-the owner questions that batch depends on (Spark for E, Analítica and Pasadena for D).
+items, batches A–F, and the owner decisions). Batches A, B and C are done (C is local and uncommitted as
+of 2026-11-01), and finding 7 (`POST /refresh`) is resolved by deletion (`decaba5`). Pick a batch from its
+*Suggested order* table, fall back to `docs/roadmap.md` *Accepted follow-ups* when it is exhausted. **Next
+is D** — which needs the owner's Analítica and Pasadena answers — **or E**, which needs the Spark answer.
+Do not start a batch before answering the owner questions that batch depends on.
 
 Read this **before** `docs/roadmap.md`. The roadmap holds the plan and the status
 checklist; this file holds the environment, the hard rules and the traps that are not
@@ -114,7 +115,7 @@ was ruled out.
   - **M4 diagnostics** (additive `model_registry.diagnostics`): `by_city`, `by_hour_of_day` (24, local hour), `by_rain_bucket` (dry <0.1 / light 0.1–2 / moderate 2–8 / heavy ≥8 mm), `drift_psi` (10 equal-width train bins, eps-guarded, null when <10 rows; a train→test proxy). Temperature slices fill rmse/mae/bias, rain slices brier, empty slices `n:0` + nulls. Exposed via `/api/models` (`ModelInfo.diagnostics`) and rendered as a ModelsPage "Deriva" badge (`<0.1` ok / `≤0.25` warn / `>0.25` drift, neutral when absent); `scripts/pipeline_summary.py` reports the top-3 per-feature PSI per model (informational) and emits a non-blocking `::warning` only on actionable degradation (`skill_score <= 0.0`), title `Model skill degradation`.
   - **Prediction API**: `GET /api/predictions/latest?horizon=` (omitted → one row per `(city, horizon_hours)`; provided → one row per city) and `GET /api/predictions/{city}?horizon=`; response shapes unchanged. Frontend horizon selector (1/3/6/12/24, default 1) on the station page + `useLatestPredictions(horizon)` on overview.
   - **D2 analytics**: six cached read-only endpoints under `/api/analytics` (daily, climatology, wind-rose, diurnal, correlation, error-by-hour), all on-demand over `weather_features`, TTL 300 s + ETag/304, no new collection and no Spark/CI stage. New frontend "Analítica" page (feature `analytics`, order 50). `error-by-hour` joins the observed temperature at the **target hour** `source_timestamp + horizon_hours`, not `prediction_timestamp`.
-  - **U6**: chart brushing + synced x-domain via `useChartSync` (domain now reset on unmount); hand-rolled command palette (Cmd/Ctrl-K, focus trap, Escape); `g`+key section shortcuts; `/` focuses search; mobile station bottom sheet + swipe.
+  - **U6**: chart brushing + synced x-domain via `useChartSync` (domain now reset on unmount); hand-rolled command palette (Cmd/Ctrl-K, focus trap, Escape); `g`+key section shortcuts; `/` focuses search; mobile station bottom sheet + swipe. **(Palette and `g` chords deleted 2026-11-01, audit S11; `/` and Cmd/Ctrl-K now focus `StationSearch`.)**
   - **U7**: fresh-data pulse keyed on data age (`useFreshness`, 120 min window matching hourly inference), shimmer skeletons, 120–240 ms transitions all gated by `prefers-reduced-motion`.
   - **Quality-meter age thresholds recalibrated** (`backend/app/repositories/weather_repo.py:182-183`): `QUALITY_OK_AGE_HOURS = 12.0` (was 2.0), `QUALITY_WARN_AGE_HOURS = 18.0` (was 6.0); completeness `0.95/0.80` deliberately unchanged. Rationale: the ~6 h rebuild cycle (plus GH jitter up to ~1.7 h) binds, so a healthy pipeline peaks ~12–14 h. The meter will still report `bad` on completeness once the one-shot backfill rolls off — the correct signal that the ingest cadence (L1) is unfixed.
   - **Cache hardening**: `cached()` coalesces concurrent cold calls per key via a shielded `asyncio.Task` (no key poisoning; a cancelling waiter cannot cancel the shared load); analytics computation bounded by `asyncio.Semaphore(2)`.
@@ -307,7 +308,8 @@ the cut list live in `docs/app-rethink.md`.
   (the former quality/models/benchmark/analytics pages as tabs). `/benchmark`,
   `/models`, `/analytics` redirect with `Navigate replace`; `/stations` was kept
   to preserve deep links. Nav is 3 items on both the top bar and the mobile
-  bottom bar; shortcuts are `g r`, `g e`, `g s`.
+  bottom bar; shortcuts are `g r`, `g e`, `g s` (deleted 2026-11-01, audit S11 —
+  `/` and Cmd/Ctrl-K focus the one `StationSearch`).
 - **Removed** — `StationSheet` (+ `sheet.ts`), `CityManager`, `DerivedPanel`,
   the per-station model name/version lines, the home MAE stat/quality meter, the
   city write hooks, and the unused `Sparkline`. Tapping a pin or a row now
@@ -953,3 +955,82 @@ cached) — it fails when that guard is removed. `registry_names` now has a malf
 test double no longer filters out the very documents the guard exists for. One unexplained
 `test_cache.py` flake was seen once by the reviewer in ~90 runs and could not be reproduced in 2000
 targeted replays; the invariant it asserts is now covered by two deterministic tests.
+
+## 2026-11-01 — Batch C: kill the dead weight (audit 13, 14, 17, 18, 19, 20 + S2, S6, S9, S11, S12)
+
+**Local, uncommitted.** No commit id yet, nothing pushed, **no Netlify deployment** — auto publishing
+stays paused (`netlify.toml` `ignore = "exit 0"`), so the state of this batch is *committed to the
+working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdicts for this batch are
+**not recorded here**; only the gates below were measured, by the docs pass, on this tree.
+
+- **F13 — the four endpoints with no client are gone.** Deleted `GET /api/weather/range/{city}`,
+  `GET /api/weather/summary` and `GET /api/weather/stats/{city}` (and their `/api` aliases, which follow
+  the double mount) together with the schemas `CitySummary`, `SummaryResponse`, `WeatherRangeResponse`,
+  `Stats`, `WeatherStats` and `backend/app/services/stats.py` (+ `backend/tests/test_stats.py`). Surviving
+  weather routes: `/current`, `/current/{city}`, `/history/{city}`, `/series`, `/quality` — `/series` is
+  live on the station page since Batch 6c, so it stayed. `/metrics`, `/map/stations`, `/cities`,
+  `/health`, `/models`, `/predictions/*`, `/benchmark/*` and all six `/analytics/*` routes are untouched.
+- **F14 / S12 — the frontend's optimistic self-image is gone.** Deleted
+  `components/ui/Tabs.tsx` (no consumer; Sistema uses `Segmented`), `lib/derived.ts` (+ its test),
+  `components/shell/CommandPalette.tsx`, `command-palette.ts` and `shortcuts.ts`, and the hooks
+  `useHealth`, `useLatestPredictions`, `useStats`, `useAnalyticsClimatology`, `useAnalyticsCorrelation`,
+  `useAnalyticsErrorByHour` with their schemas (`healthSchema`, `latestPredictionsSchema`,
+  `statsResponseSchema`, the geo schemas, and the climatology/correlation/errorByHour blocks).
+  `useAnalyticsDaily`/`Diurnal`/`WindRose` stay (they render).
+- **S11 — the palette and the `g` chords are gone.** `/` and Cmd/Ctrl-K now focus the single
+  `StationSearch` (`StationSearch.tsx` binds both); `AppShell` mounts one search — inline from `md` up,
+  its own row below it — so there is one element id and one set of global listeners. The `g r`/`g e`/`g s`
+  chords are deleted (the Batches-4/5 entries above are marked accordingly, not rewritten).
+- **F17 — one precision.** `PRECISION` in `lib/format.ts` is the only source of decimal places
+  (temperature/wind/precip/error/skill); 7 dead helpers deleted (`formatDegrees`, `formatWithUnit`,
+  `formatSignedWithUnit`, `normalise`, `formatLatitude`, `formatLongitude`, `formatTemperatureWithUnit`).
+  The audit's "nine" was rounded up.
+- **F19 — the a11y slips.** Benchmark rows now sit in a `role="grid"`/`role="row"` structure so
+  `aria-selected` is announced, the map label is no longer an `aria-label` on a plain `<div>`, the third
+  theme option is named "Tema del sistema" (not "Sistema"), and the doubled `StationSearch` is one mount.
+- **F20 — one authority per small rule.** `backend/app/core/units.py` holds `MS_TO_KMH = 3.6` (the two
+  repositories no longer each declare it); `CACHE_TTL_LIVE_SECONDS` (30) and
+  `CACHE_TTL_AGGREGATE_SECONDS` (300) live in `core/cache.py` instead of being re-typed per router;
+  `scripts/watchdog.py` pages the open-issue scan (`GITHUB_PAGE_SIZE = 100`, `GITHUB_MAX_PAGES = 50`, so
+  a repo past 100 open issues stops forking duplicate rolling issues);
+  `scripts/dedupe_predictions.py` streams a projection (`_id`, `city`, `source_timestamp`,
+  `horizon_hours`, `prediction_timestamp`) and deletes in `$in` batches of 1000 instead of
+  materialising the collection. `pyproject.toml` **already had** `[tool.pytest.ini_options] testpaths`
+  (`["tests", "backend/tests"]`) — nothing to add. **It does not make bare `pytest` work**, and the
+  audit's premise that it would is wrong: both suites are Python packages named `tests`, so collecting
+  them in one run raises `ImportPathMismatchError` (`tests.conftest` vs `backend/tests/conftest`);
+  `--import-mode=importlib` does not help either (duplicate conftest plugin name). The two supported
+  entry points stay the per-directory invocations in `Makefile` and CI — do not "fix" this by renaming
+  the packages without re-checking `tests/integration/*`, which imports `from tests.conftest import
+  REPO_ROOT`.
+- **S2 / S9 — Spanish UI, Spanish labels.** `ModelsPanel` maps the registry stage through
+  `stageLabel` (`production` → "Producción", `staging` → "Staging"); `DataQualityMeter` renders the table
+  only when `flagged > 0`.
+- **S6 (partial) / CI — one interpreter.** Every workflow is Python **3.13** (`backfill`, `ingest`,
+  `watchdog`, both `ci.yml` jobs, the pyspark job included) **except `ml-pipeline.yml`, which stays 3.11**
+  because `spark/requirements.txt` pins `pandas==2.0.3` and that release ships only
+  cp38–cp311 wheels — the install would fall back to a source build that does not compile. Unpin pandas
+  when Batch E drops Spark.
+- **Gates measured on this tree** (2026-11-01, after the repo-half deletions): `cd backend &&
+  ../.venv/bin/python -m pytest tests -q` → `325 passed`; `PYSPARK_PYTHON=$PWD/.venv/bin/python
+  .venv/bin/python -m pytest tests -q` → `468 passed, 7 skipped`; `cd frontend && npm run test` →
+  `Test Files 47 passed (47)` / `Tests 350 passed (350)`; `npm run typecheck` clean, `npm run lint`
+  0 errors (one pre-existing `vite.config.ts` warning), `npm run build` ok; `ruff check` + `black
+  --check backend scripts` clean (72 files).
+- **Deliberate leftovers:** `ChartBrush` is **kept** — it is live, mounted by `BenchmarkChart.tsx`, so
+  finding 14's "dead primitive" verdict was wrong; the `docker-compose` `mlflow` / `spark-history` /
+  `spark-scheduler` services and `spark/Dockerfile` are deferred to Batch E (they go with Spark);
+  `historyResponseSchema` has zero consumers but mirrors a live route, so it stays until the
+  `openapi-typescript` generation lands (F3); `frontend/src/api/client.test.ts` still uses the literal
+  path `/weather/stats/x` as a throw-away URL for the `allowNotFound` cases — it never hits the route;
+  the dedupe keeps the same ObjectId list semantics (`_id` added to `to_delete` in the same order).
+- **F14 (repo half) / S6 — the phantom dependencies are gone.** Deleted `scripts/sync_to_supabase.py`,
+  the `Makefile` `sync-supabase` target and the `netcdf4`/`xarray` declarations in the root
+  `pyproject.toml` (`dependencies = []`); `uv lock` dropped `netcdf4`, `xarray`, `pandas`,
+  `python-dateutil`, `pytz`, `six` and the lock-file `tzdata`. Neither package was installed in the
+  venv (`import netcdf4` already failed), so the declaration was phantom: `pruebas.py` was its only
+  importer and that script needs a `.nc` file that never existed. `pruebas.py` itself is **gitignored,
+  not part of the repo** (`.gitignore:9`), so it was left on disk instead of silently deleted; it is now
+  unrunnable without its two packages, which is the intended end state. `pyspark` stays until Batch E.
+  `tzdata` stays declared in `scripts/requirements.txt` (the backfill's zoneinfo needs it) — only the
+  root lock lost it, and nothing installed from the lock needs it.

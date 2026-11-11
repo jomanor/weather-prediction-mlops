@@ -130,6 +130,31 @@ describe('DataQualityMeter', () => {
     ).toBeInTheDocument()
   })
 
+  it('drops the per-station table when every station is in range', () => {
+    const healthy = {
+      ...DATA,
+      cities: DATA.cities
+        .filter((city) => city.status === 'ok')
+        .map((city) => ({ ...city, completeness: 0.99, status: 'ok' as const })),
+    }
+    mockQuery({ data: healthy })
+    render(<DataQualityMeter />)
+
+    /* A row per station saying "Correcto" said nothing the summary did not. */
+    expect(screen.queryByRole('table')).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: 'Estación' })).toBeNull()
+
+    /* The accessible status text stays: the counts, the hint and the worst badge. */
+    expect(screen.getByText('Con aviso')).toBeInTheDocument()
+    expect(screen.getByText('todo en rango')).toBeInTheDocument()
+    expect(screen.getByText('Correcto')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.',
+      ),
+    ).toBeInTheDocument()
+  })
+
   it('renders a retry action on error', () => {
     mockQuery({ isError: true, error: new Error('boom') })
     render(<DataQualityMeter />)

@@ -31,11 +31,12 @@ describe('clampDays', () => {
 
   it('falls back to the default for non-finite input and truncates fractions', () => {
     expect(clampDays(Number.NaN, ANALYTICS_BOUNDS.daily)).toBe(90)
-    expect(clampDays(45.9, ANALYTICS_BOUNDS.errorByHour)).toBe(45)
+    expect(clampDays(45.9, ANALYTICS_BOUNDS.windRose)).toBe(45)
   })
 
-  it('keeps the error-by-hour window inside its tighter bound', () => {
-    expect(clampDays(365, ANALYTICS_BOUNDS.errorByHour)).toBe(90)
+  it('keeps the wind-rose window inside its own bound', () => {
+    expect(clampDays(365, ANALYTICS_BOUNDS.windRose)).toBe(365)
+    expect(clampDays(1, ANALYTICS_BOUNDS.diurnal)).toBe(7)
   })
 })
 

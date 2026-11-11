@@ -1,5 +1,5 @@
 .PHONY: help install build up down restart clean logs test test-api test-web lint format \
-        backfill ingest sync-atlas sync-supabase coverage dev-api dev-web
+        backfill ingest sync-atlas coverage dev-api dev-web
 
 help:
 	@echo "install      install backend and frontend dependencies"
@@ -74,6 +74,3 @@ ingest:
 
 sync-atlas:
 	.venv/bin/python scripts/sync_to_atlas.py
-
-sync-supabase:
-	.venv/bin/python scripts/sync_to_supabase.py

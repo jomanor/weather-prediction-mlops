@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import {
   benchmarkSchema,
   currentWeatherSchema,
-  latestPredictionsSchema,
   modelsResponseSchema,
   predictionSchema,
   registryModelSchema,
@@ -230,25 +229,6 @@ describe('seriesResponseSchema', () => {
 describe('stationsResponseSchema', () => {
   it('parses an empty network', () => {
     expect(stationsResponseSchema.parse({ count: 0, stations: [] }).stations).toEqual([])
-  })
-})
-
-describe('latestPredictionsSchema', () => {
-  it('fills defaults for optional numeric fields', () => {
-    const parsed = latestPredictionsSchema.parse({
-      count: 1,
-      generated_at: null,
-      predictions: [
-        {
-          city: 'Madrid',
-          source_timestamp: '2026-09-23T13:00:00Z',
-          prediction_timestamp: '2026-09-23T13:05:00Z',
-        },
-      ],
-    })
-    expect(parsed.predictions[0].horizon_hours).toBe(1)
-    expect(parsed.predictions[0].predicted_temperature).toBeNull()
-    expect(parsed.predictions[0].temp_model_name).toBeNull()
   })
 })
 

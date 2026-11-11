@@ -580,10 +580,15 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
 
   return (
     <div className={cn('relative h-full w-full', className)}>
+      {/* MapLibre owns the canvas, so the container carries the name. A bare
+          `aria-label` on a div is dropped by every screen reader; `region` is
+          what makes the label real, and the station data itself lives in the
+          table next to it. */}
       <div
         ref={containerRef}
-        className="h-full w-full bg-panel-2"
+        role="region"
         aria-label="Mapa de estaciones meteorológicas"
+        className="h-full w-full bg-panel-2"
       />
 
       {/* Desktop: the fixed panel. Phone: the same content behind "Capas". */}

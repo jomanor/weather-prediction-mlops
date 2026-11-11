@@ -57,6 +57,40 @@ def test_missing_wind_stays_none():
     assert _from_raw_weather({"city": "Madrid", "timestamp": OBSERVED_AT}).wind_speed is None
 
 
+def test_the_contract_value_is_18_kmh_for_5_ms():
+    """Pinned to the number, not to ``MS_TO_KMH``.
+
+    A test written as ``5.0 * MS_TO_KMH`` reads the constant it is supposed to
+    guard, so halving the constant leaves it green. The contract says 5 m/s is
+    18 km/h on the wire, which is the only thing a client can observe.
+    """
+    raw = _from_raw_weather(
+        {
+            "city": "Madrid",
+            "timestamp": OBSERVED_AT,
+            "payload": {"current": {"wind_speed_10m": 5.0}},
+        }
+    )
+    legacy = _from_weather_data(
+        {"city": "Madrid", "timestamp": OBSERVED_AT, "data": {"wind": {"speed": 5.0}}}
+    )
+
+    assert raw is not None and legacy is not None
+    assert raw.wind_speed == 18.0
+    assert legacy.wind_speed == 18.0
+
+
+def test_the_conversion_has_one_authority():
+    """Both repositories read the same 3.6, from ``app.core.units``."""
+    from app.core import units
+    from app.repositories import analytics_repo as analytics
+    from app.repositories import weather_repo as weather
+
+    assert units.MS_TO_KMH == 3.6
+    assert weather.MS_TO_KMH is units.MS_TO_KMH
+    assert analytics.MS_TO_KMH is units.MS_TO_KMH
+
+
 # ---------------------------------------------------------------------------
 # ``is_day``: only raw_weather carries it (``payload.current.is_day``)
 # ---------------------------------------------------------------------------

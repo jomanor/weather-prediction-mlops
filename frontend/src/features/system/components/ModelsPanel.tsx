@@ -8,10 +8,33 @@ import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useModels } from '@/features/models/queries'
 import { driftLabel, driftTone, maxDriftPsi } from '@/features/models/diagnostics'
 import { cn } from '@/lib/cn'
-import { formatDateTime, formatNumber, formatPercent, formatSigned, isNum } from '@/lib/format'
+import {
+  formatDateTime,
+  formatNumber,
+  formatPercent,
+  formatSigned,
+  isNum,
+  PRECISION,
+} from '@/lib/format'
 import type { ModelDiagnostics } from '@/api/schemas'
 
 type SkillTone = 'ok' | 'warn' | 'bad' | 'neutral'
+
+/**
+ * Registry stages are the backend's English lifecycle values; the table is
+ * Spanish. Anything the registry adds later falls through unchanged rather than
+ * printing nothing.
+ */
+const STAGE_LABELS: Record<string, string> = {
+  production: 'Producción',
+  staging: 'Staging',
+  superseded: 'Sustituido',
+  none: 'Sin estado',
+}
+
+export function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? stage
+}
 
 /** Skill thresholds: ≥ 0.3 is a solid win, 0–0.3 marginal, < 0 worse than the baseline. */
 export function skillTone(skill: number | null | undefined): SkillTone {
@@ -33,13 +56,20 @@ function DriftBadge({ diagnostics }: { diagnostics: ModelDiagnostics }) {
     )
   }
   return (
-    <Badge tone={driftTone(psi)} title={`PSI máx. ${formatNumber(psi, 2)}`}>
+    <Badge tone={driftTone(psi)} title={`PSI máx. ${formatNumber(psi, PRECISION.skill)}`}>
       {label}
     </Badge>
   )
 }
 
-/** Registry tab: one row per artefact, honest metrics folded into an expander. */
+/**
+ * Registry tab: one row per artefact, honest metrics folded into an expander.
+ *
+ * The expander carries only facts the row does not — the persistence and
+ * climatology baselines, Brier/AUC, the split and the interval offsets. The
+ * skill score it used to repeat is the row's own column, and it printed at a
+ * different precision one click away (finding 17).
+ */
 export function ModelsPanel() {
   const models = useModels()
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -130,27 +160,30 @@ export function ModelsPanel() {
                               +{model.horizon_hours} h
                             </td>
                             <td className="nums px-4 py-2.5 text-right text-fg-2">
-                              {formatNumber(metrics.rmse ?? null, 3)}
+                              {formatNumber(metrics.rmse ?? null, PRECISION.error)}
                             </td>
                             <td className="nums px-4 py-2.5 text-right text-fg-2">
-                              {formatNumber(metrics.mae ?? null, 3)}
+                              {formatNumber(metrics.mae ?? null, PRECISION.error)}
                             </td>
                             <td className="nums px-4 py-2.5 text-right text-fg-2">
-                              {formatNumber(metrics.r2 ?? null, 3)}
+                              {formatNumber(metrics.r2 ?? null, PRECISION.skill)}
                             </td>
                             <td className="px-4 py-2.5 text-right">
                               <Badge tone={skillTone(metrics.skill_score)}>
-                                {formatNumber(metrics.skill_score ?? null, 2)}
+                                {formatNumber(metrics.skill_score ?? null, PRECISION.skill)}
                               </Badge>
                             </td>
                             <td className="nums px-4 py-2.5 text-right text-fg-2">
                               {formatPercent(
                                 isNum(metrics.coverage) ? metrics.coverage * 100 : null,
-                                0,
+                                PRECISION.percent,
                               )}
                               {isNum(model.interval?.level) ? (
                                 <span className="ml-1 text-[10px] text-fg-3">
-                                  n{formatPercent((model.interval?.level ?? 0) * 100, 0)}
+                                  {`n${formatPercent(
+                                    (model.interval?.level ?? 0) * 100,
+                                    PRECISION.percent,
+                                  )}`}
                                 </span>
                               ) : null}
                             </td>
@@ -162,7 +195,7 @@ export function ModelsPanel() {
                             </td>
                             <td className="px-4 py-2.5">
                               <Badge tone={model.stage === 'production' ? 'ok' : 'neutral'}>
-                                {model.stage}
+                                {stageLabel(model.stage)}
                               </Badge>
                             </td>
                           </>
@@ -173,17 +206,28 @@ export function ModelsPanel() {
                             interval={model.interval}
                             commit={model.commit}
                             rows={[
-                              ['RMSE persistencia', formatNumber(metrics.persistence_rmse ?? null, 3)],
-                              ['RMSE climatología', formatNumber(metrics.climatology_rmse ?? null, 3)],
-                              ['Brier', formatNumber(metrics.brier ?? null, 3)],
-                              ['Brier persistencia', formatNumber(metrics.persistence_brier ?? null, 3)],
-                              ['Prevalencia lluvia', formatPercent(
-                                isNum(metrics.prevalence) ? metrics.prevalence * 100 : null,
-                                1,
-                              )],
-                              ['AUC ROC', formatNumber(metrics.auc_roc ?? null, 3)],
-                              ['AUC PR', formatNumber(metrics.auc_pr ?? null, 3)],
-                              ['Skill score', formatNumber(metrics.skill_score ?? null, 3)],
+                              [
+                                'RMSE persistencia',
+                                formatNumber(metrics.persistence_rmse ?? null, PRECISION.error),
+                              ],
+                              [
+                                'RMSE climatología',
+                                formatNumber(metrics.climatology_rmse ?? null, PRECISION.error),
+                              ],
+                              ['Brier', formatNumber(metrics.brier ?? null, PRECISION.error)],
+                              [
+                                'Brier persistencia',
+                                formatNumber(metrics.persistence_brier ?? null, PRECISION.error),
+                              ],
+                              [
+                                'Prevalencia lluvia',
+                                formatPercent(
+                                  isNum(metrics.prevalence) ? metrics.prevalence * 100 : null,
+                                  PRECISION.probability,
+                                ),
+                              ],
+                              ['AUC ROC', formatNumber(metrics.auc_roc ?? null, PRECISION.skill)],
+                              ['AUC PR', formatNumber(metrics.auc_pr ?? null, PRECISION.skill)],
                             ]}
                           />
                         }
@@ -260,7 +304,9 @@ function DetailGrid({
     if (isNum(interval.lower_offset) && isNum(interval.upper_offset)) {
       items.push([
         'Offsets intervalo',
-        `${formatSigned(interval.lower_offset, 2)} / ${formatSigned(interval.upper_offset, 2)} °C`,
+        `${formatSigned(interval.lower_offset, PRECISION.error)} / ${
+          formatSigned(interval.upper_offset, PRECISION.error)
+        } °C`,
       ])
     }
   }

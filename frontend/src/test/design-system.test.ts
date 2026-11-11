@@ -105,6 +105,41 @@ describe('design tokens', () => {
   })
 })
 
+describe('one precision per metric', () => {
+  /* Finding 17: the row and its expander printed skill as `0,53` and `0,532`,
+     and RMSE as 3 dp here and 2 dp in Benchmark. The guard scanned only
+     `components/ui` and `components/charts`, so it could not see it. */
+  const PANELS = [
+    'src/features/system/components/ModelsPanel.tsx',
+    'src/features/system/components/BenchmarkPanel.tsx',
+    /* The bench tab renders this one through BenchmarkPanel; leaving it out is
+       the same blind spot that hid finding 17 (it printed MAE at 2 dp by hand). */
+    'src/features/benchmark/MetricsCompare.tsx',
+  ]
+
+  it('takes every displayed precision from PRECISION in lib/format', () => {
+    for (const relative of PANELS) {
+      const code = readFileSync(path.join(ROOT, relative), 'utf8')
+      expect(code, `${relative}: must import PRECISION`).toContain('PRECISION')
+      /* A digit after the comma is a local precision authority; the same metric
+         would then print differently one click (or one tab) away. */
+      /* `,?` before the paren: prettier puts a trailing comma in every
+         multi-line call, which is exactly how these panels are written —
+         without it the guard missed `formatNumber(\n  value,\n  3,\n)`. */
+      /* `,?` before the paren: prettier puts a trailing comma in every
+         multi-line call, which is exactly how these panels are written —
+         without it the guard missed `formatNumber(\n  value,\n  3,\n)`.
+         `[^;()]`: stop at the first paren, otherwise a later call's argument
+         (`commit.slice(0, 10)`) is read as this call's precision. */
+      const local = [...code.matchAll(/format(?:Number|Percent|Signed)\([^;()]{0,120}?,\s*(\d+)\s*,?\s*\)/g)]
+      expect(
+        local.map(([, digits]) => digits),
+        `${relative}: local precision literal, use PRECISION`,
+      ).toEqual([])
+    }
+  })
+})
+
 describe('primitives and charts', () => {
   const files = [
     ...sourceFiles(path.join(ROOT, 'src/components/ui')),

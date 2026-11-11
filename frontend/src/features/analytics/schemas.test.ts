@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   analyticsDailySchema,
-  climatologySchema,
-  correlationSchema,
   diurnalSchema,
-  errorByHourSchema,
   windRoseSchema,
 } from '@/features/analytics/schemas'
 
@@ -55,23 +52,6 @@ describe('analyticsDailySchema (/analytics/daily)', () => {
   })
 })
 
-describe('climatologySchema (/analytics/climatology)', () => {
-  it('parses a daily baseline with a null-mean day', () => {
-    const parsed = climatologySchema.parse({
-      city: 'Sevilla',
-      generated_at: '2026-09-25T12:00:00Z',
-      basis_years: 12.5,
-      series: [
-        { day_of_year: 1, tmean: 11.2, tmin: 6.1, tmax: 16.3, n: 12 },
-        { day_of_year: 366, tmean: null, tmin: null, tmax: null, n: 0 },
-      ],
-    })
-    expect(parsed.basis_years).toBeCloseTo(12.5)
-    expect(parsed.series[1].tmean).toBeNull()
-    expect(parsed.series[1].n).toBe(0)
-  })
-})
-
 describe('windRoseSchema (/analytics/wind-rose)', () => {
   it('keeps a null mean speed instead of inventing one', () => {
     const parsed = windRoseSchema.parse({
@@ -100,45 +80,3 @@ describe('diurnalSchema (/analytics/diurnal)', () => {
   })
 })
 
-describe('correlationSchema (/analytics/correlation)', () => {
-  it('parses a pairwise matrix with null pairs', () => {
-    const parsed = correlationSchema.parse({
-      days: 90,
-      var: 'temperature',
-      cities: ['Madrid', 'Vigo'],
-      matrix: [
-        [1, null],
-        [null, 1],
-      ],
-    })
-    expect(parsed.matrix[0][0]).toBe(1)
-    expect(parsed.matrix[0][1]).toBeNull()
-  })
-})
-
-describe('errorByHourSchema (/analytics/error-by-hour)', () => {
-  it('parses a point with a persistence baseline', () => {
-    const parsed = errorByHourSchema.parse({
-      days: 30,
-      points: [
-        {
-          horizon_hours: 12,
-          hour: 15,
-          n: 40,
-          mae: 1.8,
-          rmse: 2.4,
-          bias: -0.2,
-          persistence_mae: 2.6,
-        },
-      ],
-    })
-    expect(parsed.points[0].persistence_mae).toBeCloseTo(2.6)
-    expect(parsed.points[0].n).toBe(40)
-  })
-
-  it('coerces missing metric fields to null', () => {
-    const parsed = errorByHourSchema.parse({ days: 30, points: [{ horizon_hours: 1, hour: 0 }] })
-    expect(parsed.points[0].mae).toBeNull()
-    expect(parsed.points[0].persistence_mae).toBeNull()
-  })
-})

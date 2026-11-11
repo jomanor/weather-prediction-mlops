@@ -18,7 +18,7 @@ import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
 import { aemetCoveredCities, aemetCoveredNames } from '@/lib/aemet-coverage'
 import { cn } from '@/lib/cn'
-import { formatNumber, isNum } from '@/lib/format'
+import { formatInteger, formatNumber, isNum, PRECISION } from '@/lib/format'
 
 const RANGE_HOURS = [24, 48, 72] as const
 type BenchmarkRange = (typeof RANGE_HOURS)[number]
@@ -71,8 +71,14 @@ export function BenchmarkPanel() {
     const difference = Math.abs(modelMae - aemetMae)
     if (difference < 0.05) return 'Ambos modelos tienen un error equivalente en este periodo.'
     return modelMae < aemetMae
-      ? `El modelo Spark GBT reduce el MAE en ${formatNumber(difference, 2)} °C frente a AEMET.`
-      : `AEMET reduce el MAE en ${formatNumber(difference, 2)} °C frente al modelo Spark GBT.`
+      ? `El modelo Spark GBT reduce el MAE en ${formatNumber(
+          difference,
+          PRECISION.error,
+        )} °C frente a AEMET.`
+      : `AEMET reduce el MAE en ${formatNumber(
+          difference,
+          PRECISION.error,
+        )} °C frente al modelo Spark GBT.`
   }, [benchmark.data])
 
   const hasSeries = Boolean(benchmark.data?.series.length)
@@ -250,7 +256,14 @@ export function BenchmarkPanel() {
             />
           ) : (
             <div className="max-w-3xl overflow-x-auto">
-              <table className="w-full border-collapse text-xs">
+              {/* `aria-selected` is only announced on a row inside a grid (on a
+                  bare table row screen readers drop it). The rows stay exactly
+                  what they were: tabbable, Enter/Space selects the station. */}
+              <table
+                role="grid"
+                aria-label="MAE por estación"
+                className="w-full border-collapse text-xs"
+              >
                 <thead>
                   <tr className="border-b border-line">
                     <th className="label px-4 py-2 text-left font-normal">Estación</th>
@@ -269,6 +282,7 @@ export function BenchmarkPanel() {
                     return (
                       <tr
                         key={row.city}
+                        role="row"
                         tabIndex={0}
                         aria-selected={selected}
                         data-selected={selected}
@@ -295,7 +309,7 @@ export function BenchmarkPanel() {
                             modelBetter ? 'font-semibold text-fg' : 'text-fg-2',
                           )}
                         >
-                          {formatNumber(row.model.mae, 2)}
+                          {formatNumber(row.model.mae, PRECISION.error)}
                         </td>
                         <td
                           className={cn(
@@ -305,10 +319,10 @@ export function BenchmarkPanel() {
                               : 'text-fg-2',
                           )}
                         >
-                          {formatNumber(row.aemet.mae, 2)}
+                          {formatNumber(row.aemet.mae, PRECISION.error)}
                         </td>
                         <td className="nums whitespace-nowrap px-4 py-2 text-right text-fg-3">
-                          {formatNumber(row.model.n, 0)}
+                          {formatInteger(row.model.n)}
                         </td>
                       </tr>
                     )

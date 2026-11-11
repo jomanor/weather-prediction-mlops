@@ -18,13 +18,27 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 
 from pymongo import MongoClient
 
 DB_NAME = "weather_db"
 COLLECTION = "weather_predictions"
+
+#: Only the fields the grouping needs. The full documents (payload, intervals,
+#: model metadata) never leave Mongo: on a 512 MB M0 an unpaged ``find({})``
+#: materialising every document is what exhausted the instance (audit finding 20).
+PROJECTION = {
+    "_id": 1,
+    "city": 1,
+    "source_timestamp": 1,
+    "horizon_hours": 1,
+    "prediction_timestamp": 1,
+}
+
+#: Duplicates are deleted in ``$in`` batches of this size instead of one command
+#: carrying the whole collection.
+DELETE_BATCH_SIZE = 1000
 
 #: Sort key for a document missing ``prediction_timestamp``: tz-aware so it can
 #: compare against the tz-aware datetimes PyMongo returns, and the earliest
@@ -38,19 +52,40 @@ def _newest_key(doc: dict) -> datetime:
 
 
 def _duplicate_ids(db) -> list:
-    """Return the _id of every duplicate beyond the newest document per group."""
-    groups: dict[tuple, list[dict]] = defaultdict(list)
-    for doc in db[COLLECTION].find({}):
-        key = (doc.get("city"), doc.get("source_timestamp"), doc.get("horizon_hours"))
-        groups[key].append(doc)
+    """Return the _id of every duplicate beyond the newest document per group.
 
+    One streaming pass over a projection of the key fields: memory is bounded by
+    the number of *groups* (newest _id each) plus one _id per duplicate, never by
+    the size of the documents.
+    """
+    newest: dict[tuple, tuple[datetime, object]] = {}
     to_delete: list = []
-    for docs in groups.values():
-        if len(docs) <= 1:
+    for doc in db[COLLECTION].find({}, PROJECTION):
+        identity = doc.get("_id")
+        if identity is None:
             continue
-        docs.sort(key=_newest_key, reverse=True)
-        to_delete.extend(doc["_id"] for doc in docs[1:] if "_id" in doc)
+        key = (doc.get("city"), doc.get("source_timestamp"), doc.get("horizon_hours"))
+        timestamp = _newest_key(doc)
+        current = newest.get(key)
+        if current is None:
+            newest[key] = (timestamp, identity)
+        elif timestamp > current[0]:
+            newest[key] = (timestamp, identity)
+            to_delete.append(current[1])
+        else:
+            # Older, or the same instant: the first document seen wins, exactly
+            # like the previous ``sort(key=..., reverse=True)`` behaviour.
+            to_delete.append(identity)
     return to_delete
+
+
+def _delete_in_batches(collection, ids: list) -> int:
+    """Delete ``ids`` in ``$in`` batches; returns the number the collection removed."""
+    deleted = 0
+    for start in range(0, len(ids), DELETE_BATCH_SIZE):
+        batch = ids[start : start + DELETE_BATCH_SIZE]
+        deleted += collection.delete_many({"_id": {"$in": batch}}).deleted_count
+    return deleted
 
 
 def dedupe(mongo_uri: str, apply: bool = False) -> tuple[int, int]:
@@ -62,8 +97,7 @@ def dedupe(mongo_uri: str, apply: bool = False) -> tuple[int, int]:
         duplicate_count = len(to_delete)
 
         if apply and to_delete:
-            result = db[COLLECTION].delete_many({"_id": {"$in": to_delete}})
-            return duplicate_count, result.deleted_count
+            return duplicate_count, _delete_in_batches(db[COLLECTION], to_delete)
         return duplicate_count, 0
     finally:
         client.close()

@@ -1,9 +1,9 @@
 import { z } from 'zod'
 
 import { queryKeys, useApiQuery } from '@/api/queries'
-import { predictionSchema, seriesResponseSchema, statsResponseSchema } from '@/api/schemas'
+import { predictionSchema, seriesResponseSchema } from '@/api/schemas'
 
-/** Station-scoped queries: the observation series, stats and predictions. */
+/** Station-scoped queries: the observation series and predictions. */
 
 /**
  * Exactly the columns this surface renders, as accepted by the backend's
@@ -52,14 +52,6 @@ export const useStationSeries = (city: string, hours = 24) =>
     refetchInterval: 5 * 60_000,
     enabled: Boolean(city),
   })
-
-export const useStats = (city: string, hours = 24) =>
-  useApiQuery(
-    queryKeys.stats(city, hours),
-    `/weather/stats/${encodeURIComponent(city)}?hours=${hours}`,
-    statsResponseSchema,
-    { enabled: Boolean(city), allowNotFound: true },
-  )
 
 /** Contract 2: M2 prediction horizons, mirrored by the backend config. */
 export const PREDICTION_HORIZONS = [1, 3, 6, 12, 24] as const

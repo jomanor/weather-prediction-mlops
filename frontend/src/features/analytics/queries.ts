@@ -5,12 +5,8 @@ import {
 } from '@/features/analytics/transforms'
 import {
   analyticsDailySchema,
-  climatologySchema,
-  correlationSchema,
   diurnalSchema,
-  errorByHourSchema,
   windRoseSchema,
-  type AnalyticsVariable,
 } from '@/features/analytics/schemas'
 
 /**
@@ -23,12 +19,8 @@ const STALE = 5 * 60_000
 
 export const analyticsKeys = {
   daily: (city: string, days: number) => ['analytics', 'daily', city, days] as const,
-  climatology: (city: string) => ['analytics', 'climatology', city] as const,
   windRose: (city: string, days: number) => ['analytics', 'wind-rose', city, days] as const,
   diurnal: (days: number) => ['analytics', 'diurnal', days] as const,
-  correlation: (days: number, variable: AnalyticsVariable) =>
-    ['analytics', 'correlation', days, variable] as const,
-  errorByHour: (days: number) => ['analytics', 'error-by-hour', days] as const,
 }
 
 export function useAnalyticsDaily(city: string, days: number = ANALYTICS_BOUNDS.daily.default) {
@@ -38,15 +30,6 @@ export function useAnalyticsDaily(city: string, days: number = ANALYTICS_BOUNDS.
     `/analytics/daily?city=${encodeURIComponent(city)}&days=${bounded}`,
     analyticsDailySchema,
     { enabled: Boolean(city), staleTime: STALE },
-  )
-}
-
-export function useAnalyticsClimatology(city: string) {
-  return useApiQuery(
-    analyticsKeys.climatology(city),
-    `/analytics/climatology?city=${encodeURIComponent(city)}`,
-    climatologySchema,
-    { enabled: Boolean(city), staleTime: 30 * 60_000 },
   )
 }
 
@@ -66,29 +49,6 @@ export function useAnalyticsDiurnal(days: number = ANALYTICS_BOUNDS.diurnal.defa
     analyticsKeys.diurnal(bounded),
     `/analytics/diurnal?days=${bounded}`,
     diurnalSchema,
-    { staleTime: STALE },
-  )
-}
-
-export function useAnalyticsCorrelation(
-  days: number = ANALYTICS_BOUNDS.correlation.default,
-  variable: AnalyticsVariable = 'temperature',
-) {
-  const bounded = clampDays(days, ANALYTICS_BOUNDS.correlation)
-  return useApiQuery(
-    analyticsKeys.correlation(bounded, variable),
-    `/analytics/correlation?days=${bounded}&var=${variable}`,
-    correlationSchema,
-    { staleTime: 30 * 60_000 },
-  )
-}
-
-export function useAnalyticsErrorByHour(days: number = ANALYTICS_BOUNDS.errorByHour.default) {
-  const bounded = clampDays(days, ANALYTICS_BOUNDS.errorByHour)
-  return useApiQuery(
-    analyticsKeys.errorByHour(bounded),
-    `/analytics/error-by-hour?days=${bounded}`,
-    errorByHourSchema,
     { staleTime: STALE },
   )
 }

@@ -118,6 +118,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
+          # Every other workflow runs 3.13 (audit finding 20). This one cannot:
+          # spark/requirements.txt pins pandas==2.0.3 for the Spark image's Python
+          # 3.8, and pandas 2.0.3 ships no cp313 wheel (cp38-cp311 only), so the
+          # install below would drop to a source build that does not compile.
+          # Unpin pandas (Batch E drops Spark) before moving this job.
           python-version: "3.11"
           cache: pip
           cache-dependency-path: |

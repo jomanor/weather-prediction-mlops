@@ -2,13 +2,7 @@ import { useQuery, type UseQueryOptions, type UseQueryResult } from '@tanstack/r
 import { z } from 'zod'
 
 import { apiGet, apiGetWithDataAge, type DataAgeResponse } from './client'
-import {
-  benchmarkSummarySchema,
-  citySchema,
-  healthSchema,
-  latestPredictionsSchema,
-  weatherQualitySchema,
-} from './schemas'
+import { benchmarkSummarySchema, citySchema, weatherQualitySchema } from './schemas'
 
 /**
  * Shared query layer.
@@ -21,13 +15,10 @@ import {
 const MINUTE = 60_000
 
 export const queryKeys = {
-  health: ['health'] as const,
   cities: ['cities'] as const,
   stations: ['stations'] as const,
   mapStations: ['stations', 'map'] as const,
   series: (city: string, hours: number) => ['series', city, hours] as const,
-  stats: (city: string, hours: number) => ['stats', city, hours] as const,
-  latestPredictions: (horizon: number) => ['predictions', 'latest', horizon] as const,
   predictions: (city: string, limit: number) => ['predictions', city, limit] as const,
   benchmark: (city: string, hours: number) => ['benchmark', city, hours] as const,
   benchmarkSummary: ['benchmark', 'summary'] as const,
@@ -59,9 +50,6 @@ export function useApiQuery<T>(
     ...rest,
   })
 }
-
-export const useHealth = () =>
-  useApiQuery(queryKeys.health, '/health', healthSchema, { refetchInterval: 5 * MINUTE })
 
 export interface ApiQueryWithDataAgeResult<T>
   extends Omit<UseQueryResult<DataAgeResponse<T>, Error>, 'data'> {
@@ -121,19 +109,6 @@ export const useBenchmarkSummary = () =>
   useApiQuery(queryKeys.benchmarkSummary, '/benchmark', benchmarkSummarySchema, {
     refetchInterval: 30 * MINUTE,
   })
-
-/**
- * Contract 2: latest prediction per city for one horizon. `horizon` is part of
- * the cache key, so switching horizon on the station page refetches instead of
- * reusing another horizon's rows.
- */
-export const useLatestPredictions = (horizon: number) =>
-  useApiQuery(
-    queryKeys.latestPredictions(horizon),
-    `/predictions/latest?horizon=${horizon}`,
-    latestPredictionsSchema,
-    { refetchInterval: 10 * MINUTE },
-  )
 
 /** Per-city data-quality meter; backend caches 300 s, so a 5 min staleTime fits. */
 export const useWeatherQuality = (days = 7) =>

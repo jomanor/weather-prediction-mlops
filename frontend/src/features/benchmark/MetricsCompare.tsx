@@ -1,6 +1,6 @@
 import type { Metrics } from '@/api/schemas'
 import { cn } from '@/lib/cn'
-import { formatInteger, formatNumber, formatSigned } from '@/lib/format'
+import { PRECISION, formatInteger, formatNumber, formatSigned } from '@/lib/format'
 
 const ROWS: { key: keyof Omit<Metrics, 'n'>; label: string; hint: string }[] = [
   { key: 'mae', label: 'MAE', hint: 'Error absoluto medio' },
@@ -40,7 +40,9 @@ export function MetricsCompare({ model, aemet }: { model: Metrics; aemet: Metric
                   winner === 'model' ? 'font-semibold text-fg' : 'text-fg-2',
                 )}
               >
-                {row.key === 'bias' ? formatSigned(modelValue, 2) : formatNumber(modelValue, 2)}
+                {row.key === 'bias'
+                  ? formatSigned(modelValue, PRECISION.error)
+                  : formatNumber(modelValue, PRECISION.error)}
               </td>
               <td
                 className={cn(
@@ -48,7 +50,9 @@ export function MetricsCompare({ model, aemet }: { model: Metrics; aemet: Metric
                   winner === 'aemet' ? 'font-semibold text-fg' : 'text-fg-2',
                 )}
               >
-                {row.key === 'bias' ? formatSigned(aemetValue, 2) : formatNumber(aemetValue, 2)}
+                {row.key === 'bias'
+                  ? formatSigned(aemetValue, PRECISION.error)
+                  : formatNumber(aemetValue, PRECISION.error)}
               </td>
             </tr>
           )

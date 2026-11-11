@@ -48,19 +48,41 @@ Latest observation per city.
 { "city": "Madrid", "hours": 24, "count": 24, "points": [WeatherPoint, ...] }
 ```
 
-### `GET /api/weather/stats/{city}?hours=24`
+### `GET /api/weather/series?cities=Madrid,Barcelona&hours=24&fields=&step_hours=1`
+
+One bulk query, one compact series per city. The station page reads this
+instead of `/current` + `/history` (Batch 6c).
+
+- `cities` — required, comma separated, 1..15 names, deduplicated in request
+  order (the response keeps that order); names longer than the registry cap are
+  `422`. An empty or oversized list is `422`.
+- `hours` — integer 1..168, default 24.
+- `fields` — comma separated projection, `null`/absent means every field.
+  Accepted values: `temperature`, `apparent_temperature`, `humidity`,
+  `pressure`, `wind_speed`, `wind_direction`, `precipitation`, `cloud_cover`,
+  `weather_code`, `is_day`. Anything else is `422` (`Unknown field(s): …`).
+  `city` and `observed_at` are always present.
+- `step_hours` — integer 1..24, default 1 (downsample to at most one point per N
+  hours).
+
+Cached 30 s: key = cities (request order) + hours + sorted fields + step, with
+`ETag`/`Cache-Control`/`304` like the other read routes.
 
 ```json
 {
-  "city": "Madrid", "hours": 24, "count": 24,
-  "temperature": { "avg": 21.4, "min": 14.2, "max": 27.9 },
-  "humidity": { "avg": 61.0, "min": 40.0, "max": 82.0 },
-  "pressure": { "avg": 1014.2, "min": 1011.0, "max": 1017.0 },
-  "wind_speed": { "avg": 11.3, "min": 3.0, "max": 22.4 },
-  "precipitation_total": 0.4,
-  "start": "2026-09-22T14:00:00Z", "end": "2026-09-23T13:00:00Z"
+  "hours": 24,
+  "count": 2,
+  "cities": [
+    { "city": "Madrid", "count": 24, "latest_timestamp": "2026-09-23T13:00:00Z",
+      "points": [WeatherPoint, ...] }
+  ]
 }
 ```
+
+`count` at the top level is the number of cities requested, not points;
+`latest_timestamp` is `null` for a city with no rows (its `points` is `[]`, and
+the city is not dropped). Points are chronological, oldest → newest. A city with
+no rows is not a `404` in the bulk form.
 
 ### `GET /api/weather/quality?days=7`
 
@@ -81,9 +103,11 @@ calibrated to the ~6 h feature-rebuild cycle (~2x ok, ~3x warn — one missed
 rebuild); the target-drop that previously forced a healthy pipeline to land
 ~6 h stale was fixed in Batch 4, so the gates are honest, not loosened.
 
-The response always carries one entry per canonical station (the 14 in
-`app/core/cities.py`), so a city whose feature rows stopped arriving is
-reported `bad` with `observed_hours: 0` instead of disappearing. Duplicate
+The response always carries one entry per station in the Mongo `cities` registry
+(`DEFAULT_CITIES` in `app/core/cities.py` — 15, Pasadena included — is the seed
+and the empty-registry fallback), so a city whose feature rows stopped arriving
+is reported `bad` with `observed_hours: 0` instead of disappearing, and a
+station deleted from the registry stops being reported. Duplicate
 `(city, timestamp)` rows are counted once.
 
 ```json
@@ -105,6 +129,43 @@ reported `bad` with `observed_hours: 0` instead of disappearing. Duplicate
   ]
 }
 ```
+
+## Map
+
+### `GET /api/map/stations`
+
+GeoJSON `FeatureCollection` of the latest observation per city, joined against
+the stored coordinates. Cached 30 s with `ETag`/`Cache-Control`/`304`. No bbox
+parameter and no spatial index: the whole 15-station collection is served.
+Stations without coordinates are omitted; every other city always appears.
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [-3.7038, 40.4168] },
+      "properties": {
+        "city": "Madrid",
+        "temperature": 21.4,
+        "apparent_temperature": 21.0,
+        "relative_humidity": 61.0,
+        "wind_speed": 11.3,
+        "wind_direction": 220.0,
+        "precipitation": 0.0,
+        "weather_code": 2,
+        "is_day": 1,
+        "observed_at": "2026-09-23T14:00:00Z"
+      }
+    }
+  ]
+}
+```
+
+`coordinates` is `[longitude, latitude]` (GeoJSON order), unlike the lat/lon
+fields of `CurrentWeather`. The humidity property is named `relative_humidity`
+here, not `humidity`.
 
 ## Predictions (real Spark GBT output)
 
@@ -212,6 +273,53 @@ through from the registry document (also nullable).
   ]
 }
 ```
+
+## Analytics
+
+Six cached read-only aggregates over `weather_features` (Batch 4, D2). All of
+them: `Cache-Control: public, max-age=300`, `ETag`, `304` on `If-None-Match`,
+key = the parameters below; computation is bounded by a process-wide
+`asyncio.Semaphore(2)`. Every value is null-tolerant — a missing observation is
+`null`, never a fabricated `0`; counts (`n`, `count`) default to `0` and
+`heatwave` to `false`. City names come from the registry; an unknown city
+returns an empty series, not a `404`.
+
+| Route | Parameters | Payload |
+| --- | --- | --- |
+| `GET /api/analytics/daily` | `city` (required), `days` 7..180 (default 90) | `{ city, days, generated_at, points: [{ date, tmin, tmax, tmean, hdd, cdd, anomaly, heatwave }] }` |
+| `GET /api/analytics/climatology` | `city` (required) | `{ city, generated_at, basis_years, series: [{ day_of_year, tmean, tmin, tmax, n }] }` |
+| `GET /api/analytics/wind-rose` | `city` (required), `days` 7..365 (default 90) | `{ city, days, generated_at, sectors: [{ sector, count, mean_speed }] }` |
+| `GET /api/analytics/diurnal` | `days` 7..365 (default 90) | `{ days, generated_at, cells: [{ city, hour, tmean, n }] }` |
+| `GET /api/analytics/correlation` | `days` 7..365 (default 90), `var` = `temperature`\|`humidity`\|`pressure`\|`wind_speed` (default `temperature`) | `{ days, var, generated_at, cities, matrix }` |
+| `GET /api/analytics/error-by-hour` | `days` 7..90 (default 30) | `{ days, generated_at, points: [{ horizon_hours, hour, n, mae, rmse, bias, persistence_mae }] }` |
+
+```json
+// GET /api/analytics/daily?city=Madrid&days=90
+{
+  "city": "Madrid",
+  "days": 90,
+  "generated_at": "2026-09-25T12:00:00Z",
+  "points": [
+    { "date": "2026-09-24", "tmin": 14.2, "tmax": 31.8, "tmean": 23.1,
+      "hdd": 0.0, "cdd": 5.1, "anomaly": 1.4, "heatwave": false }
+  ]
+}
+```
+
+Semantics that are not visible in the shapes:
+
+- `daily`: `date` is a UTC calendar day (`YYYY-MM-DD`); `hdd`/`cdd` use base
+  18 °C; `anomaly` is `tmean −` the same city's day-of-year climatology mean;
+  `heatwave` is membership in a run of ≥ 3 consecutive days with `tmax ≥ 35 °C`.
+- `climatology`: one point per day of year 1..366; `basis_years` is the number
+  of distinct calendar years the series is built from (float).
+- `wind-rose`: `sector` 0..15, clockwise starting at N; `mean_speed` in km/h.
+- `diurnal`: one cell per `(city, local hour 0..23)`; `hour` is local, not UTC.
+- `correlation`: `cities` is the row/column order of `matrix` (taken from the
+  registry); a pair with fewer than 3 shared days, or with zero variance, is
+  `null` — that includes the diagonal, which is `1.0` only on that condition.
+- `error-by-hour`: `hour` is the local hour of the verified observation;
+  `persistence_mae` is the same-hour baseline for the same horizon.
 
 ## Metrics (process-local, public)
 
@@ -389,6 +497,13 @@ type Metrics = { mae: number | null; rmse: number | null; bias: number | null; n
 - **Residual convention**: `residual_model` and `residual_aemet` are
   `prediction − observed`. Positive means the model ran warm, negative means it
   ran cold. `bias` follows the same sign.
+- **Contract gates** (measured 2026-11-01, Batch C): `cd backend &&
+  ../.venv/bin/python -m pytest tests -q` → `325 passed`; root
+  `.venv/bin/python -m pytest tests -q` with
+  `PYSPARK_PYTHON=$PWD/.venv/bin/python` → `468 passed, 7 skipped`;
+  `cd frontend && npm run test` → 47 files, `350 passed`. Both sides change in
+  the same PR: a payload shape that moves without this file is a bug, a test
+  count that moves without one is not.
 
 ## Station registry (v2.2)
 

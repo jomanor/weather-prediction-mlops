@@ -6,7 +6,10 @@ import { useCities } from '@/api/queries'
 import type { City } from '@/api/schemas'
 import { cn } from '@/lib/cn'
 
-/** Command-palette style station lookup over the cities the backend knows. */
+/**
+ * The one station lookup in the shell: a combobox over the cities the backend
+ * knows, focused from anywhere by bare `/` or by ⌘K / Ctrl-K.
+ */
 export function StationSearch() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -36,6 +39,14 @@ export function StationSearch() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      /* ⌘K / Ctrl-K is a global command for this search: it wins over the
+       * browser's own binding, so it works from any focus position. */
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        inputRef.current?.focus()
+        inputRef.current?.select()
+        return
+      }
       /* Bare `/` only: modifiers belong to the browser, and typing in any field
        * (including select/contenteditable) must not lose focus to the search. */
       if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
@@ -95,6 +106,7 @@ export function StationSearch() {
         aria-expanded={open}
         aria-controls="station-search-results"
         aria-label="Buscar estación"
+        title="Buscar estación · atajos: / o ⌘K"
         placeholder={isLoading ? 'Cargando estaciones…' : 'Buscar estación  /'}
         value={query}
         onChange={(event) => {

@@ -64,17 +64,17 @@ weather-prediction-mlops/
 │   │   ├── db/                 # Mongo client lifecycle + indexes
 │   │   ├── schemas/            # Pydantic request/response models
 │   │   ├── repositories/       # one module per collection, single mapper
-│   │   ├── services/           # AEMET client, benchmark maths, window stats
-│   │   └── routers/            # health, weather, predictions, benchmark, models
-│   ├── tests/                  # 59 offline tests (fakes, no live Mongo)
+│   │   ├── services/           # AEMET client, benchmark maths, geo lookup
+│   │   └── routers/            # one module per route family, incl. /analytics
+│   ├── tests/                  # 325 offline tests (fakes, no live Mongo)
 │   └── Dockerfile
 ├── frontend/                   # React + TypeScript + Tailwind (Vite)
 │   ├── src/
 │   │   ├── api/                # typed client + zod schemas for the contract
 │   │   ├── app/                # shell, navigation, preferences
 │   │   ├── components/         # ui primitives, charts, map, shell controls
-│   │   ├── features/           # overview, station, benchmark, models
-│   │   └── lib/                # formatting, units, derived physics, theme
+│   │   ├── features/           # overview, station, benchmark, models, system, analytics
+│   │   └── lib/                # formatting, weather helpers, ramps, theme
 │   ├── nginx.conf              # SPA fallback + /api reverse proxy
 │   └── Dockerfile
 ├── spark/                      # feature engineering, training, inference, scheduler
@@ -115,9 +115,13 @@ frontend. A drifting response fails loudly in development instead of rendering
 ### Full stack (Docker)
 
 ```bash
-cp .env.example .env          # fill in MONGO_* and AEMET_API_KEY
+cp .env.example .env          # fill in MONGO_URI and AEMET_API_KEY
 make up
 ```
+
+`.env` is the single env file (gitignored); `.env.example` is the tracked
+placeholder. See [Configuration](#configuration) and the env-file note in
+[`docs/handoff.md`](docs/handoff.md).
 
 | Service        | URL                     |
 | -------------- | ----------------------- |
@@ -156,14 +160,19 @@ always uses the same relative base URL it uses in production.
 ## Testing
 
 ```bash
-make test          # backend (59) + frontend (29)
+make test          # backend (325) + frontend (350)
 make lint          # ruff + black + oxlint + tsc
 make coverage      # backend coverage report
+
+# pipeline (spark + scripts), from the repo root:
+PYSPARK_PYTHON=$PWD/.venv/bin/python .venv/bin/python -m pytest tests -q
 ```
 
 Backend tests are fully offline: routers run against dependency-overridden
 fakes and the AEMET client runs against `httpx.MockTransport`, including a real
-ISO-8859-15 fixture with missing hourly values.
+ISO-8859-15 fixture with missing hourly values. Measured 2026-11-01: backend
+`325 passed`; pipeline `468 passed, 7 skipped` (the 7 need a local `mongo:6`);
+frontend 47 files / `350 passed`.
 
 ---
 
@@ -171,7 +180,10 @@ ISO-8859-15 fixture with missing hourly values.
 
 - **Frontend** — Netlify builds `frontend/` and publishes `frontend/dist`.
   `/api/*` is proxied at the edge to the FastAPI service, so the browser only
-  ever makes same-origin requests. Hashed assets are cached immutably.
+  ever makes same-origin requests. Hashed assets are cached immutably. Auto
+  publishing is **paused** (`netlify.toml` `ignore = "exit 0"`), so a build
+  that lands in `main` is **committed, not deployed** until someone deploys
+  deliberately.
 - **Backend** — any container host; the image is `python:3.13-slim`, runs as a
   non-root user, and reads all configuration from the environment.
 - **Database** — MongoDB Atlas. `scripts/sync_to_atlas.py` mirrors the local

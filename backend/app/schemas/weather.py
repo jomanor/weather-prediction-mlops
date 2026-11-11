@@ -88,54 +88,8 @@ class SeriesResponse(BaseModel):
     cities: list[CitySeries]
 
 
-class CitySummary(BaseModel):
-    """Server-side aggregates plus a numeric sparkline (temperature)."""
-
-    city: str
-    min: float | None = None
-    max: float | None = None
-    first: float | None = None
-    last: float | None = None
-    trend: float | None = None
-    points: list[float]
-
-
-class SummaryResponse(BaseModel):
-    hours: int
-    count: int
-    cities: list[CitySummary]
-
-
-class WeatherRangeResponse(BaseModel):
-    """Keyset-paginated range, always oldest -> newest."""
-
-    city: str
-    count: int
-    points: list[WeatherPoint]
-    next_cursor: datetime | None = None
-
-
 class HistoryResponse(BaseModel):
     city: str
     hours: int
     count: int
     points: list[WeatherPoint]
-
-
-class Stats(BaseModel):
-    avg: float | None = None
-    min: float | None = None
-    max: float | None = None
-
-
-class WeatherStats(BaseModel):
-    city: str
-    hours: int
-    count: int
-    temperature: Stats
-    humidity: Stats
-    pressure: Stats
-    wind_speed: Stats
-    precipitation_total: float | None = None
-    start: datetime | None = None
-    end: datetime | None = None

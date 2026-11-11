@@ -1,7 +1,8 @@
 """Analytics endpoints: ``/api/analytics/*`` (Batch 4, Contract 4).
 
-All six routes are read-only and share the process TTL cache (300 s -> ETag /
-``Cache-Control``) via the existing ``cached()`` helper. The window is part of
+All six routes are read-only and share the process TTL cache
+(``CACHE_TTL_AGGREGATE_SECONDS`` = 300 s -> ETag / ``Cache-Control``) via the
+existing ``cached()`` helper. The window is part of
 the cache key, so ``days`` changes never serve a stale window.
 """
 
@@ -12,7 +13,7 @@ from typing import Literal, TypeVar
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from app.core.cache import TTLCache, cached, get_cache
+from app.core.cache import CACHE_TTL_AGGREGATE_SECONDS, TTLCache, cached, get_cache
 from app.repositories.analytics_repo import AnalyticsRepository, get_analytics_repo
 from app.routers.cities import MAX_NAME_LENGTH
 from app.schemas.analytics import (
@@ -25,8 +26,6 @@ from app.schemas.analytics import (
 )
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
-
-ANALYTICS_TTL_SECONDS = 300
 
 #: Render free tier = one uvicorn worker / 0.1 CPU. The analytics page fires
 #: several cold queries at once; bound their computation so a burst cannot
@@ -74,7 +73,7 @@ async def analytics_daily(
         response,
         cache,
         f"analytics:daily:{city}:{days}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.daily(city, days, now)),
     )
 
@@ -94,7 +93,7 @@ async def analytics_climatology(
         response,
         cache,
         f"analytics:climatology:{city}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.climatology(city, now)),
     )
 
@@ -115,7 +114,7 @@ async def analytics_wind_rose(
         response,
         cache,
         f"analytics:wind-rose:{city}:{days}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.wind_rose(city, days, now)),
     )
 
@@ -135,7 +134,7 @@ async def analytics_diurnal(
         response,
         cache,
         f"analytics:diurnal:{days}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.diurnal(days, now)),
     )
 
@@ -156,7 +155,7 @@ async def analytics_correlation(
         response,
         cache,
         f"analytics:correlation:{days}:{var}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.correlation(days, var, now)),
     )
 
@@ -176,6 +175,6 @@ async def analytics_error_by_hour(
         response,
         cache,
         f"analytics:error-by-hour:{days}",
-        ANALYTICS_TTL_SECONDS,
+        CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.error_by_hour(days, now)),
     )

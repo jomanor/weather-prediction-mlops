@@ -114,56 +114,60 @@ export function DataQualityMeter({ className }: { className?: string }) {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-line">
-                  <th className="label px-4 py-2 text-left font-normal">Estado</th>
-                  <th className="label px-4 py-2 text-left font-normal">Estación</th>
-                  <th className="label px-4 py-2 text-right font-normal">Cobertura</th>
-                  <th className="label hidden px-4 py-2 text-right font-normal sm:table-cell">
-                    Hueco máx.
-                  </th>
-                  <th className="label px-4 py-2 text-right font-normal">Antigüedad</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...cities]
-                  .sort(
-                    (a, b) =>
-                      SEVERITY[a.status] - SEVERITY[b.status] ||
-                      a.completeness - b.completeness,
-                  )
-                  .map((city) => {
-                    const status = STATUS[city.status]
-                    const Icon = status.icon
-                    return (
-                      <tr
-                        key={city.city}
-                        className="border-b border-line/60 last:border-0"
-                      >
-                        <td className="px-4 py-2">
-                          <Badge tone={status.tone}>
-                            <Icon className="h-2.5 w-2.5" />
-                            {status.label}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-2 text-fg">{city.city}</td>
-                        <td className="nums px-4 py-2 text-right text-fg-2">
-                          {formatPercent(city.completeness * 100, 1)}
-                        </td>
-                        <td className="nums hidden px-4 py-2 text-right text-fg-2 sm:table-cell">
-                          {formatNumber(city.max_gap_hours, 1)} h
-                        </td>
-                        <td className="nums px-4 py-2 text-right text-fg-3">
-                          {formatRelative(city.last_observed_at)}
-                        </td>
-                      </tr>
+          {/* Nothing to triage: the readouts above already say every station is
+              in range, so the table would only print fourteen identical rows. */}
+          {flagged === 0 ? null : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-line">
+                    <th className="label px-4 py-2 text-left font-normal">Estado</th>
+                    <th className="label px-4 py-2 text-left font-normal">Estación</th>
+                    <th className="label px-4 py-2 text-right font-normal">Cobertura</th>
+                    <th className="label hidden px-4 py-2 text-right font-normal sm:table-cell">
+                      Hueco máx.
+                    </th>
+                    <th className="label px-4 py-2 text-right font-normal">Antigüedad</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...cities]
+                    .sort(
+                      (a, b) =>
+                        SEVERITY[a.status] - SEVERITY[b.status] ||
+                        a.completeness - b.completeness,
                     )
-                  })}
-              </tbody>
-            </table>
-          </div>
+                    .map((city) => {
+                      const status = STATUS[city.status]
+                      const Icon = status.icon
+                      return (
+                        <tr
+                          key={city.city}
+                          className="border-b border-line/60 last:border-0"
+                        >
+                          <td className="px-4 py-2">
+                            <Badge tone={status.tone}>
+                              <Icon className="h-2.5 w-2.5" />
+                              {status.label}
+                            </Badge>
+                          </td>
+                          <td className="px-4 py-2 text-fg">{city.city}</td>
+                          <td className="nums px-4 py-2 text-right text-fg-2">
+                            {formatPercent(city.completeness * 100, 1)}
+                          </td>
+                          <td className="nums hidden px-4 py-2 text-right text-fg-2 sm:table-cell">
+                            {formatNumber(city.max_gap_hours, 1)} h
+                          </td>
+                          <td className="nums px-4 py-2 text-right text-fg-3">
+                            {formatRelative(city.last_observed_at)}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <p className="border-t border-line px-4 py-2 text-[11px] leading-relaxed text-fg-3">
             Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.

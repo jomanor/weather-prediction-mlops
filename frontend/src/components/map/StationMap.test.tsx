@@ -246,3 +246,13 @@ describe('StationMap layer controls on a phone', () => {
     expect(screen.getAllByLabelText('Base')).toHaveLength(1)
   })
 })
+
+describe('StationMap accessible name', () => {
+  it('names the map as a region instead of an inert aria-label on a div', () => {
+    renderMap()
+    /* A plain <div aria-label> is exposed to nobody; the region role makes the
+       name reachable in the landmark list. */
+    const map = screen.getByRole('region', { name: 'Mapa de estaciones meteorológicas' })
+    expect(map).toBeInTheDocument()
+  })
+})

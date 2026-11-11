@@ -1,61 +1,30 @@
-import { useEffect, useRef } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet } from 'react-router-dom'
 
 import { NAV_ITEMS } from '@/app/registry'
-import { CommandPalette } from '@/components/shell/CommandPalette'
-import { isEditableTarget, resolveSectionShortcut } from '@/components/shell/shortcuts'
 import { StationSearch } from '@/components/shell/StationSearch'
 import { ThemeToggle } from '@/components/shell/ThemeToggle'
 import { UnitToggle } from '@/components/shell/UnitToggle'
 import { cn } from '@/lib/cn'
 
-const CHORD_WINDOW_MS = 1500
-
 /**
- * U6: `g` then a section key navigates. The chord disarms on timeout, ignores
- * keystrokes in fields, and stays inert while the command palette dialog is open.
+ * The shell: brand, the three-section navigation, the one station search and the
+ * preferences. There is a single search instance — inline in the bar from `md`
+ * up, a full-bleed second row below it on a phone — so the results list has one
+ * id and the `/` and ⌘K accelerators are bound once (`StationSearch`).
  */
-function useSectionShortcuts() {
-  const navigate = useNavigate()
-  const armedAt = useRef<number | null>(null)
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return
-      if (isEditableTarget(event.target)) return
-      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
-
-      if (event.key === 'g') {
-        armedAt.current = Date.now()
-        return
-      }
-      if (armedAt.current === null) return
-      const elapsed = Date.now() - armedAt.current
-      armedAt.current = null
-      if (elapsed > CHORD_WINDOW_MS) return
-
-      const shortcut = resolveSectionShortcut(event.key)
-      if (!shortcut) return
-      event.preventDefault()
-      navigate(shortcut.to)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [navigate])
-}
-
 export function AppShell() {
-  useSectionShortcuts()
-
   return (
     <div className="flex min-h-screen flex-col bg-bg">
       <header className="sticky top-0 z-40 border-b border-line bg-panel">
-        <div className="flex h-12 items-center gap-6 px-4">
-          <NavLink to="/" className="shrink-0 text-[15px] font-semibold leading-none text-fg">
+        <div className="flex flex-wrap items-center gap-x-6 px-4">
+          <NavLink
+            to="/"
+            className="flex h-12 shrink-0 items-center text-[15px] font-semibold leading-none text-fg"
+          >
             meteoml
           </NavLink>
 
-          <nav aria-label="Secciones" className="hidden h-full items-center sm:flex">
+          <nav aria-label="Secciones" className="hidden h-12 items-center sm:flex">
             {NAV_ITEMS.map((item) => (
               <NavLink
                 key={item.to}
@@ -75,18 +44,21 @@ export function AppShell() {
             ))}
           </nav>
 
-          <div className="ml-auto flex items-center gap-3">
-            <div className="hidden md:block">
-              <StationSearch />
-            </div>
+          <div className="ml-auto flex h-12 items-center gap-3 md:ml-0">
             <div className="hidden sm:block">
               <UnitToggle />
             </div>
             <ThemeToggle />
           </div>
-        </div>
-        <div className="border-t border-line px-4 py-2 md:hidden">
-          <StationSearch />
+
+          {/* `basis-full` wraps the search onto its own row under `md`; the
+              negative margin makes that row's divider run edge to edge. From
+              `md` up it is a normal inline item pushed to the right. It comes
+              after the controls in the DOM so focus order matches what a phone
+              shows (search on the second row, below the controls). */}
+          <div className="-mx-4 w-full basis-full border-t border-line px-4 py-2 md:mx-0 md:ml-auto md:w-auto md:basis-auto md:border-0 md:px-0 md:py-0">
+            <StationSearch />
+          </div>
         </div>
       </header>
 
@@ -149,8 +121,6 @@ export function AppShell() {
           )
         })}
       </nav>
-
-      <CommandPalette />
     </div>
   )
 }

@@ -26,6 +26,7 @@ from fastapi import Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.coerce import as_utc, to_float, to_int
+from app.core.units import MS_TO_KMH
 from app.db.mongo import get_db
 from app.repositories.city_repo import registry_names
 from app.schemas.analytics import (
@@ -42,8 +43,6 @@ from app.schemas.analytics import (
     WindSector,
 )
 
-#: Stored m/s -> contract km/h.
-MS_TO_KMH = 3.6
 #: Degree-day base temperature, per Contract 4.
 HDD_CDD_BASE = 18.0
 #: A heatwave is >= 3 consecutive days with tmax >= 35 °C.
