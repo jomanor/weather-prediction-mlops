@@ -1021,6 +1021,14 @@ working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdic
   `Test Files 47 passed (47)` / `Tests 350 passed (350)`; `npm run typecheck` clean, `npm run lint`
   0 errors (one pre-existing `vite.config.ts` warning), `npm run build` ok; `ruff check` + `black
   --check backend scripts` clean (72 files).
+- **CI and the live API** (run `43083715177`, commit `bea71b9`): every job green — python lint,
+  backend tests, pipeline tests, frontend, the three Docker builds, integration tests, and the guarded
+  Render deploy. The first run (`43083154366`) failed on `pipeline-test` because moving that job to 3.13
+  hit Spark's `distutils` import; the fix keeps exactly three Spark-touching jobs on 3.11. Live check
+  after the deploy: `GET /api/v1/weather/stats/Madrid` → **404**, `/weather/summary` → **404**,
+  `/weather/series?cities=Madrid` → **200**, `/weather/current` → **200**, the deprecated `/api` alias →
+  **200**; `/openapi.json` lists 46 paths. Netlify was not touched: no build was triggered, and
+  auto-publish stays paused, so the frontend change is committed and not live.
 - **Deliberate leftovers:** `ChartBrush` is **kept** — it is live, mounted by `BenchmarkChart.tsx`, so
   finding 14's "dead primitive" verdict was wrong; the `docker-compose` `mlflow` / `spark-history` /
   `spark-scheduler` services and `spark/Dockerfile` are deferred to Batch E (they go with Spark);
