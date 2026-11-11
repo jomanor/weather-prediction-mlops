@@ -56,12 +56,12 @@ Mounted once in `backend/app/main.py:_api_routes()`, served under `/api/v1`
 | `GET /benchmark` | `useBenchmarkSummary` (overview MAE stat + benchmark page) | `cities[]{model/aemet mae,n}` | Trust signal | **MERGE** → Sistema |
 | `GET /benchmark/{city}` | `useBenchmark` (BenchmarkPage) | `series[] + metrics` | Model vs AEMET | **MERGE** → Sistema |
 | `GET /models` | `useModels` (ModelsPage) | full registry | Trust signal | **MERGE** → Sistema |
-| `GET /analytics/daily` | `AnalyticsPage` | `points[]{tmin/tmax/tmean/hdd/cdd/anomaly/heatwave}` | 1 chart | **MERGE** → Sistema |
-| `GET /analytics/wind-rose` | `AnalyticsPage` | `sectors[]{count,mean_speed}` | 1 chart | **MERGE** → Sistema |
-| `GET /analytics/diurnal` | `AnalyticsPage` | `cells[]{city,hour,tmean}` | 1 chart | **MERGE** → Sistema |
-| `GET /analytics/climatology` | **none** — `useAnalyticsClimatology` defined, never rendered | DOY baseline | 0 in UI | **CUT** |
-| `GET /analytics/correlation` | **none** — `useAnalyticsCorrelation` defined, never rendered | Pearson matrix | 0 in UI | **CUT** |
-| `GET /analytics/error-by-hour` | **none** — `useAnalyticsErrorByHour` defined, never rendered | MAE/RMSE by (horizon, hour) | 0 in UI | **CUT** |
+| `GET /analytics/daily` | `AnalyticsPage` | `points[]{tmin/tmax/tmean/hdd/cdd/anomaly/heatwave}` | 1 chart | **MERGE** → Sistema; **route deleted 2026-11-11** (Batch D) |
+| `GET /analytics/wind-rose` | `AnalyticsPage` | `sectors[]{count,mean_speed}` | 1 chart | **KEEP** — lives in `ClimateViewsDialog` since Batch D |
+| `GET /analytics/diurnal` | `AnalyticsPage` | `cells[]{city,hour,tmean}` | 1 chart | **KEEP** — lives in `ClimateViewsDialog` since Batch D |
+| `GET /analytics/climatology` | **none** — `useAnalyticsClimatology` defined, never rendered | DOY baseline | 0 in UI | **CUT** — done 2026-11-01 (hooks) / 2026-11-11 (route) |
+| `GET /analytics/correlation` | **none** — `useAnalyticsCorrelation` defined, never rendered | Pearson matrix | 0 in UI | **CUT** — done 2026-11-01 (hooks) / 2026-11-11 (route) |
+| `GET /analytics/error-by-hour` | **none** — `useAnalyticsErrorByHour` defined, never rendered | MAE/RMSE by (horizon, hour) | 0 in UI | **CUT** — done 2026-11-01 (hooks) / 2026-11-11 (route) |
 | `POST /refresh` | none in UI | — | Opt-in write, default off | **DEFER** (keep off; §4) |
 
 Net: **13 KEEP/MERGE**, **6 CUT** (3 analytics + 3 weather + stats), **3
@@ -87,21 +87,24 @@ bloat signal — backend, repo, schema and query hook all exist, no component.
 | **Benchmark** `BenchmarkPage.tsx` | benchmark/{city} + benchmark | chart + metrics table + residual + national table | Honest trust check | **MERGE** → Sistema |
 | — `BenchmarkChart.tsx` / `ResidualChart.tsx` / `MetricsCompare.tsx` / `AemetNotice.tsx` | benchmark | observed/model/aemet | Useful, honest | **MERGE** → Sistema |
 | **Modelos** `ModelsPage.tsx` | models | 11-col table + 8-row expandable detail | Raw registry dump; too dense | **MERGE** → Sistema, production-first |
-| **Analítica** `AnalyticsPage.tsx` | diurnal + daily + wind-rose | 3 charts (of 6 endpoints) | Nice-to-have; not core weather | **MERGE** → Sistema, keep 3, cut 3 |
+| **Analítica** `AnalyticsPage.tsx` | diurnal + daily + wind-rose | 3 charts (of 6 endpoints) | Nice-to-have; not core weather | **CUT** 2026-11-11 (Batch D): the tab and the panel are gone; the diurnal heatmap and the wind rose moved into `ClimateViewsDialog` on the station page |
 | **Shell** `AppShell.tsx` | — | header, 5-item nav, `StationSearch`, `UnitToggle`, `ThemeToggle`, footer, bottom nav, ~~`CommandPalette`, `g`-shortcuts~~ | Search + palette are power-user; 5 nav items are the bloat | **KEEP** search/palette/theme/units, **CUT** to 3 nav items. **Superseded 2026-11-01:** the palette and the `g` chords were deleted (audit S11); `/` and Cmd/Ctrl-K focus the one `StationSearch` |
 
 URL state today (all via `useUrlState` / `useStationSelection`): `city`
 (app-wide), `tab` (overview), `hours`/`var`/`horizon` (station), `range`
 (benchmark), `days` (analytics). The 3-surface IA keeps every key; `tab`
-becomes the Sistema tab selector.
+becomes the Sistema tab selector. **Since 2026-11-11** the analytics `days`
+selector lives in `ClimateViewsDialog` as component state, not in the URL: the
+modal is deliberately not deep-linkable yet.
 
 ---
 
 ## 2. Proposed 3-surface IA (mobile-first)
 
 Names: **Resumen**, **Estación**, **Sistema** (Spanish, matches the existing
-copy; "Sistema" beats "Modelos" because it holds quality + models + benchmark +
-analytics, not just models).
+copy; "Sistema" beats "Modelos" because it holds quality + models + benchmark,
+not just models. It also held Analítica until 2026-11-11, when that tab was
+deleted and its two surviving views moved to the station page).
 
 ### Bottom-nav contract
 
@@ -109,7 +112,7 @@ analytics, not just models).
 |---|---|---|---|
 | Resumen | `/` | — | n/a (home) |
 | Estación | `/estaciones` | `/estaciones?city=Madrid` (+ `var`, `hours`, `horizon`) | browser back unwinds `city`; nav re-selects Estación |
-| Sistema | `/sistema` | `/sistema?tab=modelos` (or `calidad`/`benchmark`/`analitica`) | browser back unwinds `tab` |
+| Sistema | `/sistema` | `/sistema?tab=modelos` (or `calidad`/`benchmark`; `analitica` was removed 2026-11-11 and resolves to Calidad) | browser back unwinds `tab` |
 
 Rules:
 
@@ -151,7 +154,7 @@ back to the first registry city (`resolveCity`).
 │         ●  ●       ●           │   (radar on/off + relieve advanced)
 │                                │
 ├────────────────────────────────┤
-│ 15 estaciones · Act. 20:00  ●  │   freshness one-liner (no MAE stat)
+│ 14 estaciones · Act. 20:00     │   freshness one-liner (no MAE stat, no dot)
 │                                │
 │ Madrid      21,4°  ☁   12 km/h │   compact list: temp + tiempo + viento
 │ Barcelona   19,8°  ☀    8 km/h │   + edad; tap → /estaciones?city=X
@@ -189,7 +192,7 @@ back to the first registry city (`resolveCity`).
 ┌────────────────────────────────┐
 │ ← meteoml          ⌕    ☾  (°C)│
 ├────────────────────────────────┤
-│ Sistema [Calidad|Modelos|Benchmark|Analítica] │ 4 tabs, one URL param
+│ Sistema [Calidad|Modelos|Benchmark] │ 3 tabs, one URL param
 ├────────────────────────────────┤
 │ Modelos registrados (prod.)    │
 │ temp_1h GBT   +1h  skill 0,53 ●│   production-first, skill/coverage/
@@ -236,7 +239,7 @@ duplicate of those two jobs or a half-built endpoint.
 | Sistema | `/weather/quality?days=7` | `city, completeness, max_gap_hours, age_hours, status` | `expected_hours, observed_hours, null_rate` (keep in API, drop from UI) |
 | | `/models` | `name, target, horizon_hours, metrics{skill_score, coverage}, diagnostics(drift), stage, created_at` | full 11-col + 8-row detail (fold into expand) |
 | | `/benchmark` + `/benchmark/{city}?hours=24` | summary `{model.mae, aemet.mae, n}`; detail `series + metrics` | `residual_aemet` (show model residual only) |
-| | `/analytics/diurnal`, `/analytics/daily`, `/analytics/wind-rose` | as today | climatology / correlation / error-by-hour (cut entirely) |
+| | `/analytics/diurnal`, `/analytics/wind-rose` | as today | `daily` / climatology / correlation / error-by-hour (cut; `daily` deleted 2026-11-11 with the tab) |
 
 ---
 
@@ -305,7 +308,7 @@ values are the documented exception (hex literals in `chart-theme.ts`).
 | `components/shell/{CommandPalette,StationSearch,ThemeToggle,UnitToggle,shortcuts,command-palette}.tsx` | **KEEP** — power-user shortcuts are a differentiator, not bloat. **Overturned 2026-11-01** (audit S11): `CommandPalette.tsx`, `command-palette.ts` and `shortcuts.ts` are deleted — the palette duplicated a 3-item nav and the search box already on screen. `StationSearch`, `ThemeToggle` and `UnitToggle` stay |
 | `components/map/{StationMap,RadarControls,radar,station-geojson,weather-icons}.tsx` | **KEEP** but collapse the layer panel (below) |
 | `components/DataQualityMeter.tsx` | **MOVE** to Sistema feature |
-| `features/analytics/components/{DiurnalHeatmap,WindRose,DailyAnomalyChart}.tsx` | **KEEP** (move into Sistema) |
+| `features/analytics/components/{DiurnalHeatmap,WindRose}.tsx` | **KEEP** — rendered inside `ClimateViewsDialog` on the station page since 2026-11-11 (`DailyAnomalyChart.tsx` deleted with the tab) |
 | `features/overview/StationSheet.tsx` + `features/overview/sheet.ts` | **REMOVE** — replaced by deep-link |
 | `features/station/DerivedPanel.tsx` + `lib/derived.ts` | **REMOVE** from UI (keep `lib/derived.ts` only if a Sistema "datos" tab ever wants it) |
 
@@ -328,7 +331,9 @@ values are the documented exception (hex literals in `chart-theme.ts`).
    benchmark to 2. Pick one precision per metric in `lib/format.ts` and hold it
    (temperature 1 dp, error 2 dp, skill 2 dp, percentages 0–1 dp).
 6. **Half-built features** — any endpoint without a rendered consumer
-   (climatology / correlation / error-by-hour / stats) is cut, not left dormant.
+   (climatology / correlation / error-by-hour / stats / daily) is cut, not left dormant. **Done
+   2026-11-01 (hooks, `/stats`) and 2026-11-11 (`daily`, `climatology`, `correlation`,
+   `error-by-hour` routes).**
 
 ---
 
@@ -424,8 +429,8 @@ Acceptance criteria:
   `/weather/quality` no longer load on `/`.
 - Estación drops `DerivedPanel` and the model-name/version/run-list; hero ≤
   `text-2xl`.
-- Sistema (single surface) holds Calidad / Modelos / Benchmark / Analítica
-  behind `?tab=`.
+- Sistema (single surface) holds Calidad / Modelos / Benchmark behind `?tab=`
+  (Analítica deleted 2026-11-11; the climate views are a station-page modal).
 - `npm run typecheck && npm run lint && npm run test && npm run build` green;
   axe/a11y clean; finish-gate review passes (no banned patterns from §3).
 
@@ -445,16 +450,20 @@ trim models metadata; cut the 3 unrendered analytics endpoints end-to-end.
 > deleted. The three **backend** routes stay mounted: they are read-only, cached and documented in
 > `docs/api-contract.md`, and removing them is a separate call. What is gone is the UI pretence that they
 > rendered.
+>
+> **Completed 2026-11-11 (Batch D):** the four routes (`daily`, `climatology`, `correlation`,
+> `error-by-hour`), their schemas and repo methods are deleted; only `diurnal` and `wind-rose` remain.
 
 Acceptance criteria:
 
 - Freshness pulse keys on the server header, not `observed_at` arithmetic.
 - Sistema "Modelos" shows production first with skill + coverage + drift badge;
   staging/superseded collapsed.
-- `/analytics/{climatology,correlation,error-by-hour}` + their schemas/queries/
-  repo methods/tests removed; `docs/api-contract.md` updated. **Partially done 2026-11-01:** the hooks + zod
-  schemas are gone; the routes, repo methods and tests stay (see the note under *P1*).
-- AEMET Spain-only notice (`AemetNotice.tsx`) still renders for Pasadena.
+- `/analytics/{climatology,correlation,error-by-hour}` (and `daily`) + their
+  schemas/queries/repo methods/tests removed; `docs/api-contract.md` updated. **Done:** hooks + zod schemas
+  2026-11-01, routes/repo methods/tests 2026-11-11.
+- AEMET Spain-only notice (`AemetNotice.tsx`) still renders for Pasadena. **Moot since 2026-11-11:**
+  Pasadena left the registry, so no station is outside AEMET coverage; the component and its test stay.
 
 Risks: header plumbing touches the shared client (schema tests must keep
 passing); removing analytics endpoints is safe only because grep proves zero
@@ -513,7 +522,7 @@ are intent, not approved scope.
 | PLAT-03 (Spark vs on-prem/sklearn) | Architecture | Do not fork the compute model now; the single-instance cache/limiter (§4 gap 5) must be resolved first. |
 | PLAT-04 (streetview) | Depends on PLAT-01 | Defer until trips are real; source/licensing unresolved. |
 | PLAT-05 (Kafka via Atlas) | Backend research | Research only; current ingest already works and Kafka/ is being deleted. |
-| PLAT-06 (MongoDB-Charts-like graphs) | Sistema (Analítica) + the shared chart component | One chart base (`HistoryChart` + `chart-theme.ts`), no new chart library; catalogue of chart types before building. |
+| PLAT-06 (MongoDB-Charts-like graphs) | Station-page `ClimateViewsDialog` + the shared chart component (Analítica was deleted 2026-11-11) | One chart base (`HistoryChart` + `chart-theme.ts`), no new chart library; catalogue of chart types before building. |
 | PLAT-07 (aircraft, real-time ADS-B) | Resumen map as a UI-11 layer | External keyed API → server proxy + quota + background freshness; license/attribution review first. |
 
 ---

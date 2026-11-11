@@ -126,6 +126,20 @@ describe('Resumen mount budget', () => {
     expect(mocks.paths).not.toContain('/benchmark')
     expect(mocks.paths).not.toContain('/weather/quality')
   })
+
+  /**
+   * Finding 15: the header button duplicated a poll that already runs every
+   * 300 s (plus focus refetch, see `src/test/query-defaults.test.ts`). Nothing on
+   * this page may bring a manual refresh back; the error states keep
+   * `Reintentar`, which is a different affordance and stays.
+   */
+  it('offers no manual refresh control', async () => {
+    renderOverview()
+    /* Wait for the network so the assertion is not made on the loading tree. */
+    expect(await screen.findByText(/3 estaciones/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Actualizar/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Recargar|Refrescar/ })).not.toBeInTheDocument()
+  })
 })
 
 describe('Resumen content', () => {
@@ -134,6 +148,25 @@ describe('Resumen content', () => {
     expect(await screen.findByText(/3 estaciones · actualizado a las \d{2}:\d{2}/)).toBeInTheDocument()
     /* Fresh data, so no stale suffix. */
     expect(screen.queryByText(/datos con más de 12 h/)).not.toBeInTheDocument()
+  })
+
+  /**
+   * S10: the freshness line carried a pulsing ok/neutral `StatusDot` next to the
+   * sentence. The text is the signal (and the only signal a colour-blind or
+   * screen-reader user gets), so the dot is gone; this pins its absence — the
+   * `StatusDot` primitive is `aria-hidden`, which is what makes it findable.
+   */
+  it('tells freshness in text without a status dot', async () => {
+    renderOverview()
+    const line = (await screen.findByText(/3 estaciones · actualizado/)).closest('p')
+    expect(line).not.toBeNull()
+    expect(line!.querySelector('[aria-hidden="true"]')).toBeNull()
+  })
+
+  it('still announces a stale network in words, not colour', async () => {
+    mocks.stationMinutesAgo = 20 * 60
+    renderOverview()
+    expect(await screen.findByText(/datos con más de 12 h/)).toBeInTheDocument()
   })
 
   it('keeps Pasadena in the station list and its link', async () => {

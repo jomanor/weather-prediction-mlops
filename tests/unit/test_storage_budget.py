@@ -10,10 +10,12 @@ steady-state model from *derived* inputs and measured document sizes:
   (M2 ``target_horizons``; ``int | list`` is accepted). If the key is not there
   yet the frozen M2 set is used, so the model never silently reverts to the
   1-horizon volume.
-* The *live* station count is **measured** (15, incl. Pasadena) and must equal
-  the station registry parsed from ``backend/app/core/cities.py:DEFAULT_CITIES``
-  — the budget input and the registry are pinned to each other, so a station
-  added to the registry without re-measuring fails this module.
+* The *live* station count is **measured** (15, on 2026-09-25) and kept as-is after
+  Pasadena left the registry on 2026-11-11 (audit finding 16): the model is
+  conservative by one station until someone re-measures, so deleting a station
+  never buys the budget headroom. It must never fall below the station registry
+  parsed from ``backend/app/core/cities.py:DEFAULT_CITIES``, so a station added
+  to the registry without re-measuring fails this module.
 * Bytes/row are **measured** from the production Atlas ``weather_db`` on
   2026-09-25 via read-only ``collStats.avgObjSize``:
   ``raw_weather=1362 B``, ``weather_features=3856 B``,
@@ -114,7 +116,12 @@ MEASURED_AVG_OBJ_SIZE: dict[str, int] = {
 #: snapshot, estimated between the raw payload and a prediction document.
 WEATHER_DATA_BYTES_PER_ROW_ESTIMATE = 600
 
-#: Measured live station count (includes Pasadena); must match the registry.
+#: Stations charged by the model: the count **measured** on production on
+#: 2026-09-25. The registry is 14 since 2026-11-11 (Pasadena removed, audit
+#: finding 16) and its 6 929 rows were deleted from Atlas the same day, so this
+#: is now one station of margin rather than a charge for real rows: a deletion
+#: must not loosen the budget. Re-measure before lowering it: at 14 the tripwire
+#: below moves from 10 to ~18 rebuilds/day.
 LIVE_CITY_COUNT = 15
 
 #: M2 ``target_horizons`` if ``spark_config`` predates the WS-A change.
@@ -232,15 +239,16 @@ def test_retention_days_track_mongo_ttl_indexes():
 
 
 def test_live_city_count_matches_the_station_registry():
-    """The budget uses the measured 15 live stations, which is the whole registry."""
+    """The budget keeps the measured 15 stations; the registry now holds 14."""
     registry = eval_python_constant(CITIES_SOURCE, "DEFAULT_CITIES")
-    assert DEFAULT_CITY_COUNT == len(registry) == 15
-    # Exact equality, not a bound: the registry and the measured count must agree,
-    # so adding or dropping a station fails here until the budget is re-measured.
-    assert LIVE_CITY_COUNT == DEFAULT_CITY_COUNT
+    assert DEFAULT_CITY_COUNT == len(registry) == 14
+    # Not an equality: the model deliberately stays at the measured count so a
+    # deletion cannot loosen the budget. It must never fall *below* the
+    # registry, which would let a new station be added off-budget.
+    assert LIVE_CITY_COUNT >= DEFAULT_CITY_COUNT
     names = [entry[0] for entry in registry]
     assert len(names) == len(set(names))  # no duplicate stations
-    assert "Pasadena" in names  # the US station the AEMET benchmark cannot cover
+    assert "Pasadena" not in names  # removed 2026-11-11 (audit finding 16)
     assert all(isinstance(name, str) and name for name in names)
 
 

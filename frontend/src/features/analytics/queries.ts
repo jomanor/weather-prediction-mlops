@@ -3,11 +3,7 @@ import {
   ANALYTICS_BOUNDS,
   clampDays,
 } from '@/features/analytics/transforms'
-import {
-  analyticsDailySchema,
-  diurnalSchema,
-  windRoseSchema,
-} from '@/features/analytics/schemas'
+import { diurnalSchema, windRoseSchema } from '@/features/analytics/schemas'
 
 /**
  * Analytics query hooks (Contract 4). Every `days` parameter is clamped to the
@@ -17,20 +13,11 @@ import {
 
 const STALE = 5 * 60_000
 
+/* `daily` is gone with the Analítica tab (audit 16); the heatmap and the wind
+   rose are the two retained views, and each keeps its own cache key. */
 export const analyticsKeys = {
-  daily: (city: string, days: number) => ['analytics', 'daily', city, days] as const,
   windRose: (city: string, days: number) => ['analytics', 'wind-rose', city, days] as const,
   diurnal: (days: number) => ['analytics', 'diurnal', days] as const,
-}
-
-export function useAnalyticsDaily(city: string, days: number = ANALYTICS_BOUNDS.daily.default) {
-  const bounded = clampDays(days, ANALYTICS_BOUNDS.daily)
-  return useApiQuery(
-    analyticsKeys.daily(city, bounded),
-    `/analytics/daily?city=${encodeURIComponent(city)}&days=${bounded}`,
-    analyticsDailySchema,
-    { enabled: Boolean(city), staleTime: STALE },
-  )
 }
 
 export function useAnalyticsWindRose(city: string, days: number = ANALYTICS_BOUNDS.windRose.default) {

@@ -44,6 +44,9 @@ export function LatestPrediction({ predictions, horizon }: LatestPredictionProps
      and the local age must still flag it. */
   const isStale =
     latest?.stale === true || (ageHours !== null && ageHours > PREDICTION_STALE_HOURS)
+  /* One string, not a label plus a number: the stale state must read as a
+     sentence in a screen reader as well as on screen. */
+  const staleNote = `origen de más de ${PREDICTION_STALE_HOURS} h`
 
   return (
     <Panel flush>
@@ -53,6 +56,8 @@ export function LatestPrediction({ predictions, horizon }: LatestPredictionProps
         actions={
           latest ? (
             <>
+              {/* S10: the age is the fact and the words below carry the stale
+                  state — the "Antigua" badge said the same thing twice. */}
               <span
                 className="nums text-[10px] text-fg-3"
                 title="Antigüedad de la observación de origen"
@@ -60,9 +65,12 @@ export function LatestPrediction({ predictions, horizon }: LatestPredictionProps
                 {formatAgeHours(latest.source_timestamp)}
               </span>
               {isStale ? (
-                <Badge tone="warn" title={`Más de ${PREDICTION_STALE_HOURS} h desde el origen`}>
-                  Antigua
-                </Badge>
+                <span
+                  className="text-[11px] text-warn"
+                  title={`Más de ${PREDICTION_STALE_HOURS} h desde el origen`}
+                >
+                  {staleNote}
+                </span>
               ) : null}
               <Badge tone="model">
                 <Cpu className="h-2.5 w-2.5" />

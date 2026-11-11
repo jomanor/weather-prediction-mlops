@@ -171,5 +171,4 @@ export const SERIES_LABELS = {
  */
 export const MAP_PAINT = {
   hillshadeShadow: { light: '#5b6470', dark: '#000000' },
-  building: { light: '#cfd6dd', dark: '#1b222b' },
 } as const

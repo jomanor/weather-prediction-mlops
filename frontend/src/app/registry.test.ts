@@ -36,11 +36,13 @@ describe('feature registry', () => {
     expect(ROUTES).toHaveLength(expected)
   })
 
-  it('redirects the absorbed pages into Sistema tabs', () => {
+  it('redirects the absorbed pages to the surfaces that kept their content', () => {
     expect(REDIRECTS.map((redirect) => [redirect.from, redirect.to])).toEqual([
       ['/benchmark', '/sistema?tab=benchmark'],
       ['/models', '/sistema?tab=modelos'],
-      ['/analytics', '/sistema?tab=analitica'],
+      /* Analítica is gone (audit 16): the heatmap and the wind rose live on the
+         station page now, so the legacy path lands there, not on a dead tab. */
+      ['/analytics', '/stations'],
     ])
     /* A redirect must never shadow a live route or a nav target. */
     const live = new Set(ROUTES.map((route) => route.to))

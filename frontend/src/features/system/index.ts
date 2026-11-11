@@ -4,9 +4,11 @@ import { lazy } from 'react'
 import type { FeatureManifest } from '@/app/nav'
 
 /**
- * Sistema: the MLOps trust surface. Data quality, model registry, benchmark
- * against AEMET and climate analytics used to be four top-level pages; they are
- * four tabs of one URL (`?tab=`) and the three old paths redirect here.
+ * Sistema: the MLOps trust surface. Data quality, model registry and the
+ * benchmark against AEMET used to be three top-level pages; they are three tabs
+ * of one URL (`?tab=`) and the two old paths redirect here. Climate analytics
+ * is no longer a tab: it lives in `ClimateViewsDialog` on the station page, so
+ * `/analytics` redirects there.
  */
 const SystemPage = lazy(() =>
   import('@/features/system/SystemPage').then((module) => ({ default: module.SystemPage })),
@@ -19,6 +21,6 @@ export const systemFeature: FeatureManifest = {
   redirects: [
     { path: 'benchmark', to: '/sistema?tab=benchmark' },
     { path: 'models', to: '/sistema?tab=modelos' },
-    { path: 'analytics', to: '/sistema?tab=analitica' },
+    { path: 'analytics', to: '/stations' },
   ],
 }

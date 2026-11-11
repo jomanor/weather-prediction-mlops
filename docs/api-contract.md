@@ -53,7 +53,8 @@ Latest observation per city.
 One bulk query, one compact series per city. The station page reads this
 instead of `/current` + `/history` (Batch 6c).
 
-- `cities` — required, comma separated, 1..15 names, deduplicated in request
+- `cities` — required, comma separated, 1..15 names (the request cap is 15;
+  the registry holds **14** stations since 2026-11-11), deduplicated in request
   order (the response keeps that order); names longer than the registry cap are
   `422`. An empty or oversized list is `422`.
 - `hours` — integer 1..168, default 24.
@@ -104,8 +105,9 @@ rebuild); the target-drop that previously forced a healthy pipeline to land
 ~6 h stale was fixed in Batch 4, so the gates are honest, not loosened.
 
 The response always carries one entry per station in the Mongo `cities` registry
-(`DEFAULT_CITIES` in `app/core/cities.py` — 15, Pasadena included — is the seed
-and the empty-registry fallback), so a city whose feature rows stopped arriving
+(`DEFAULT_CITIES` in `app/core/cities.py` — 14 Spanish stations, big enough to
+seed a fresh database — is the seed and the empty-registry fallback), so a city
+whose feature rows stopped arriving
 is reported `bad` with `observed_hours: 0` instead of disappearing, and a
 station deleted from the registry stops being reported. Duplicate
 `(city, timestamp)` rows are counted once.
@@ -136,7 +138,7 @@ station deleted from the registry stops being reported. Duplicate
 
 GeoJSON `FeatureCollection` of the latest observation per city, joined against
 the stored coordinates. Cached 30 s with `ETag`/`Cache-Control`/`304`. No bbox
-parameter and no spatial index: the whole 15-station collection is served.
+parameter and no spatial index: the whole 14-station collection is served.
 Stations without coordinates are omitted; every other city always appears.
 
 ```json
@@ -276,50 +278,59 @@ through from the registry document (also nullable).
 
 ## Analytics
 
-Six cached read-only aggregates over `weather_features` (Batch 4, D2). All of
-them: `Cache-Control: public, max-age=300`, `ETag`, `304` on `If-None-Match`,
-key = the parameters below; computation is bounded by a process-wide
-`asyncio.Semaphore(2)`. Every value is null-tolerant — a missing observation is
-`null`, never a fabricated `0`; counts (`n`, `count`) default to `0` and
-`heatwave` to `false`. City names come from the registry; an unknown city
-returns an empty series, not a `404`.
+Two cached read-only aggregates over `weather_features` (`diurnal` and
+`wind-rose`, the only views the UI renders: the station page's climate dialog,
+`ClimateViewsDialog`). Both: `Cache-Control: public, max-age=300`, `ETag`, `304`
+on `If-None-Match`, key = the parameters below; computation is bounded by a
+process-wide `asyncio.Semaphore(2)`. Every value is null-tolerant — a missing
+observation is `null`, never a fabricated `0`; counts (`n`, `count`) default to
+`0`. City names come from the registry; an unknown city returns an empty series,
+not a `404`.
+
+The other four Batch-4 routes — `daily`, `climatology`, `correlation`,
+`error-by-hour` — were **deleted on 2026-11-11** together with their schemas,
+repo methods and tests, when the Analítica tab went (audit finding 13). Do not
+re-add them without a rendered consumer.
 
 | Route | Parameters | Payload |
 | --- | --- | --- |
-| `GET /api/analytics/daily` | `city` (required), `days` 7..180 (default 90) | `{ city, days, generated_at, points: [{ date, tmin, tmax, tmean, hdd, cdd, anomaly, heatwave }] }` |
-| `GET /api/analytics/climatology` | `city` (required) | `{ city, generated_at, basis_years, series: [{ day_of_year, tmean, tmin, tmax, n }] }` |
 | `GET /api/analytics/wind-rose` | `city` (required), `days` 7..365 (default 90) | `{ city, days, generated_at, sectors: [{ sector, count, mean_speed }] }` |
 | `GET /api/analytics/diurnal` | `days` 7..365 (default 90) | `{ days, generated_at, cells: [{ city, hour, tmean, n }] }` |
-| `GET /api/analytics/correlation` | `days` 7..365 (default 90), `var` = `temperature`\|`humidity`\|`pressure`\|`wind_speed` (default `temperature`) | `{ days, var, generated_at, cities, matrix }` |
-| `GET /api/analytics/error-by-hour` | `days` 7..90 (default 30) | `{ days, generated_at, points: [{ horizon_hours, hour, n, mae, rmse, bias, persistence_mae }] }` |
 
 ```json
-// GET /api/analytics/daily?city=Madrid&days=90
+// GET /api/analytics/wind-rose?city=Madrid&days=90
 {
   "city": "Madrid",
   "days": 90,
   "generated_at": "2026-09-25T12:00:00Z",
-  "points": [
-    { "date": "2026-09-24", "tmin": 14.2, "tmax": 31.8, "tmean": 23.1,
-      "hdd": 0.0, "cdd": 5.1, "anomaly": 1.4, "heatwave": false }
+  "sectors": [
+    { "sector": 0, "count": 41, "mean_speed": 9.7 },
+    { "sector": 15, "count": 22, "mean_speed": 6.4 }
   ]
 }
 ```
 
+```json
+// GET /api/analytics/diurnal?days=90
+{
+  "days": 90,
+  "generated_at": "2026-09-25T12:00:00Z",
+  "cells": [
+    { "city": "Madrid", "hour": 15, "tmean": 24.6, "n": 90 }
+  ]
+}
+```
+
+The payload examples above are shape illustrations, not a live capture; the
+`sectors` and `cells` arrays are truncated to two and one entries, while the
+real responses carry 16 sectors per city and one cell per
+`(city, local hour 0..23)`.
+
 Semantics that are not visible in the shapes:
 
-- `daily`: `date` is a UTC calendar day (`YYYY-MM-DD`); `hdd`/`cdd` use base
-  18 °C; `anomaly` is `tmean −` the same city's day-of-year climatology mean;
-  `heatwave` is membership in a run of ≥ 3 consecutive days with `tmax ≥ 35 °C`.
-- `climatology`: one point per day of year 1..366; `basis_years` is the number
-  of distinct calendar years the series is built from (float).
-- `wind-rose`: `sector` 0..15, clockwise starting at N; `mean_speed` in km/h.
+- `wind-rose`: `sector` 0..15, clockwise starting at N, `round(dir/22.5) % 16`;
+  `mean_speed` in km/h.
 - `diurnal`: one cell per `(city, local hour 0..23)`; `hour` is local, not UTC.
-- `correlation`: `cities` is the row/column order of `matrix` (taken from the
-  registry); a pair with fewer than 3 shared days, or with zero variance, is
-  `null` — that includes the diagonal, which is `1.0` only on that condition.
-- `error-by-hour`: `hour` is the local hour of the verified observation;
-  `persistence_mae` is the same-hour baseline for the same horizon.
 
 ## Metrics (process-local, public)
 
@@ -516,8 +527,9 @@ and degrades the quality meter. The gate applies identically to `/api/cities`
 and `/api/v1/cities`.
 
 - `GET /api/cities` → array of `{ "name": string, "latitude": number, "longitude": number }`
-  (the old bare string array is superseded; seeded with the 15 default
-  stations — 14 Spanish plus Pasadena — on startup when the collection is empty).
+  (the old bare string array is superseded; seeded with the 14 default Spanish
+  stations on startup when the collection is empty; Pasadena, the only US
+  station, was removed from the registry on 2026-11-11).
   Unauthenticated, never gated.
 - `POST /api/cities` body `{ "name", "latitude", "longitude" }` → 201 with the
   stored city. 409 when the name already exists (case-insensitive), 400 for

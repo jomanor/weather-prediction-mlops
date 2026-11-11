@@ -200,6 +200,27 @@ describe('station series empty and failure states', () => {
     expect(mocks.paths.filter((path) => path.startsWith('/weather/history'))).toEqual([])
   })
 
+  /* Audit S3: the empty state must ask for a wider window, not the same one. */
+  it('requests the 168 h window from the empty state', async () => {
+    mocks.series = {
+      hours: 48,
+      count: 1,
+      cities: [{ city: 'Madrid', count: 0, latest_timestamp: null, points: [] }],
+    }
+    renderPage()
+
+    expect(await screen.findByText('Sin observaciones recientes')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Ampliar a 7 días' }))
+
+    await waitFor(() =>
+      expect(seriesQuery(seriesCalls().at(-1) ?? '').get('hours')).toBe('168'),
+    )
+    /* Still one endpoint, still no per-endpoint history/current fallback. */
+    expect(seriesCalls()).toHaveLength(2)
+    expect(mocks.paths.filter((path) => path.startsWith('/weather/current'))).toEqual([])
+    expect(mocks.paths.filter((path) => path.startsWith('/weather/history'))).toEqual([])
+  })
+
   it('surfaces a failed series as an error with a retry, without falling back', async () => {
     mocks.seriesError = new Error('La API respondió 404')
     renderPage()

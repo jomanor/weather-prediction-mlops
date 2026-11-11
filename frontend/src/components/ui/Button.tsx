@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react'
 
 import { cn } from '@/lib/cn'
 
@@ -23,6 +23,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant
   size?: Size
   children?: ReactNode
+  /** React 19 passes `ref` as a prop; forwarded so callers can manage focus
+   * (e.g. a dialog returning focus to the button that opened it). */
+  ref?: Ref<HTMLButtonElement>
 }
 
 export function Button({
@@ -30,10 +33,12 @@ export function Button({
   size = 'md',
   className,
   type = 'button',
+  ref,
   ...props
 }: ButtonProps) {
   return (
     <button
+      ref={ref}
       type={type}
       className={cn(
         'motion-ui inline-flex items-center rounded-control border font-medium',

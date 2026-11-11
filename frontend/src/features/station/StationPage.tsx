@@ -1,4 +1,3 @@
-import { RefreshCw } from 'lucide-react'
 import { useMemo } from 'react'
 
 import { useCities } from '@/api/queries'
@@ -10,6 +9,7 @@ import { ChartSkeleton, EmptyState, ErrorState, LoadingBlock } from '@/component
 import { PageHeader } from '@/components/ui/PageHeader'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { Segmented } from '@/components/ui/Segmented'
+import { ClimateViewsDialog } from '@/features/analytics/components/ClimateViewsDialog'
 import { CurrentConditions } from '@/features/station/CurrentConditions'
 import { LatestPrediction } from '@/features/station/LatestPrediction'
 import {
@@ -21,12 +21,14 @@ import {
 import { useChartWindow } from '@/hooks/useChartSync'
 import { resolveCity, useStationSelection } from '@/hooks/useStationSelection'
 import { urlOption, useUrlState, type UrlCodec } from '@/hooks/useUrlState'
-import { cn } from '@/lib/cn'
 import { isNum } from '@/lib/format'
 import { latestRun, pickHorizon } from '@/lib/predictions'
 
 const HOURS = [24, 48, 72, 168] as const
 type StationHours = (typeof HOURS)[number]
+
+/** The widest window the page offers; the empty state widens straight to it. */
+const WIDEST_HOURS: StationHours = HOURS[HOURS.length - 1]
 
 const RANGES: ReadonlyArray<{ value: StationHours; label: string }> = [
   { value: 24, label: '24 h' },
@@ -130,10 +132,7 @@ export function StationPage() {
               options={HORIZON_OPTIONS}
               label="Horizonte de predicción"
             />
-            <Button onClick={() => series.refetch()} disabled={series.isFetching}>
-              <RefreshCw className={cn('h-3.5 w-3.5', series.isFetching && 'animate-spin')} />
-              Actualizar
-            </Button>
+            {city ? <ClimateViewsDialog city={city} /> : null}
           </>
         }
       />
@@ -164,12 +163,23 @@ export function StationPage() {
             ) : (
               /* `/series` answers 200 with an empty city instead of the old
                  `/current` 404, so "no observation in this window" is an empty
-                 state, not an error — and the window can be widened from here. */
+                 state, not an error — and the action widens the window instead
+                 of refetching the same empty one (audit S3). */
               <Panel>
                 <EmptyState
                   title="Sin observaciones recientes"
-                  description={`No hay observaciones de ${city} en las últimas ${hours} h. Amplía el rango o revisa la ingesta.`}
-                  action={<Button onClick={() => series.refetch()}>Reintentar</Button>}
+                  description={
+                    hours === WIDEST_HOURS
+                      ? `No hay observaciones de ${city} en las últimas ${hours} h. Revisa la ingesta: la ventana ya es la más amplia.`
+                      : `No hay observaciones de ${city} en las últimas ${hours} h. Amplía la ventana a 7 días.`
+                  }
+                  action={
+                    hours === WIDEST_HOURS ? undefined : (
+                      <Button onClick={() => setState({ hours: WIDEST_HOURS })}>
+                        Ampliar a 7 días
+                      </Button>
+                    )
+                  }
                 />
               </Panel>
             )}

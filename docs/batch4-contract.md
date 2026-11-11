@@ -134,6 +134,12 @@ ML_CONFIG["long_horizon_from"] = 12          # horizons >= this use a reduced gr
 
 ## Contract 4 — D2 analytics endpoints (WS-C produces, WS-D2 consumes)
 
+> **Superseded in part, 2026-11-11 (Batch D, audit findings 13/16).** Routes 1, 2, 5 and 6 — `daily`,
+> `climatology`, `correlation`, `error-by-hour` — are **deleted**, with their schemas and repo methods.
+> Only `wind-rose` (3) and `diurnal` (4) survive, and the WS-D2 page (`Analítica`, order 50) is gone:
+> those two views now render inside `ClimateViewsDialog` on the station page. The frozen shapes below
+> are kept as history; `docs/api-contract.md` is the current contract.
+
 Prefix `/api/analytics`, all read-only, all cached with the existing `cached()` helper
 (TTL 300 s → ETag/`Cache-Control`), all sources `weather_features` (local `hour`, city-
 prefixed sorts, `allowDiskUse=True`). `days` params are validated and bounded. Every
@@ -168,7 +174,8 @@ schema is null-tolerant; no fabricated values.
    "prediction vs observed at t+h".
 
 WS-D2 page: feature id `analytics`, route path `analytics`, nav label `Analítica`,
-`icon` from lucide-react, `order: 50`. It defines its own zod schemas + query hooks inside
+`icon` from lucide-react, `order: 50`. **(This page was deleted on 2026-11-11; the two surviving views
+live in `ClimateViewsDialog`.)** It defines its own zod schemas + query hooks inside
 `frontend/src/features/analytics/` and renders at least the diurnal heatmap, the daily
 anomaly/HDD-CDD view and the wind rose. WS-D1 adds the registry import + nav entry.
 
@@ -208,8 +215,10 @@ the Contract-1 comment accordingly.
 
 sre measured 2026-09-25 on live Atlas M0: avgObjSize `raw_weather` 1362 B, `weather_features`
 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns — the old 405 B is stale),
-live city count **15** (includes Pasadena, which is absent from `FALLBACK_CITIES`; that
-registry gap is a separate follow-up, not Batch 4). Predictions are keyed
+live city count **15** at the measurement date (2026-09-25). **Pasadena was removed from the registry
+on 2026-11-11** (owner decision, audit finding 16); the storage model deliberately keeps charging 15
+stations so a deletion cannot buy headroom — `LIVE_CITY_COUNT = 15` in
+`tests/unit/test_storage_budget.py` with an explanatory comment. Predictions are keyed
 `(city, source_timestamp, horizon)` and written `operationType=replace` (upsert), so an
 inference run adds rows **only when the latest feature `source_timestamp` advances**: the
 binding rate is the feature-rebuild cadence (`20 */6` = 4/day), not the hourly inference
@@ -238,4 +247,5 @@ No TTL or retention change: `weather_predictions` stays 90 d.
   `sre-engineer` (storage projection with 5× predictions).
 - Final live acceptance: `gh workflow run ml-pipeline.yml --ref feat/batch4 -f job=all`,
   then verify `/api/predictions/latest` carries 5 horizons, `model_registry` carries
-  `diagnostics`, and `/api/analytics/*` return 200.
+  `diagnostics`, and `/api/analytics/*` return 200 (only `diurnal` and `wind-rose` exist since
+  2026-11-11; the other four are 404 by design).

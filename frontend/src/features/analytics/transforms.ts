@@ -1,11 +1,13 @@
 import { compassPoint, isNum } from '@/lib/format'
 
-import type { DailyPoint, DiurnalCell, WindRoseSector } from '@/features/analytics/schemas'
+import type { DiurnalCell, WindRoseSector } from '@/features/analytics/schemas'
 
 /**
  * Pure transforms between the analytics payloads and what the views render.
  * Kept out of the components so the non-trivial aggregation (wind-rose sectors,
- * the city × hour matrix, heatwave runs) is unit-testable.
+ * the city × hour matrix) is unit-testable. The daily anomaly/heatwave helpers
+ * went with the Analítica tab (audit 16); `DiurnalHeatmap` and `WindRose` are
+ * the two retained views.
  */
 
 export const HOURS = Array.from({ length: 24 }, (_, hour) => hour)
@@ -20,7 +22,6 @@ export interface DaysBound {
 }
 
 export const ANALYTICS_BOUNDS = {
-  daily: { min: 7, max: 180, default: 90 },
   windRose: { min: 7, max: 365, default: 90 },
   diurnal: { min: 7, max: 365, default: 90 },
 } as const satisfies Record<string, DaysBound>
@@ -135,26 +136,4 @@ export function buildDiurnalMatrix(cells: readonly DiurnalCell[]): DiurnalMatrix
     min,
     max,
   }
-}
-
-export interface HeatwaveRun {
-  /** Inclusive indices into the `points` array. */
-  start: number
-  end: number
-}
-
-/** Contiguous runs of `heatwave: true` days (backend: ≥3 days at tmax ≥ 35 °C). */
-export function heatwaveRuns(points: readonly DailyPoint[]): HeatwaveRun[] {
-  const runs: HeatwaveRun[] = []
-  let start = -1
-  points.forEach((point, index) => {
-    if (point.heatwave) {
-      if (start < 0) start = index
-    } else if (start >= 0) {
-      runs.push({ start, end: index - 1 })
-      start = -1
-    }
-  })
-  if (start >= 0) runs.push({ start, end: points.length - 1 })
-  return runs
 }

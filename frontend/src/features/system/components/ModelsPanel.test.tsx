@@ -134,3 +134,35 @@ describe('ModelsPanel precision', () => {
     expect(within(screen.getByRole('table')).getAllByText('0,53')).toHaveLength(1)
   })
 })
+
+/**
+ * Finding 15: Calidad and Benchmark never had a refresh button, Modelos did —
+ * the same incoherence in the other direction. The registry query is cached and
+ * refetched on focus (`src/test/query-defaults.test.ts`), so the button went and
+ * `Reintentar` stayed in the error state, where a human knows something the
+ * poll does not.
+ */
+describe('ModelsPanel has no manual refresh control', () => {
+  beforeEach(() => {
+    mocked.mockReset()
+  })
+
+  it('renders no Actualizar button next to the panel blurb', () => {
+    mockModels()
+    render(<ModelsPanel />)
+    expect(screen.queryByRole('button', { name: /Actualizar/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps the Reintentar button in the error state', () => {
+    mocked.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      isFetching: false,
+      error: new Error('registro caído'),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useModels>)
+    render(<ModelsPanel />)
+    expect(screen.getByRole('button', { name: 'Reintentar' })).toBeInTheDocument()
+  })
+})

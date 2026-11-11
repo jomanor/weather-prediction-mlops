@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import API_LEGACY_PREFIX, API_V1_PREFIX
 from app.repositories.analytics_repo import get_analytics_repo
-from app.schemas.analytics import DailyPoint, DailyResponse
+from app.schemas.analytics import DiurnalCell, DiurnalResponse
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -25,7 +25,7 @@ CASES = [
     ("/cities", None, True),
     ("/weather/current", None, True),
     ("/models", None, True),
-    ("/analytics/daily", {"city": "Madrid", "days": 30}, True),
+    ("/analytics/diurnal", {"days": 30}, True),
 ]
 
 #: ``contract``-style pairs used for the structural assertions below.
@@ -35,12 +35,11 @@ PAIRS = [("/api" + path, API_V1_PREFIX + path) for path, _, _ in CASES]
 class StubAnalyticsRepository:
     """Just enough of the analytics repo for one cached route."""
 
-    async def daily(self, city: str, days: int, now: datetime) -> DailyResponse:
-        return DailyResponse(
-            city=city,
+    async def diurnal(self, days: int, now: datetime) -> DiurnalResponse:
+        return DiurnalResponse(
             days=days,
             generated_at=NOW,
-            points=[DailyPoint(date="2026-09-24", tmin=14.0, tmax=30.0, tmean=22.0)],
+            cells=[DiurnalCell(city="Madrid", hour=12, tmean=22.0, n=3)],
         )
 
 

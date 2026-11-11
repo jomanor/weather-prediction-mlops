@@ -3,7 +3,7 @@ name: Load test (cold burst)
 # Manual only -- never on push, never on a schedule: the target is a free Render
 # instance that sleeps after ~15 min idle. RED means the API missed the budget
 # (analytics p95 >= 2 s, health failures >= 1 %, http_req_failed >= 5 %, or the
-# cold probe did not get four 200s), NOT that CI broke.
+# cold probe did not get three 200s), NOT that CI broke.
 on:
   workflow_dispatch:
     inputs:

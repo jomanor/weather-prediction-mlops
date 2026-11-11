@@ -11,8 +11,6 @@ import { StationMap } from '@/components/map/StationMap'
 const mocks = vi.hoisted(() => ({
   addSource: vi.fn(),
   addLayer: vi.fn(),
-  /* Toggled per test: false models the raster relief basemap (no vector tiles). */
-  vectorBasemap: { value: true },
 }))
 
 vi.mock('@/components/map/weather-icons', () => ({
@@ -24,11 +22,7 @@ vi.mock('@/components/map/weather-icons', () => ({
 vi.mock('maplibre-gl', () => {
   class FakeMap {
     layers = new Set<string>()
-    /* The Carto styles the app ships expose their vector tiles as `protomaps`;
-       the relief basemap has no vector source at all. */
-    sources = new Map<string, unknown>(
-      mocks.vectorBasemap.value ? [['protomaps', {}]] : [],
-    )
+    sources = new Map<string, unknown>()
     constructor(_options: unknown) {}
     addControl() {}
     on() {}
@@ -136,42 +130,22 @@ function renderMap() {
   )
 }
 
-describe('StationMap 3D buildings', () => {
-  it('extrudes the Carto buildings source-layer with its height field', async () => {
+/* Finding 16: one elevation setting. The 3D terrain mesh and the building
+   extrusions are gone, so there is one DEM source and nothing for the hillshade
+   to cancel against. */
+describe('StationMap elevation', () => {
+  it('adds exactly one DEM source and no 3D layer', async () => {
     renderMap()
     await waitFor(() => expect(mocks.addLayer).toHaveBeenCalled())
 
-    const call = mocks.addLayer.mock.calls.find(
-      ([layer]) => (layer as { id?: string }).id === 'meteoml-buildings-3d',
-    )
-    expect(call).toBeTruthy()
-    const [layer, beforeId] = call as [Record<string, unknown>, string | undefined]
-    expect(layer.source).toBe('protomaps')
-    expect(layer['source-layer']).toBe('buildings')
-    expect(layer.minzoom).toBe(14)
-    expect((layer.paint as Record<string, unknown>)['fill-extrusion-height']).toEqual([
-      'coalesce',
-      ['get', 'height'],
-      ['get', 'render_height'],
-      6,
-    ])
-    /* Inserted under the basemap labels, not on top of them. */
-    expect(beforeId).toBe('watername')
-  })
+    const demSources = mocks.addSource.mock.calls
+      .map(([id, spec]) => ({ id, type: (spec as { type?: string }).type }))
+      .filter((source) => source.type === 'raster-dem')
+    expect(demSources.map((source) => source.id)).toEqual(['meteoml-dem-hillshade'])
 
-  it('leaves the raster relief basemap without a 3D layer', async () => {
-    mocks.vectorBasemap.value = false
-    try {
-      renderMap()
-      await waitFor(() => expect(mocks.addSource).toHaveBeenCalled())
-      expect(
-        mocks.addLayer.mock.calls.some(
-          ([layer]) => (layer as { id?: string }).id === 'meteoml-buildings-3d',
-        ),
-      ).toBe(false)
-    } finally {
-      mocks.vectorBasemap.value = true
-    }
+    const layerIds = mocks.addLayer.mock.calls.map(([layer]) => (layer as { id: string }).id)
+    expect(layerIds).toContain('meteoml-hillshade')
+    expect(layerIds.filter((id) => /buildings|terrain/.test(id))).toEqual([])
   })
 })
 
@@ -207,11 +181,11 @@ describe('StationMap cluster source (U5)', () => {
 
 describe('StationMap layer controls on a phone', () => {
   /* The sheet and the desktop panel are the same controls; the phone reaches
-     them through "Capas" and the map still owns the DEM/3D exclusivity rule. */
+     them through "Capas" and a toggle leaves the sheet open (finding 16). */
   beforeEach(() => localStorage.clear())
   afterEach(() => localStorage.clear())
 
-  it('keeps relief and 3D terrain mutually exclusive from the sheet', async () => {
+  it('keeps the sheet open while a layer is toggled, and persists the toggle', async () => {
     const user = userEvent.setup()
     renderMap()
 
@@ -221,20 +195,21 @@ describe('StationMap layer controls on a phone', () => {
     const sheet = () => within(screen.getByRole('dialog', { name: 'Capas del mapa' }))
 
     await user.click(trigger())
-    await user.click(sheet().getByLabelText('Terreno 3D'))
-    /* A selection closes the sheet. */
-    expect(screen.queryByRole('dialog')).toBeNull()
-
-    await user.click(trigger())
-    expect(sheet().getByLabelText('Terreno 3D')).toBeChecked()
-    expect(sheet().getByLabelText('Relieve')).not.toBeChecked()
-
     await user.click(sheet().getByLabelText('Relieve'))
-    expect(screen.queryByRole('dialog')).toBeNull()
 
-    await user.click(trigger())
+    /* Both toggles stay reachable: the sheet does not close on a change. */
     expect(sheet().getByLabelText('Relieve')).toBeChecked()
-    expect(sheet().getByLabelText('Terreno 3D')).not.toBeChecked()
+    expect(sheet().getByLabelText('Radar de lluvia')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Capas del mapa' })).toBeInTheDocument()
+
+    await user.click(sheet().getByLabelText('Radar de lluvia'))
+    expect(sheet().getByLabelText('Radar de lluvia')).toBeChecked()
+    /* One elevation setting: turning radar on cannot uncheck relief. */
+    expect(sheet().getByLabelText('Relieve')).toBeChecked()
+    expect(JSON.parse(localStorage.getItem('meteoml.map') ?? '{}')).toEqual({
+      hillshade: true,
+      radar: true,
+    })
   })
 
   it('renders the desktop panel and the phone trigger from one set of controls', () => {
@@ -242,7 +217,7 @@ describe('StationMap layer controls on a phone', () => {
 
     expect(screen.getByRole('button', { name: /^capas$/i })).toBeInTheDocument()
     /* Closed sheet: only the desktop panel's content is mounted. */
-    expect(screen.getAllByLabelText('Edificios 3D')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Radar de lluvia')).toHaveLength(1)
     expect(screen.getAllByLabelText('Base')).toHaveLength(1)
   })
 })

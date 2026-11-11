@@ -110,6 +110,19 @@ describe('StationTable data age and sorting', () => {
     expect(within(madrid).getByText(/hace 10 min/)).toBeInTheDocument()
   })
 
+  /**
+   * S10: the per-row age stays (it answers "when did *this* station report",
+   * which the network-wide line on Resumen cannot); the ok/neutral `StatusDot`
+   * beside it goes, because it restated the same age in colour only. `StatusDot`
+   * is the only `h-1.5` box in the primitive set.
+   */
+  it('prints the age as text and not as a status dot', () => {
+    renderRows()
+    const sevilla = screen.getByRole('row', { name: /Sevilla/ })
+    expect(within(sevilla).getByText(/hace 3 h/)).toBeInTheDocument()
+    expect(sevilla.querySelector('[class*="h-1.5"]')).toBeNull()
+  })
+
   it('sorts by temperature', async () => {
     renderRows()
     const before = screen.getAllByRole('row').slice(1).map((row) => row.textContent)

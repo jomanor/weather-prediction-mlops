@@ -10,15 +10,12 @@ export const SHEET_ID = 'map-layers-sheet'
 export const LAYER_OPTIONS = [
   { key: 'hillshade', label: 'Relieve' },
   { key: 'radar', label: 'Radar de lluvia' },
-  { key: 'terrain3d', label: 'Terreno 3D' },
-  { key: 'buildings3d', label: 'Edificios 3D' },
 ] as const
 
 export type LayerKey = (typeof LAYER_OPTIONS)[number]['key']
 
 interface MapLayersControlProps {
   mapLayers: MapLayers
-  /** Relief and 3D terrain are mutually exclusive; the map owns that rule. */
   onLayerChange: (key: LayerKey, checked: boolean) => void
   basemap: BasemapId
   onBasemapChange: (basemap: BasemapId) => void
@@ -27,7 +24,7 @@ interface MapLayersControlProps {
 
 /**
  * The layer controls, once. `touch` swaps the desktop panel's 14 px rows for
- * 44 px tap rows; the content (four layers, basemap and both legends) is the
+ * 44 px tap rows; the content (both overlays, basemap and both legends) is the
  * same, so the phone never shows a different set of controls than the desktop.
  */
 function LayerSettings({
@@ -151,7 +148,8 @@ export function MapLayersPanel(props: MapLayersControlProps) {
  * Phone (`< sm`): the panel collapses into a 44 px "Capas" button over the map
  * and a bottom sheet with the same content. The sheet stops above the bottom
  * navigation (`--nav-h` + `--safe-bottom`), scrolls if it outgrows the screen
- * and closes on backdrop tap, Escape or a selection.
+ * and closes on backdrop tap, Escape or its close button — **not** on a layer
+ * or basemap change: "radar on + dark basemap" must cost two taps, not four.
  *
  * Both surfaces are in the DOM and switched by CSS: `display: none` takes the
  * hidden one out of the tab order, so no control is ever unreachable and no
@@ -264,16 +262,11 @@ export function MobileMapLayers({
               idPrefix="layers-sheet"
               touch
               mapLayers={mapLayers}
-              /* A selection closes the sheet, as the map stays the focus. */
-              onLayerChange={(key, checked) => {
-                onLayerChange(key, checked)
-                close()
-              }}
+              /* A toggle leaves the sheet open: the map is behind it, and the
+                 next change is usually the other check or the basemap. */
+              onLayerChange={onLayerChange}
               basemap={basemap}
-              onBasemapChange={(next) => {
-                onBasemapChange(next)
-                close()
-              }}
+              onBasemapChange={onBasemapChange}
               radarUnavailable={radarUnavailable}
             />
           </div>

@@ -3,9 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 
 import type { CurrentWeather } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
-import { StatusDot } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/Feedback'
-import { ageInSeconds, FRESH_WINDOW_SECONDS } from '@/hooks/useFreshness'
 import { cn } from '@/lib/cn'
 import { compassPoint, formatRelative, formatTemperature, formatWind, isNum } from '@/lib/format'
 import { describeWeather, toneClass } from '@/lib/weather'
@@ -30,6 +28,11 @@ interface SortState {
 /**
  * Compact station list: four fields that fit a 360 px phone — station (with its
  * weather icon), temperature, wind and data age.
+ *
+ * The age column is the per-station fact (S10): the network-wide freshness line
+ * on Resumen answers "when did anything arrive", this answers "when did *this*
+ * station arrive". It is plain text — the ok/neutral dot that used to precede it
+ * repeated the number in colour only.
  *
  * Every row opens Estación. The link is the only interactive element in the row
  * and it stretches over the whole row (`after:inset-0`), so a mouse click
@@ -77,11 +80,6 @@ export function StationTable({ rows }: StationTableProps) {
     const byName = a.name.localeCompare(b.name, 'es', { sensitivity: 'base' })
     return sort.dir === 'asc' ? byName : -byName
   })
-
-  const isFresh = (station?: CurrentWeather) => {
-    const age = ageInSeconds(station?.observed_at)
-    return age !== null && age <= FRESH_WINDOW_SECONDS
-  }
 
   const sortLabel = (key: SortKey, label: string) => {
     const active = sort.key === key
@@ -179,10 +177,7 @@ export function StationTable({ rows }: StationTableProps) {
                 </td>
                 <td className="whitespace-nowrap px-3 py-2 text-right">
                   {station ? (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] text-fg-3">
-                      <StatusDot tone={isFresh(station) ? 'ok' : 'neutral'} pulse={false} />
-                      {formatRelative(station.observed_at)}
-                    </span>
+                    <span className="nums text-[11px] text-fg-3">{formatRelative(station.observed_at)}</span>
                   ) : (
                     <span className="text-[11px] text-fg-3">—</span>
                   )}

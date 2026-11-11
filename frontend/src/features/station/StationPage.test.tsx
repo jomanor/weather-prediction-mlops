@@ -259,8 +259,42 @@ describe('StationPage derives hero and chart from one series', () => {
 
     expect(screen.getByText('Sin observaciones recientes')).toBeInTheDocument()
     expect(screen.getByText(/No hay observaciones de Madrid en las últimas 48 h/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Reintentar' })).toBeInTheDocument()
     expect(screen.queryByText('Observación')).not.toBeInTheDocument()
+  })
+
+  /* Audit S3: the empty state's action used to refetch the same empty window,
+     which can only ever return the same nothing. It widens the window instead. */
+  it('widens the window to 168 h from the empty state instead of refetching it', async () => {
+    mocks.series = {
+      data: seriesResponse([]),
+      isLoading: false,
+      isError: false,
+      error: null,
+    }
+    renderPage('?city=Madrid')
+
+    const widen = screen.getByRole('button', { name: 'Ampliar a 7 días' })
+    /* The old no-op is gone: no "Reintentar" beside an empty (not failed) series. */
+    expect(screen.queryByRole('button', { name: 'Reintentar' })).toBeNull()
+
+    await userEvent.click(widen)
+
+    expect(mocks.seriesArgs.at(-1)).toEqual({ city: 'Madrid', hours: 168 })
+    expect(screen.getByRole('radio', { name: '7 d' })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('drops the widen action once the window is already the widest', () => {
+    mocks.series = {
+      data: seriesResponse([]),
+      isLoading: false,
+      isError: false,
+      error: null,
+    }
+    renderPage('?city=Madrid&hours=168')
+
+    expect(screen.getByText(/en las últimas 168 h/)).toBeInTheDocument()
+    expect(screen.getByText(/la ventana ya es la más amplia/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Ampliar a 7 días' })).toBeNull()
   })
 
   it('keeps the failure state (and its retry) for both halves', () => {

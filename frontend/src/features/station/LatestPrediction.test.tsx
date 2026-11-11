@@ -108,7 +108,13 @@ describe('LatestPrediction picks the newest run and horizon', () => {
   })
 })
 
-describe('LatestPrediction age and stale badge', () => {
+/**
+ * S10: the age and the "Antigua" badge told the same freshness fact twice in a
+ * header that already has one job. The badge is gone; the age keeps the number
+ * and grows the words when the origin is past the threshold, so the stale state
+ * is still announced in text (never colour alone) without a second chip.
+ */
+describe('LatestPrediction age and stale announcement', () => {
   const NOW = new Date('2026-09-25T12:00:00Z').getTime()
 
   afterEach(() => vi.useRealTimers())
@@ -120,6 +126,13 @@ describe('LatestPrediction age and stale badge', () => {
       makePrediction({ source_timestamp: '2026-09-25T09:00:00Z', prediction_timestamp: '2026-09-25T10:00:00Z' }),
     ])
     expect(screen.getByText('hace 3 h')).toBeInTheDocument()
+    expect(screen.queryByText(/origen de más de 12 h/)).not.toBeInTheDocument()
+  })
+
+  it('does not render a stale badge', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+    renderLatest([makePrediction({ source_timestamp: new Date(NOW - 13 * 3_600_000).toISOString() })])
     expect(screen.queryByText('Antigua')).not.toBeInTheDocument()
   })
 
@@ -138,10 +151,10 @@ describe('LatestPrediction age and stale badge', () => {
       // No ``stale`` flag (legacy payload): the local 12 h fallback alone must flag it.
       makePrediction({ source_timestamp: new Date(NOW - 13 * 3_600_000).toISOString() }),
     ])
-    expect(screen.getByText('Antigua')).toBeInTheDocument()
+    expect(screen.getByText(`origen de más de ${PREDICTION_STALE_HOURS} h`)).toBeInTheDocument()
   })
 
-  it('marks a prediction older than the stale threshold as "Antigua" without hiding it', () => {
+  it('marks a prediction older than the stale threshold without hiding it', () => {
     vi.useFakeTimers()
     vi.setSystemTime(NOW)
     renderLatest([
@@ -149,8 +162,9 @@ describe('LatestPrediction age and stale badge', () => {
         source_timestamp: new Date(NOW - (PREDICTION_STALE_HOURS + 6) * 3_600_000).toISOString(),
       }),
     ])
+    // Both halves of the one freshness line survive: the number and the words.
     expect(screen.getByText(`hace ${PREDICTION_STALE_HOURS + 6} h`)).toBeInTheDocument()
-    expect(screen.getByText('Antigua')).toBeInTheDocument()
+    expect(screen.getByText(`origen de más de ${PREDICTION_STALE_HOURS} h`)).toBeInTheDocument()
     // The real prediction values stay visible.
     expect(screen.getByText('Temp. prevista')).toBeInTheDocument()
   })

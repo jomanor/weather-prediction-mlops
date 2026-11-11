@@ -43,34 +43,3 @@ export function Badge({
     </span>
   )
 }
-
-export function StatusDot({
-  tone = 'neutral',
-  pulse = false,
-  className,
-}: {
-  tone?: Tone
-  pulse?: boolean
-  className?: string
-}) {
-  const colors: Record<Tone, string> = {
-    neutral: 'bg-fg-3',
-    accent: 'bg-accent',
-    ok: 'bg-ok',
-    warn: 'bg-warn',
-    bad: 'bg-bad',
-    model: 'bg-model',
-    aemet: 'bg-aemet',
-    obs: 'bg-fg',
-  }
-  return (
-    <span className={cn('relative inline-flex h-1.5 w-1.5', className)} aria-hidden="true">
-      {pulse ? (
-        <span
-          className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', colors[tone])}
-        />
-      ) : null}
-      <span className={cn('relative inline-flex h-1.5 w-1.5 rounded-full', colors[tone])} />
-    </span>
-  )
-}

@@ -10,8 +10,9 @@ import { systemFeature } from '@/features/system'
  * Explicit imports (not `import.meta.glob`) keep the graph statically analysable
  * so each feature still code-splits into its own lazy chunk.
  *
- * Three surfaces only: Resumen, Estación, Sistema. Quality, models, benchmark
- * and analytics live inside Sistema, behind `?tab=`.
+ * Three surfaces only: Resumen, Estación, Sistema. Quality, models and
+ * benchmark live inside Sistema, behind `?tab=`; the climate views open as a
+ * dialog from the station page.
  */
 export const FEATURES: FeatureManifest[] = [overviewFeature, stationFeature, systemFeature]
 

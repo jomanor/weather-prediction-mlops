@@ -1,10 +1,7 @@
 import type { CurrentWeather } from '@/api/schemas'
 import { usePreferences } from '@/app/preferences'
-import { StatusDot } from '@/components/ui/Badge'
 import { Readout } from '@/components/ui/Readout'
 import { Panel } from '@/components/ui/Panel'
-import { useFreshness } from '@/hooks/useFreshness'
-import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { cn } from '@/lib/cn'
 import {
   compassPoint,
@@ -21,8 +18,6 @@ import { describeWeather, toneClass } from '@/lib/weather'
 
 export function CurrentConditions({ station }: { station: CurrentWeather }) {
   const { units } = usePreferences()
-  const { isFresh } = useFreshness(station.observed_at)
-  const reducedMotion = usePrefersReducedMotion()
   /* `is_day` belongs to the station, so the icon is right for Pasadena even when
      the viewer's own clock says something else. */
   const weather = describeWeather(station.weather_code, station.is_day)
@@ -42,8 +37,10 @@ export function CurrentConditions({ station }: { station: CurrentWeather }) {
         <div className="text-right">
           <div className="label">Registrado</div>
           <div className="nums mt-1.5 text-xs text-fg-2">{formatDateTime(station.observed_at)}</div>
-          <div className="mt-0.5 flex items-center justify-end gap-1.5 text-[11px] text-fg-3">
-            <StatusDot tone={isFresh ? 'ok' : 'neutral'} pulse={isFresh && !reducedMotion} />
+          {/* The age is the fact (S10): the pulsing ok/neutral dot that used to sit
+              beside it was the same freshness told a second time, and in colour
+              only. "hace 3 h" says it in words and needs no motion. */}
+          <div className="nums mt-0.5 text-[11px] text-fg-3">
             {formatRelative(station.observed_at)}
           </div>
         </div>

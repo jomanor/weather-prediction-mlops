@@ -281,10 +281,41 @@ class _FakeDb:
 
 
 def test_default_cities_keep_the_producer_names_and_coordinates():
-    assert len(DEFAULT_CITIES) == 15
+    assert len(DEFAULT_CITIES) == 14
     assert ("Malaga", 36.7213, -4.4214) in DEFAULT_CITIES  # unaccented on purpose
-    # Pasadena is the only non-Spanish station (Open-Meteo producer, no AEMET).
-    assert ("Pasadena", 34.1478, -118.1445) in DEFAULT_CITIES
+
+
+def test_default_cities_are_the_fourteen_spanish_stations():
+    """Pins the seed tuple so re-adding a station (or dropping one) fails here.
+
+    Pasadena — the only US station — was removed on 2026-11-11 (owner decision,
+    audit finding 16). The tuple seeds a fresh database and is what the
+    monitors fall back to when the registry is unreadable, so its contents are
+    a contract, not an implementation detail.
+    """
+    names = [name for name, _, _ in DEFAULT_CITIES]
+
+    assert len(names) == 14, f"the registry is 14 stations, got {sorted(names)}"
+    assert sorted(names) == sorted(
+        [
+            "Alicante",
+            "Almería",
+            "Barcelona",
+            "Bilbao",
+            "El Ejido",
+            "Granada",
+            "Madrid",
+            "Malaga",
+            "Murcia",
+            "Palma",
+            "Paterna",
+            "Sevilla",
+            "Valencia",
+            "Zaragoza",
+        ]
+    )
+    assert len(names) == len(set(names))  # no duplicate stations
+    assert "Pasadena" not in names, "Pasadena was removed 2026-11-11 (finding 16)"
 
 
 async def test_seed_inserts_defaults_when_empty():
@@ -294,7 +325,7 @@ async def test_seed_inserts_defaults_when_empty():
 
     assert seeded is True
     assert collection.inserted is not None
-    assert len(collection.inserted) == 15
+    assert len(collection.inserted) == 14
     assert collection.inserted[0] == {
         "name": "El Ejido",
         "name_key": "el ejido",
@@ -378,9 +409,9 @@ async def test_registry_names_returns_sorted_unique_names():
 async def test_registry_names_falls_back_to_the_seed_list_when_empty():
     names = await registry_names(_FakeDb(_RegistryCollection()))
 
-    assert len(names) == 15
+    assert len(names) == 14
     assert names == sorted(name for name, _, _ in DEFAULT_CITIES)
-    assert "Pasadena" in names
+    assert "Pasadena" not in names  # removed 2026-11-11 (audit finding 16)
 
 
 async def test_registry_names_falls_back_without_raising_when_unreadable():
@@ -392,10 +423,10 @@ async def test_registry_names_falls_back_without_raising_when_unreadable():
 
 
 async def test_registry_names_follows_additions_and_deletions():
-    collection = _RegistryCollection([{"name": "Madrid"}, {"name": "Pasadena"}])
+    collection = _RegistryCollection([{"name": "Madrid"}, {"name": "Sevilla"}])
     db = _FakeDb(collection)
 
-    assert await registry_names(db) == ["Madrid", "Pasadena"]
+    assert await registry_names(db) == ["Madrid", "Sevilla"]
 
     collection.docs = [{"name": "Madrid"}]
 

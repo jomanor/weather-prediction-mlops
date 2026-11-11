@@ -170,7 +170,7 @@ export function DataQualityMeter({ className }: { className?: string }) {
           )}
 
           <p className="border-t border-line px-4 py-2 text-[11px] leading-relaxed text-fg-3">
-            Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.
+            Solo estaciones con cobertura AEMET.
           </p>
         </>
       )}

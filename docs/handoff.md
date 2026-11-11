@@ -1,10 +1,11 @@
 # Handoff — operational notes for the next session
 
 **Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
-items, batches A–F, and the owner decisions). Batches A, B and C are done (C is local and uncommitted as
-of 2026-11-01), and finding 7 (`POST /refresh`) is resolved by deletion (`decaba5`). Pick a batch from its
-*Suggested order* table, fall back to `docs/roadmap.md` *Accepted follow-ups* when it is exhausted. **Next
-is D** — which needs the owner's Analítica and Pasadena answers — **or E**, which needs the Spark answer.
+items, batches A–F, and the owner decisions). Batches A, B, C and D are done (C is local and uncommitted as
+of 2026-11-01; D is local and uncommitted as of 2026-11-11), and finding 7 (`POST /refresh`) is resolved
+by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
+`docs/roadmap.md` *Accepted follow-ups* when it is exhausted. **Next is E** (drop Spark), blocked on the
+owner's Spark answer; **F** (reopen deploys) stays paused until the owner asks for a deliberate deploy.
 Do not start a batch before answering the owner questions that batch depends on.
 
 Read this **before** `docs/roadmap.md`. The roadmap holds the plan and the status
@@ -19,7 +20,7 @@ live in `docs/batch4-contract.md`.
 | Repo | `jomanor/weather-prediction-mlops`, branch `main` | Public repo → standard GitHub Actions minutes are unlimited. |
 | API | Render service `meteoml-api`, deployed from `main` | `render.yaml`: docker, `backend/Dockerfile`, free plan, `autoDeploy: true`, health `GET /api/health`. Dashboard branch was the trap that caused stale deploys; it is now `main`. A deploy hook exists in the Render dashboard to force a deploy; the key is a secret, so it must never be committed to this public repo. |
 | Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing is currently **off** (`ignore = "exit 0"`); see the 2026-10-31 entry. |
-| DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** (includes Pasadena). Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL (that endpoint was deleted 2026-10-31, so the charge is spare headroom now, not a cost). Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
+| DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** — the measurement date matters: Pasadena was **removed on 2026-11-11** (owner decision, audit finding 16) and the live `cities` collection is **14** docs, so the 15-city figures in this row are a conservative upper bound, not the current state. Pasadena rows deleted: `raw_weather` 3 390, `weather_features` 3 385, `weather_predictions` 153, `cities` 1 (`weather_data` had none) — 6 929 in total. Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL (that endpoint was deleted 2026-10-31, so the charge is spare headroom now, not a cost). Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
 | Cron | GitHub Actions | `ingest.yml` declared hourly `:50` (see the live caveat below); `ml-pipeline.yml` inference hourly `:05`, features `20 */6`, train nightly `35 2`; `backfill.yml` manual. |
 
 Deleted branch: `rebuild/v2` is gone (it caused a stale Render deploy). `main` is the
@@ -114,7 +115,7 @@ was ruled out.
   - **M2 freshness fix**: `save_features_to_mongodb`'s `dropna` subset is the observation inputs only, so the newest observation row survives (it previously forced every healthy rebuild ~6 h stale). **Critical review fix:** `prepare_features_for_ml` now excludes **all** `target_*` columns (it previously kept the other horizons' labels, leaking future values and making inference write nothing).
   - **M4 diagnostics** (additive `model_registry.diagnostics`): `by_city`, `by_hour_of_day` (24, local hour), `by_rain_bucket` (dry <0.1 / light 0.1–2 / moderate 2–8 / heavy ≥8 mm), `drift_psi` (10 equal-width train bins, eps-guarded, null when <10 rows; a train→test proxy). Temperature slices fill rmse/mae/bias, rain slices brier, empty slices `n:0` + nulls. Exposed via `/api/models` (`ModelInfo.diagnostics`) and rendered as a ModelsPage "Deriva" badge (`<0.1` ok / `≤0.25` warn / `>0.25` drift, neutral when absent); `scripts/pipeline_summary.py` reports the top-3 per-feature PSI per model (informational) and emits a non-blocking `::warning` only on actionable degradation (`skill_score <= 0.0`), title `Model skill degradation`.
   - **Prediction API**: `GET /api/predictions/latest?horizon=` (omitted → one row per `(city, horizon_hours)`; provided → one row per city) and `GET /api/predictions/{city}?horizon=`; response shapes unchanged. Frontend horizon selector (1/3/6/12/24, default 1) on the station page + `useLatestPredictions(horizon)` on overview.
-  - **D2 analytics**: six cached read-only endpoints under `/api/analytics` (daily, climatology, wind-rose, diurnal, correlation, error-by-hour), all on-demand over `weather_features`, TTL 300 s + ETag/304, no new collection and no Spark/CI stage. New frontend "Analítica" page (feature `analytics`, order 50). `error-by-hour` joins the observed temperature at the **target hour** `source_timestamp + horizon_hours`, not `prediction_timestamp`.
+  - **D2 analytics** *(historically six; two survive)*: six cached read-only endpoints under `/api/analytics` (daily, climatology, wind-rose, diurnal, correlation, error-by-hour), all on-demand over `weather_features`, TTL 300 s + ETag/304, no new collection and no Spark/CI stage. New frontend "Analítica" page (feature `analytics`, order 50). `error-by-hour` joins the observed temperature at the **target hour** `source_timestamp + horizon_hours`, not `prediction_timestamp`. **Superseded 2026-11-11 (Batch D):** `daily`, `climatology`, `correlation` and `error-by-hour` are deleted, the Analítica page is deleted, and `diurnal` + `wind-rose` render inside the station page's climate dialog.
   - **U6**: chart brushing + synced x-domain via `useChartSync` (domain now reset on unmount); hand-rolled command palette (Cmd/Ctrl-K, focus trap, Escape); `g`+key section shortcuts; `/` focuses search; mobile station bottom sheet + swipe. **(Palette and `g` chords deleted 2026-11-01, audit S11; `/` and Cmd/Ctrl-K now focus `StationSearch`.)**
   - **U7**: fresh-data pulse keyed on data age (`useFreshness`, 120 min window matching hourly inference), shimmer skeletons, 120–240 ms transitions all gated by `prefers-reduced-motion`.
   - **Quality-meter age thresholds recalibrated** (`backend/app/repositories/weather_repo.py:182-183`): `QUALITY_OK_AGE_HOURS = 12.0` (was 2.0), `QUALITY_WARN_AGE_HOURS = 18.0` (was 6.0); completeness `0.95/0.80` deliberately unchanged. Rationale: the ~6 h rebuild cycle (plus GH jitter up to ~1.7 h) binds, so a healthy pipeline peaks ~12–14 h. The meter will still report `bad` on completeness once the one-shot backfill rolls off — the correct signal that the ingest cadence (L1) is unfixed.
@@ -124,7 +125,7 @@ was ruled out.
 - **Live-data findings (Batch 4):**
   - Storage re-measured 2026-09-25: `weather_predictions` avgObjSize **437 B** (not 405) and **15** live cities (not 14) — see the DB row above for the projection and tripwire.
   - Predicted-row growth is bounded by the ~6 h feature-rebuild rate (upsert keyed on `source_timestamp`), not the hourly inference schedule.
-  - ~~Pasadena is in Atlas but absent from `DEFAULT_CITIES`/`CANONICAL_CITIES`~~ **fixed**: `DEFAULT_CITIES` includes Pasadena and `analytics_repo.CANONICAL_CITIES` derives from it.
+  - ~~Pasadena is in Atlas but absent from `DEFAULT_CITIES`/`CANONICAL_CITIES`~~ **fixed, then moot**: `DEFAULT_CITIES` was made to include Pasadena and `analytics_repo.CANONICAL_CITIES` derives from it; **Pasadena was removed from the registry on 2026-11-11** (owner decision, audit finding 16), so `DEFAULT_CITIES` is 14 Spanish stations and there is no US station.
   - ~~`weather_features` is overwritten each rebuild, dropping its `{city:1,timestamp:-1}` index~~ **fixed in Batch 5 (M6)**: the write is append+upsert and `batch_processing.ensure_features_index` recreates the index after every write (warning-only on failure).
   - `weather_data` still holds 0 rows — expected; the R2 TTL entry for it is vestigial. Leave it in place.
 - **Trap fixed in Batch 3, do not regress it:** `inference.py` used to trust the MLflow registry for artifact metadata; when MLflow served the artifact the row lost its `interval` and reported fake `MLflow-latest` lineage. `_latest_model_entry` is now resolved first and always supplies metadata; MLflow only ever serves the *artifact*.
@@ -678,16 +679,17 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
 
 **k6 cold burst — `scripts/load/cold-burst.js` + `.github/workflows/loadtest.yml`**
 
-- Per iteration one `http.batch` of the three cached analytics views the dashboard opens with plus
-  `/api/v1/health`: `analytics/daily?city=<CITY>&days=<DAYS>` (`city` is required), `analytics/diurnal`,
-  `analytics/correlation`, `health`. Defaults 3 VUs / 45 s `constant-vus`, `gracefulStop: 120s`, 60 s
+- Per iteration one `http.batch` of the two cached analytics views the station page's climate dialog
+  opens with plus `/api/v1/health`: `analytics/wind-rose?city=<CITY>&days=<DAYS>` (`city` is required),
+  `analytics/diurnal`, `health`. (Until 2026-11-11 it probed `daily` and `correlation` instead of
+  `wind-rose`; those two routes no longer exist.) Defaults 3 VUs / 45 s `constant-vus`, `gracefulStop: 120s`, 60 s
   per-request timeout, **no retries** (a cold failure must be recorded, not papered over), bodies discarded.
   Env overrides `BASE_URL`, `VUS`, `DURATION`, `CITY`, `DAYS`.
 - Thresholds: `analytics_ms: p(95)<2000`, `health_failed: rate<0.01`, `http_req_failed: rate<0.05`,
   **`cold_start_ok: rate>0`**. The cold samples are **not** exempt from `analytics_ms` — the budget is the
-  budget; `cold_start_ms` (slowest of VU 1 / iter 0's four responses) stays diagnostic, while `cold_start_ok`
-  (all four probe responses 200) is a gate, because four 60 s timeouts on a sleeping instance are ~4 requests
-  in ~2400 (~0.2 %) and stay silent inside all three rate/latency budgets.
+  budget; `cold_start_ms` (slowest of VU 1 / iter 0's three responses) stays diagnostic, while `cold_start_ok`
+  (all three probe responses 200) is a gate, because three 60 s timeouts on a sleeping instance are ~3 requests
+  in ~1800 (~0.2 %) and stay silent inside all three rate/latency budgets.
 - **Dispatch-only, never on push or a schedule**: the target is a free Render instance that sleeps after
   ~15 min idle, so a scheduled run would be a load test against production on a timer, and RED there means
   the API missed the budget, not that CI broke. `workflow_dispatch` inputs `base_url` / `vus` / `duration`,
@@ -747,7 +749,8 @@ in the metrics table, unthresholded `cold_start_ok`); both are fixed and re-meas
 - **A real Render boot (30–60 s) is still unseen.** Every run so far hit an already-warm instance —
   `cold_start_ms` 4445.07 / 237.73 / 4340 / 4890 ms — including the dispatched one, which started a few
   minutes after the deploy finished. The 60 s timeout branch itself is exercised (stalled TCP listener →
-  all four probes `1m0s`, exit 99), so the mechanism is proven; what is unproven is how long a genuinely
+  all four probes `1m0s`, exit 99; the script probed four requests until Batch D cut it to three), so the
+  mechanism is proven; what is unproven is how long a genuinely
   sleeping Render instance takes to answer, and by extension whether 60 s is the right timeout. To measure
   it, dispatch after the instance has idled ~15 min — and note the 4.89 s cold hit above already sits inside
   the `analytics_ms` p95 as designed.
@@ -969,7 +972,8 @@ working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdic
   `Stats`, `WeatherStats` and `backend/app/services/stats.py` (+ `backend/tests/test_stats.py`). Surviving
   weather routes: `/current`, `/current/{city}`, `/history/{city}`, `/series`, `/quality` — `/series` is
   live on the station page since Batch 6c, so it stayed. `/metrics`, `/map/stations`, `/cities`,
-  `/health`, `/models`, `/predictions/*`, `/benchmark/*` and all six `/analytics/*` routes are untouched.
+  `/health`, `/models`, `/predictions/*`, `/benchmark/*` and all six `/analytics/*` routes were untouched
+  (four of those six were deleted in Batch D, 2026-11-11).
 - **F14 / S12 — the frontend's optimistic self-image is gone.** Deleted
   `components/ui/Tabs.tsx` (no consumer; Sistema uses `Segmented`), `lib/derived.ts` (+ its test),
   `components/shell/CommandPalette.tsx`, `command-palette.ts` and `shortcuts.ts`, and the hooks
@@ -1046,3 +1050,74 @@ working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdic
   unrunnable without its two packages, which is the intended end state. `pyspark` stays until Batch E.
   `tzdata` stays declared in `scripts/requirements.txt` (the backfill's zoneinfo needs it) — only the
   root lock lost it, and nothing installed from the lock needs it.
+
+## 2026-11-11 — Batch D: UI one-thing-per-screen (audit 15, 16 + S3, S10) and the registry decision
+
+**Local and uncommitted as of 2026-11-11; not pushed, no Netlify deployment** — auto publishing stays
+paused (`netlify.toml` `ignore = "exit 0"`), so the state of this batch is *in the working tree, not
+deployed*. No `gh workflow run` was issued and nothing was pushed. Reviewer/QA verdicts for this batch are
+**not recorded here**; only the gates below were measured, by the docs pass, on this tree.
+
+- **Owner decisions (answered 2026-11-11).**
+  - **Pasadena: removed from the registry.** It was the only US station. Code and Atlas are clean:
+    `backend/app/core/cities.py` `DEFAULT_CITIES` holds 14 Spanish stations, the live `cities` collection
+    holds 14 docs, and the 6 929 Pasadena rows were deleted across `raw_weather` (3 390),
+    `weather_features` (3 385), `weather_predictions` (153) and `cities` (1); `weather_data` had none.
+    This answers audit open question 4 ("remove", not "keep + fit two continents").
+  - **Analítica tab: deleted.** The diurnal heatmap and the wind rose survive as a modal
+    (`ClimateViewsDialog`) reached from the station page header, not as a page. The owner also wants a
+    future **user-composable dashboard persisted in the browser**; that is an accepted follow-up, *not*
+    shipped in this batch.
+- **F15 — the manual refresh buttons are gone; the tab-focus refetch replaces them.** All four
+  "Actualizar" buttons are deleted (`OverviewPage`, `StationPage`, `ModelsPanel`, and the fourth lived in
+  the deleted `AnalyticsPanel`). `frontend/src/main.tsx` now sets `refetchOnWindowFocus: true`;
+  `staleTime: 60_000` and `retry: 1` are unchanged, so a tab flip inside the stale window costs nothing.
+  Every error-state `Reintentar` button stays — those are the recovery path a failed query needs.
+- **S10 — freshness is text, not a dot.** The freshness signal is the Resumen one-liner plus the per-row
+  age column. Deleted: the `OverviewPage` `StatusDot`, the `StationTable` per-row `StatusDot`, the
+  `CurrentConditions` hero dot and the `LatestPrediction` "Antigua" badge (the age text and the text
+  warning survive). `StatusDot` itself is deleted from `frontend/src/components/ui/Badge.tsx` — zero
+  consumers left.
+- **F16 — the map has two overlays, not four.** `MapLayers` is `{hillshade, radar}`; `terrain3d` and
+  `buildings3d` (keys, preference migration, building layers/sources, `MAP_PAINT.building`, the pitch
+  animation) are gone, and with them the "relief and 3D terrain are mutually exclusive" rule. The phone
+  layers sheet no longer closes on a toggle or basemap change ("radar on + dark basemap" is two taps, not
+  four); Esc, a backdrop tap and the close button still close it. Stored preferences carrying
+  `terrain3d`/`buildings3d` are dropped on read (`preferences.test.tsx` covers it).
+- **S3 — the station empty state widens instead of refetching.** With no observation in the selected
+  window the empty state offers **`Ampliar a 7 días`**, which switches the window to 168 h in place
+  (`StationPage.tsx`); it no longer re-requests the same empty window.
+- **Audit 16 — the Analítica tab and its page are gone.** `SystemPage` has three tabs
+  (calidad / modelos / benchmark); an unknown or stale `?tab=analitica` resolves to Calidad, and
+  `/analytics` redirects to `/stations` (`registry.ts`). Deleted `AnalyticsPanel` (with its "Actualizar"
+  button) and `DailyAnomalyChart`. New `features/analytics/components/ClimateViewsDialog.tsx`: a
+  `role="dialog"`/`aria-modal` modal named by its title, Esc + backdrop + close button all close, focus
+  lands on the close button and returns to the trigger, Tab stays inside, the page behind is scroll-locked
+  (always released), and the enter animation is opacity + a `0.96` scale over `--motion-base` (180 ms);
+  reduced motion keeps the fade and drops the scale. The queries only mount while the dialog is open, so
+  opening a station page fires no analytics request unasked.
+- **Read-API trim (finding-13 principle, after the tab went).** Removed `GET /analytics/daily`,
+  `/analytics/climatology`, `/analytics/correlation` and `/analytics/error-by-hour` with their schemas and
+  repo methods; only `/analytics/diurnal` and `/analytics/wind-rose` survive, and `docs/api-contract.md`
+  now documents exactly those two. `scripts/load/cold-burst.js` was retargeted at the surviving routes
+  plus `/api/v1/health` (three probes; it previously fired `daily` and `correlation`, which no longer
+  exist and would have turned every run RED with 404s).
+- **Registry pin test.** `backend/tests/test_cities.py::test_default_cities_are_the_fourteen_spanish_stations`
+  asserts names, count (14) and the absence of `Pasadena`; `test_registry_city_set.py` covers the derived
+  registry path.
+- **Gates measured on this tree** (2026-11-11): `cd backend && ../.venv/bin/python -m pytest tests -q` →
+  `309 passed in 8.48s` (16 fewer than Batch C's 325: the four deleted analytics routes took their cases
+  with them); `PYSPARK_PYTHON=$PWD/.venv/bin/python .venv/bin/python -m pytest tests -q` →
+  `468 passed, 7 skipped in 40.75s`; `cd frontend && npm run test` →
+  `Test Files 48 passed (48)` / `Tests 368 passed (368)` (47/350 in Batch C: `ClimateViewsDialog.test.tsx`
+  and `test/query-defaults.test.ts` are new); `npm run typecheck` clean, `npm run lint` 0 errors (the one
+  pre-existing `vite.config.ts` warning), `npm run build` ok (the same chunk-size warning as before);
+  `ruff check backend scripts` → `All checks passed!`; `black --check backend scripts` → `72 files would be
+  left unchanged`.
+- **Deliberate leftovers:** the climate modal is **not URL-driven** (no `?view=climate`; deep-linking it
+  is part of the user-composable dashboard follow-up, not this batch); its focus trap keeps Tab inside the
+  panel but the background is not marked `inert` (the scroll lock + focus return are what ship); a stale
+  `?tab=analitica` resolves to Calidad **without rewriting the URL** (the same behaviour as every other
+  unknown tab, so a refresh stays stable); there is **no fit-bounds on the map** — removing Pasadena
+  removed the need for a camera that spans two continents, so the camera is untouched; `/analytics`
+  redirects to `/stations` rather than 404ing; `useAnalyticsDaily` is gone with the daily route.

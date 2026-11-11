@@ -1,36 +1,23 @@
 import { describe, expect, it } from 'vitest'
 
-import type { DailyPoint } from '@/features/analytics/schemas'
 import {
   ANALYTICS_BOUNDS,
   buildDiurnalMatrix,
   buildWindRose,
   clampDays,
-  heatwaveRuns,
 } from '@/features/analytics/transforms'
 
-function dailyPoint(date: string, heatwave: boolean): DailyPoint {
-  return {
-    date,
-    tmin: null,
-    tmax: null,
-    tmean: null,
-    hdd: null,
-    cdd: null,
-    anomaly: null,
-    heatwave,
-  }
-}
-
 describe('clampDays', () => {
+  /* Only the two retained views have bounds now; `daily` went with the
+     Analítica tab (audit 16). */
   it('clamps to the endpoint bound', () => {
-    expect(clampDays(1, ANALYTICS_BOUNDS.daily)).toBe(7)
-    expect(clampDays(400, ANALYTICS_BOUNDS.daily)).toBe(180)
-    expect(clampDays(90, ANALYTICS_BOUNDS.daily)).toBe(90)
+    expect(clampDays(1, ANALYTICS_BOUNDS.windRose)).toBe(7)
+    expect(clampDays(400, ANALYTICS_BOUNDS.windRose)).toBe(365)
+    expect(clampDays(90, ANALYTICS_BOUNDS.diurnal)).toBe(90)
   })
 
   it('falls back to the default for non-finite input and truncates fractions', () => {
-    expect(clampDays(Number.NaN, ANALYTICS_BOUNDS.daily)).toBe(90)
+    expect(clampDays(Number.NaN, ANALYTICS_BOUNDS.diurnal)).toBe(90)
     expect(clampDays(45.9, ANALYTICS_BOUNDS.windRose)).toBe(45)
   })
 
@@ -108,26 +95,5 @@ describe('buildDiurnalMatrix', () => {
     ])
     expect(matrix.cities).toEqual(['Madrid'])
     expect(matrix.rows[0].values.filter((value) => value !== null)).toEqual([])
-  })
-})
-
-describe('heatwaveRuns', () => {
-  it('returns inclusive runs, including an open-ended final run', () => {
-    const runs = heatwaveRuns([
-      dailyPoint('2026-07-01', false),
-      dailyPoint('2026-07-02', true),
-      dailyPoint('2026-07-03', true),
-      dailyPoint('2026-07-04', true),
-      dailyPoint('2026-07-05', false),
-      dailyPoint('2026-07-06', true),
-    ])
-    expect(runs).toEqual([
-      { start: 1, end: 3 },
-      { start: 5, end: 5 },
-    ])
-  })
-
-  it('returns nothing without a heatwave', () => {
-    expect(heatwaveRuns([dailyPoint('2026-07-01', false)])).toEqual([])
   })
 })

@@ -105,6 +105,38 @@ describe('design tokens', () => {
   })
 })
 
+describe('modal motion (audit 16)', () => {
+  /* The station page's climate dialog is the app's first centred modal, so its
+     enter animation is pinned here: opacity + a 0.96 scale inside the motion
+     ladder, never `transition: all`, never `scale(0)`, and reduced motion keeps
+     the fade while dropping the movement. */
+  const css = readFileSync(CSS_PATH, 'utf8')
+  const keyframes = (name: string) =>
+    css.match(new RegExp(`@keyframes ${name} \\{([\\s\\S]*?)\\n\\}`))?.[1] ?? ''
+
+  it('uses the token duration and a real scale, never zero', () => {
+    expect(css).toContain('animation: dialog-in var(--motion-base) var(--ease-ui) both')
+    const base = Number(css.match(/--motion-base: (\d+)ms/)?.[1])
+    expect(base).toBeGreaterThanOrEqual(120)
+    expect(base).toBeLessThanOrEqual(240)
+
+    const dialogIn = keyframes('dialog-in')
+    expect(dialogIn).toContain('opacity: 0')
+    expect(dialogIn).toContain('scale(0.96)')
+    expect(dialogIn).not.toMatch(/scale\(\s*0\s*[,)]/)
+    expect(dialogIn).not.toContain('translate')
+  })
+
+  it('drops the scale but keeps the fade under reduced motion', () => {
+    const fade = keyframes('dialog-fade-in')
+    expect(fade).toContain('opacity')
+    expect(fade).not.toContain('transform')
+    /* The global 0.001 ms gate would collapse the fade together with the scale;
+       the override restores the opacity-only animation. */
+    expect(css).toMatch(/\.dialog-enter \{\s*animation-name: dialog-fade-in !important;/)
+  })
+})
+
 describe('one precision per metric', () => {
   /* Finding 17: the row and its expander printed skill as `0,53` and `0,532`,
      and RMSE as 3 dp here and 2 dp in Benchmark. The guard scanned only

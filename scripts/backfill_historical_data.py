@@ -9,14 +9,14 @@ Usage
 -----
     python scripts/backfill_historical_data.py [--start YYYY-MM-DD] [--end YYYY-MM-DD]
     python scripts/backfill_historical_data.py --days 90 --recent 5
-    python scripts/backfill_historical_data.py --days 35 --recent 5 --city Pasadena
+    python scripts/backfill_historical_data.py --days 35 --recent 5 --city Murcia
     python scripts/backfill_historical_data.py --days 90 --dry-run
 
 Options
 -------
     --city   : only backfill the named station(s). Repeatable and/or
-               comma-separated (``--city Pasadena --city Madrid`` or
-               ``--city Pasadena,Madrid``). Default: every city in the
+               comma-separated (``--city Murcia --city Madrid`` or
+               ``--city Murcia,Madrid``). Default: every city in the
                registry. Names are matched case- and accent-insensitively;
                an unknown name aborts the run instead of silently doing
                nothing.
@@ -48,7 +48,7 @@ Cities
 ------
     Read from the ``cities`` registry when present so the station set matches
     the deployed app; otherwise the seed tuple (``DEFAULT_CITIES`` in
-    ``app/core/cities.py``, the same 15 stations the API seeds) is used.
+    ``app/core/cities.py``, the same 14 stations the API seeds) is used.
 
 Idempotency
 -----------

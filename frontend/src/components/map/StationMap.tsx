@@ -24,8 +24,8 @@ import { WEATHER_IMAGE_PREFIX, WIND_ARROW_IMAGE, ensureMapIcons } from './weathe
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 /* Keyless providers only. Carto supplies the vector basemaps; OpenTopoMap the
- * raster relief basemap (it has no vector `carto` source, so 3D buildings are
- * unavailable there — guarded below). */
+ * raster relief basemap. Elevation is one optional overlay (`hillshade`) over
+ * whichever basemap is active. */
 const CARTO_STYLES: Record<'positron' | 'dark', string> = {
   positron: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
   dark: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
@@ -76,9 +76,7 @@ function usesCooperativeGestures(): boolean {
 }
 
 const DEM_SOURCE = 'meteoml-dem-hillshade'
-const TERRAIN_DEM_SOURCE = 'meteoml-dem-terrain'
 const HILLSHADE_LAYER = 'meteoml-hillshade'
-const BUILDINGS_LAYER = 'meteoml-buildings-3d'
 const RADAR_SOURCE = 'meteoml-radar'
 const RADAR_LAYER = 'meteoml-radar'
 const STATIONS_SOURCE = 'meteoml-stations'
@@ -88,16 +86,6 @@ const STATION_WIND_LAYER = 'meteoml-stations-wind'
 const STATION_POINTS_LAYER = 'meteoml-stations-points'
 const CLUSTERS_LAYER = 'meteoml-stations-clusters'
 const CLUSTER_COUNT_LAYER = 'meteoml-stations-cluster-count'
-const FLAT_BUILDING_LAYERS = ['building', 'building-top']
-
-/* Carto's vector styles rename their source and building layer between
- * releases: the current tiles ship `protomaps` / `buildings`, the older ones
- * `carto` / `building`. Both pairs are checked so a style refresh upstream
- * cannot silently turn the 3D toggle into a no-op. */
-const BUILDING_SOURCES = [
-  { source: 'protomaps', sourceLayer: 'buildings' },
-  { source: 'carto', sourceLayer: 'building' },
-] as const
 const UNCLUSTERED_FILTER: FilterSpecification = ['!', ['has', 'point_count']]
 
 /** Map transitions follow the OS motion preference. */
@@ -280,16 +268,6 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
             attribution: 'Relieve: AWS Terrain Tiles',
           })
         }
-        if (!map.getSource(TERRAIN_DEM_SOURCE)) {
-          map.addSource(TERRAIN_DEM_SOURCE, {
-            type: 'raster-dem',
-            tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
-            encoding: 'terrarium',
-            tileSize: 256,
-            maxzoom: 15,
-            attribution: 'Relieve: AWS Terrain Tiles',
-          })
-        }
         if (!map.getLayer(HILLSHADE_LAYER)) {
           map.addLayer({
             id: HILLSHADE_LAYER,
@@ -303,77 +281,12 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
             },
           })
         }
-        /* Hillshade and the 3D mesh cannot run at once: two raster-dem consumers
-           black out the Carto vector basemap past the DEM maxzoom (verified by
-           bisect). 3D wins while it is on. */
+        /* One elevation setting, so nothing else can cancel it. */
         map.setLayoutProperty(
           HILLSHADE_LAYER,
           'visibility',
-          mapLayers.hillshade && !mapLayers.terrain3d ? 'visible' : 'none',
+          mapLayers.hillshade ? 'visible' : 'none',
         )
-
-        if (mapLayers.terrain3d) {
-          map.setTerrain({ source: TERRAIN_DEM_SOURCE, exaggeration: 1.2 })
-          if (map.getPitch() < 1) map.easeTo({ pitch: 55, duration: motionDuration(600) })
-        } else {
-          map.setTerrain(null)
-          if (map.getPitch() > 1) map.easeTo({ pitch: 0, duration: motionDuration(600) })
-        }
-
-        /* Building extrusions ride the vector tiles the basemap already ships.
-         * Current Carto styles expose them as `protomaps`/`buildings` with a
-         * `height` property; older ones used `carto`/`building` and
-         * `render_height`. The raster relief style has no vector source, so the
-         * toggle is a no-op there and the flat layers stay untouched. */
-        const buildingSource = BUILDING_SOURCES.find((candidate) =>
-          map.getSource(candidate.source),
-        )
-        if (buildingSource && !map.getLayer(BUILDINGS_LAYER)) {
-          /* Insert under the basemap's labels, not above them. */
-          const firstSymbolId = map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id
-          map.addLayer(
-            {
-              id: BUILDINGS_LAYER,
-              type: 'fill-extrusion',
-              source: buildingSource.source,
-              'source-layer': buildingSource.sourceLayer,
-              minzoom: 14,
-              paint: {
-                'fill-extrusion-color': isDark
-                  ? MAP_PAINT.building.dark
-                  : MAP_PAINT.building.light,
-                'fill-extrusion-height': [
-                  'coalesce',
-                  ['get', 'height'],
-                  ['get', 'render_height'],
-                  6,
-                ],
-                'fill-extrusion-base': [
-                  'coalesce',
-                  ['get', 'min_height'],
-                  ['get', 'render_min_height'],
-                  0,
-                ],
-                'fill-extrusion-opacity': 0.92,
-                'fill-extrusion-vertical-gradient': true,
-              },
-            },
-            firstSymbolId,
-          )
-        }
-        if (map.getLayer(BUILDINGS_LAYER)) {
-          map.setLayoutProperty(
-            BUILDINGS_LAYER,
-            'visibility',
-            mapLayers.buildings3d ? 'visible' : 'none',
-          )
-          /* Only hide the flat footprints once the extrusion exists; otherwise
-           * a basemap change would leave the city with no buildings at all. */
-          for (const flat of FLAT_BUILDING_LAYERS) {
-            if (!map.getLayer(flat)) continue
-            map.setLayoutProperty(flat, 'visibility', mapLayers.buildings3d ? 'none' : 'visible')
-          }
-        }
 
         await ensureMapIcons(map)
         if (cancelled || mapRef.current !== map) return
@@ -558,16 +471,10 @@ export function StationMap({ collection, selectedCity, onSelect, className }: St
     if (radarUrlRef.current) applyRadar(map, radarUrlRef.current)
   }, [mapLayers.radar, radar.current, radar.host, basemap])
 
-  /* Relief and 3D terrain are the same DEM presented two ways: keep exactly
-     one active (radio-like). Radar and buildings are independent. */
+  /* Both overlays are independent: one elevation setting (hillshade) and the
+     radar raster. There is no mutual exclusion left to enforce. */
   const changeLayer = (key: LayerKey, checked: boolean) => {
-    if (key === 'terrain3d' && checked) {
-      setMapLayers({ ...mapLayers, terrain3d: true, hillshade: false })
-    } else if (key === 'hillshade' && checked) {
-      setMapLayers({ ...mapLayers, hillshade: true, terrain3d: false })
-    } else {
-      setMapLayers({ ...mapLayers, [key]: checked })
-    }
+    setMapLayers({ ...mapLayers, [key]: checked })
   }
 
   const layerControlProps = {

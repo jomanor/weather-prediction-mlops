@@ -1,4 +1,4 @@
-import { Boxes, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
+import { Boxes, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
 import { Badge } from '@/components/ui/Badge'
@@ -7,7 +7,6 @@ import { EmptyState, ErrorState, TableSkeleton } from '@/components/ui/Feedback'
 import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useModels } from '@/features/models/queries'
 import { driftLabel, driftTone, maxDriftPsi } from '@/features/models/diagnostics'
-import { cn } from '@/lib/cn'
 import {
   formatDateTime,
   formatNumber,
@@ -69,6 +68,10 @@ function DriftBadge({ diagnostics }: { diagnostics: ModelDiagnostics }) {
  * climatology baselines, Brier/AUC, the split and the interval offsets. The
  * skill score it used to repeat is the row's own column, and it printed at a
  * different precision one click away (finding 17).
+ *
+ * No refresh button: the registry query is cached and refetched on focus, and a
+ * button here duplicated the poll the rest of the app already runs (finding 15).
+ * The error state keeps `Reintentar`.
  */
 export function ModelsPanel() {
   const models = useModels()
@@ -76,14 +79,10 @@ export function ModelsPanel() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6">
+      <div className="px-4 sm:px-6">
         <p className="text-xs text-fg-3">
           Partición temporal, baselines de persistencia/climatología y skill score.
         </p>
-        <Button onClick={() => models.refetch()} disabled={models.isFetching}>
-          <RefreshCw className={cn('h-3.5 w-3.5', models.isFetching && 'animate-spin')} />
-          Actualizar
-        </Button>
       </div>
 
       <div className="px-4 sm:px-6">

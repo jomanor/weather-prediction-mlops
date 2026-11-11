@@ -359,15 +359,15 @@ async def test_quality_report_per_city_queries_are_city_prefixed_and_sorted():
 
     report = await repo.quality_report(days=1, now=OBSERVED_AT)
 
-    # Seeded from the fixed 15-station registry, never ``distinct``: a city
+    # Seeded from the fixed 14-station registry, never ``distinct``: a city
     # with zero feature rows must still appear (see the outage test below).
     expected_cities = sorted(name for name, _, _ in DEFAULT_CITIES)
     assert [city.city for city in report] == expected_cities
-    assert len(expected_cities) == 15
+    assert len(expected_cities) == 14
     # One equality-prefixed query per city: ``city`` is pinned, so the
     # ``{city: 1, timestamp: -1}`` index serves the ascending timestamp sort.
     # Every city without a row in the window also gets a descending, still
-    # city-prefixed, latest-row fallback (13 of the 15 stations here).
+    # city-prefixed, latest-row fallback (12 of the 14 stations here).
     window_cursors = [
         cursor for cursor in features.cursors if cursor.sort_spec == [("city", 1), ("timestamp", 1)]
     ]
@@ -435,7 +435,7 @@ async def test_quality_report_city_with_zero_features_is_bad():
 
     report = {city.city: city for city in await repo.quality_report(days=1, now=OBSERVED_AT)}
 
-    assert len(report) == 15
+    assert len(report) == 14
     missing = report["Barcelona"]
     assert missing.observed_hours == 0
     assert missing.completeness == 0.0
@@ -593,7 +593,7 @@ async def test_latest_per_city_aggregates_raw_first_with_disk_use_and_city_sort(
     raw = _RecordingCollection(
         "raw", log, [_raw_doc("Madrid", 0, 22.0), _raw_doc("Alicante", 0, 30.0)]
     )
-    current = _RecordingCollection("legacy", log, [_legacy_doc("Pasadena", 0, 5.0)])
+    current = _RecordingCollection("legacy", log, [_legacy_doc("Sevilla", 0, 5.0)])
     repo = WeatherRepository(FakeMongoDb(current, raw))
 
     stations = await repo.latest_per_city()
@@ -612,12 +612,12 @@ async def test_latest_per_city_aggregates_raw_first_with_disk_use_and_city_sort(
 async def test_latest_per_city_falls_back_to_legacy_only_when_raw_has_no_rows():
     log: list[str] = []
     raw = _RecordingCollection("raw", log, [])
-    current = _RecordingCollection("legacy", log, [_legacy_doc("Pasadena", 0, 5.0)])
+    current = _RecordingCollection("legacy", log, [_legacy_doc("Sevilla", 0, 5.0)])
     repo = WeatherRepository(FakeMongoDb(current, raw))
 
     stations = await repo.latest_per_city()
 
-    assert [(station.city, station.temperature) for station in stations] == [("Pasadena", 5.0)]
+    assert [(station.city, station.temperature) for station in stations] == [("Sevilla", 5.0)]
     assert log == ["raw.aggregate", "legacy.aggregate"]
     assert current.aggregate_calls[0]["allowDiskUse"] is True
 

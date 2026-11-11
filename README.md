@@ -66,7 +66,7 @@ weather-prediction-mlops/
 │   │   ├── repositories/       # one module per collection, single mapper
 │   │   ├── services/           # AEMET client, benchmark maths, geo lookup
 │   │   └── routers/            # one module per route family, incl. /analytics
-│   ├── tests/                  # 325 offline tests (fakes, no live Mongo)
+│   ├── tests/                  # 309 offline tests (fakes, no live Mongo)
 │   └── Dockerfile
 ├── frontend/                   # React + TypeScript + Tailwind (Vite)
 │   ├── src/
@@ -160,7 +160,7 @@ always uses the same relative base URL it uses in production.
 ## Testing
 
 ```bash
-make test          # backend (325) + frontend (350)
+make test          # backend (309) + frontend (368)
 make lint          # ruff + black + oxlint + tsc
 make coverage      # backend coverage report
 
@@ -170,9 +170,10 @@ PYSPARK_PYTHON=$PWD/.venv/bin/python .venv/bin/python -m pytest tests -q
 
 Backend tests are fully offline: routers run against dependency-overridden
 fakes and the AEMET client runs against `httpx.MockTransport`, including a real
-ISO-8859-15 fixture with missing hourly values. Measured 2026-11-01: backend
-`325 passed`; pipeline `468 passed, 7 skipped` (the 7 need a local `mongo:6`);
-frontend 47 files / `350 passed`.
+ISO-8859-15 fixture with missing hourly values. Measured 2026-11-11: backend
+`309 passed`; pipeline `468 passed, 7 skipped` (the 7 need a local `mongo:6`);
+frontend 48 files / `368 passed`; `ruff`/`black --check backend scripts` clean
+(72 files).
 
 ---
 

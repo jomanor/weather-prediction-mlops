@@ -11,7 +11,11 @@ import '@/styles/index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchOnWindowFocus: false,
+      /* Finding 15: the poll is the only refresh path, so the moment the viewer
+         comes back to the tab is when re-reading is worth paying for. React Query
+         only refetches queries that are already stale (60 s here), so a quick
+         tab flip inside the window costs nothing. */
+      refetchOnWindowFocus: true,
       staleTime: 60_000,
       retry: 1,
     },

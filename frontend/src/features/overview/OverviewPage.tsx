@@ -3,7 +3,6 @@ import { lazy, Suspense, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { useCities } from '@/api/queries'
-import { StatusDot } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ErrorState, LoadingBlock, MapSkeleton, TableSkeleton } from '@/components/ui/Feedback'
 import { PageHeader } from '@/components/ui/PageHeader'
@@ -11,7 +10,6 @@ import { Panel, PanelHeader } from '@/components/ui/Panel'
 import { useMapStations, useStations } from '@/features/overview/queries'
 import { StationTable } from '@/features/overview/StationTable'
 import { FRESH_WINDOW_SECONDS, useFreshness, type ServerAge } from '@/hooks/useFreshness'
-import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { useStationSelection } from '@/hooks/useStationSelection'
 import { formatTime } from '@/lib/format'
 
@@ -26,6 +24,11 @@ const StationMap = lazy(() =>
  * per-city predictions live in Sistema and Estación.
  *
  * A pin or a row opens Estación; there is no sheet and no in-page selection.
+ *
+ * There is no refresh button: every request here polls every 300 s and the
+ * browser refetches on focus (`main.tsx`), so a manual button only moved the
+ * clock (finding 15). The error states keep their own `Reintentar`, which is the
+ * one case where a human knows something the poll does not.
  */
 export function OverviewPage() {
   const navigate = useNavigate()
@@ -80,7 +83,6 @@ export function OverviewPage() {
      server) while there is no payload timestamp to compare it against, and the
      '>12 h' line must still appear in that case. */
   const stale = ageSeconds !== null && !isFresh
-  const reducedMotion = usePrefersReducedMotion()
 
   if (stationsQuery.isError || citiesQuery.isError) {
     return (
@@ -104,17 +106,12 @@ export function OverviewPage() {
       <PageHeader
         title="Resumen"
         description="Observación en vivo de las estaciones monitorizadas."
-        actions={
-          <Button onClick={() => stationsQuery.refetch()} disabled={stationsQuery.isFetching}>
-            <RefreshCw className={stationsQuery.isFetching ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} />
-            Actualizar
-          </Button>
-        }
       />
 
       <div className="px-4 sm:px-6">
+        {/* The one freshness sentence for the whole network (S10): a state dot
+            here restated it in colour, and colour is never the only signal. */}
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-fg-3">
-          <StatusDot tone={stale ? 'warn' : isFresh ? 'ok' : 'neutral'} pulse={isFresh && !reducedMotion} />
           <span className="nums">
             {stations.length} estaciones · actualizado a las{' '}
             {newest ? formatTime(newest) : '—'}

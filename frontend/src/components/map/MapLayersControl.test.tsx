@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { MapLayers } from '@/app/preferences'
 import { MapLayersPanel, MobileMapLayers } from '@/components/map/MapLayersControl'
 
-const LAYERS: MapLayers = { hillshade: false, radar: false, terrain3d: false, buildings3d: true }
+const LAYERS: MapLayers = { hillshade: false, radar: false }
 
 function props(overrides: Partial<Parameters<typeof MapLayersPanel>[0]> = {}) {
   return {
@@ -28,10 +28,13 @@ describe('MapLayersPanel (>= sm)', () => {
     expect(panel.className).toContain('sm:block')
     expect(panel.className).toContain('w-44')
 
-    /* Identical content: four layers, the basemap and both legends. */
-    for (const label of ['Relieve', 'Radar de lluvia', 'Terreno 3D', 'Edificios 3D']) {
+    /* Identical content: both overlays, the basemap and both legends — and
+       exactly one elevation setting (finding 16). */
+    for (const label of ['Relieve', 'Radar de lluvia']) {
       expect(screen.getByLabelText(label)).toBeInTheDocument()
     }
+    expect(screen.queryByLabelText('Terreno 3D')).toBeNull()
+    expect(screen.queryByLabelText('Edificios 3D')).toBeNull()
     expect(screen.getByLabelText('Base')).toBeInTheDocument()
     expect(screen.getByText('Temperatura')).toBeInTheDocument()
     expect(screen.getByText('Viento (flecha)')).toBeInTheDocument()
@@ -76,9 +79,11 @@ describe('MobileMapLayers (< sm)', () => {
     expect(screen.getByRole('button', { name: /^capas$/i })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: 'Cerrar capas' })).toHaveFocus()
 
-    for (const label of ['Relieve', 'Radar de lluvia', 'Terreno 3D', 'Edificios 3D']) {
+    for (const label of ['Relieve', 'Radar de lluvia']) {
       expect(within(sheet).getByLabelText(label)).toBeInTheDocument()
     }
+    expect(within(sheet).queryByLabelText('Terreno 3D')).toBeNull()
+    expect(within(sheet).queryByLabelText('Edificios 3D')).toBeNull()
     const select = within(sheet).getByLabelText('Base')
     expect(select).toHaveValue('positron')
     /* 16 px on touch so focusing the select does not zoom the page. */
@@ -104,18 +109,21 @@ describe('MobileMapLayers (< sm)', () => {
     expect(backdrop.className).toContain('sm:hidden')
   })
 
-  it('closes on a layer selection and reports it', async () => {
+  /* Finding 16: "radar on + dark basemap" used to cost four taps because every
+     change closed the sheet. It now costs two. */
+  it('stays open on a layer toggle and reports it', async () => {
     const onLayerChange = vi.fn()
     render(<MobileMapLayers {...props({ onLayerChange })} />)
     await userEvent.click(screen.getByRole('button', { name: /^capas$/i }))
 
-    await userEvent.click(screen.getByLabelText('Terreno 3D'))
+    await userEvent.click(screen.getByLabelText('Radar de lluvia'))
 
-    expect(onLayerChange).toHaveBeenCalledWith('terrain3d', true)
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(onLayerChange).toHaveBeenCalledWith('radar', true)
+    expect(screen.getByRole('dialog', { name: 'Capas del mapa' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^capas$/i })).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('closes on a basemap selection and reports it', async () => {
+  it('stays open on a basemap selection and reports it', async () => {
     const onBasemapChange = vi.fn()
     render(<MobileMapLayers {...props({ onBasemapChange })} />)
     await userEvent.click(screen.getByRole('button', { name: /^capas$/i }))
@@ -123,7 +131,18 @@ describe('MobileMapLayers (< sm)', () => {
     await userEvent.selectOptions(screen.getByLabelText('Base'), 'topo')
 
     expect(onBasemapChange).toHaveBeenCalledWith('topo')
+    expect(screen.getByRole('dialog', { name: 'Capas del mapa' })).toBeInTheDocument()
+  })
+
+  it('closes on the close button and hands focus back to the trigger', async () => {
+    render(<MobileMapLayers {...props()} />)
+    const trigger = screen.getByRole('button', { name: /^capas$/i })
+    await userEvent.click(trigger)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cerrar capas' }))
+
     expect(screen.queryByRole('dialog')).toBeNull()
+    expect(trigger).toHaveFocus()
   })
 
   it('closes on Escape and hands focus back to the trigger', async () => {

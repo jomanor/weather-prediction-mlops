@@ -1,6 +1,6 @@
-"""Analytics endpoints: ``/api/analytics/*`` (Batch 4, Contract 4).
+"""Analytics endpoints: ``/api/analytics/*``.
 
-All six routes are read-only and share the process TTL cache
+Both routes are read-only and share the process TTL cache
 (``CACHE_TTL_AGGREGATE_SECONDS`` = 300 s -> ETag / ``Cache-Control``) via the
 existing ``cached()`` helper. The window is part of
 the cache key, so ``days`` changes never serve a stale window.
@@ -9,25 +9,18 @@ the cache key, so ``days`` changes never serve a stale window.
 import asyncio
 from collections.abc import Awaitable
 from datetime import datetime, timezone
-from typing import Literal, TypeVar
+from typing import TypeVar
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from app.core.cache import CACHE_TTL_AGGREGATE_SECONDS, TTLCache, cached, get_cache
 from app.repositories.analytics_repo import AnalyticsRepository, get_analytics_repo
 from app.routers.cities import MAX_NAME_LENGTH
-from app.schemas.analytics import (
-    ClimatologyResponse,
-    CorrelationResponse,
-    DailyResponse,
-    DiurnalResponse,
-    ErrorByHourResponse,
-    WindRoseResponse,
-)
+from app.schemas.analytics import DiurnalResponse, WindRoseResponse
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-#: Render free tier = one uvicorn worker / 0.1 CPU. The analytics page fires
+#: Render free tier = one uvicorn worker / 0.1 CPU. The climate views fire
 #: several cold queries at once; bound their computation so a burst cannot
 #: saturate the loop. Two is enough to overlap Mongo I/O without piling up
 #: Python-side aggregation on a single core.
@@ -44,58 +37,8 @@ async def _bounded(awaitable: Awaitable[T]) -> T:
 
 
 CITY_QUERY = Query(..., min_length=1, max_length=MAX_NAME_LENGTH, description="City name")
-DAILY_DAYS_QUERY = Query(default=90, ge=7, le=180, description="Lookback window in days (7-180)")
 WIND_DAYS_QUERY = Query(default=90, ge=7, le=365, description="Lookback window in days (7-365)")
 DIURNAL_DAYS_QUERY = Query(default=90, ge=7, le=365, description="Lookback window in days (7-365)")
-CORRELATION_DAYS_QUERY = Query(
-    default=90, ge=7, le=365, description="Lookback window in days (7-365)"
-)
-ERROR_DAYS_QUERY = Query(default=30, ge=7, le=90, description="Lookback window in days (7-90)")
-VAR_QUERY = Query(
-    default="temperature",
-    description="Numeric variable to correlate (temperature|humidity|pressure|wind_speed)",
-)
-
-
-@router.get("/daily", response_model=DailyResponse)
-async def analytics_daily(
-    request: Request,
-    response: Response,
-    city: str = CITY_QUERY,
-    days: int = DAILY_DAYS_QUERY,
-    repo: AnalyticsRepository = Depends(get_analytics_repo),
-    cache: TTLCache = Depends(get_cache),
-) -> DailyResponse | Response:
-    """Daily tmin/tmax/tmean, HDD/CDD, climatology anomaly and heatwave flags."""
-    now = datetime.now(timezone.utc)
-    return await cached(
-        request,
-        response,
-        cache,
-        f"analytics:daily:{city}:{days}",
-        CACHE_TTL_AGGREGATE_SECONDS,
-        lambda: _bounded(repo.daily(city, days, now)),
-    )
-
-
-@router.get("/climatology", response_model=ClimatologyResponse)
-async def analytics_climatology(
-    request: Request,
-    response: Response,
-    city: str = CITY_QUERY,
-    repo: AnalyticsRepository = Depends(get_analytics_repo),
-    cache: TTLCache = Depends(get_cache),
-) -> ClimatologyResponse | Response:
-    """Day-of-year 1..366 climatology for one city."""
-    now = datetime.now(timezone.utc)
-    return await cached(
-        request,
-        response,
-        cache,
-        f"analytics:climatology:{city}",
-        CACHE_TTL_AGGREGATE_SECONDS,
-        lambda: _bounded(repo.climatology(city, now)),
-    )
 
 
 @router.get("/wind-rose", response_model=WindRoseResponse)
@@ -136,45 +79,4 @@ async def analytics_diurnal(
         f"analytics:diurnal:{days}",
         CACHE_TTL_AGGREGATE_SECONDS,
         lambda: _bounded(repo.diurnal(days, now)),
-    )
-
-
-@router.get("/correlation", response_model=CorrelationResponse)
-async def analytics_correlation(
-    request: Request,
-    response: Response,
-    days: int = CORRELATION_DAYS_QUERY,
-    var: Literal["temperature", "humidity", "pressure", "wind_speed"] = VAR_QUERY,
-    repo: AnalyticsRepository = Depends(get_analytics_repo),
-    cache: TTLCache = Depends(get_cache),
-) -> CorrelationResponse | Response:
-    """Pairwise Pearson of daily city means, aligned by date (null < 3 shared days)."""
-    now = datetime.now(timezone.utc)
-    return await cached(
-        request,
-        response,
-        cache,
-        f"analytics:correlation:{days}:{var}",
-        CACHE_TTL_AGGREGATE_SECONDS,
-        lambda: _bounded(repo.correlation(days, var, now)),
-    )
-
-
-@router.get("/error-by-hour", response_model=ErrorByHourResponse)
-async def analytics_error_by_hour(
-    request: Request,
-    response: Response,
-    days: int = ERROR_DAYS_QUERY,
-    repo: AnalyticsRepository = Depends(get_analytics_repo),
-    cache: TTLCache = Depends(get_cache),
-) -> ErrorByHourResponse | Response:
-    """MAE/RMSE/bias/persistence-MAE per (horizon_hours, local hour)."""
-    now = datetime.now(timezone.utc)
-    return await cached(
-        request,
-        response,
-        cache,
-        f"analytics:error-by-hour:{days}",
-        CACHE_TTL_AGGREGATE_SECONDS,
-        lambda: _bounded(repo.error_by_hour(days, now)),
     )

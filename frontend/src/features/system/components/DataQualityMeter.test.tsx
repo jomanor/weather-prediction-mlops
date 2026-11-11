@@ -123,11 +123,7 @@ describe('DataQualityMeter', () => {
     const readout = (label: string) => screen.getByText(label).parentElement?.textContent ?? ''
     expect(readout('Estaciones')).toContain('3')
     expect(readout('Con aviso')).toContain('2')
-    expect(
-      screen.getByText(
-        'Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.',
-      ),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Solo estaciones con cobertura AEMET.')).toBeInTheDocument()
   })
 
   it('drops the per-station table when every station is in range', () => {
@@ -148,11 +144,7 @@ describe('DataQualityMeter', () => {
     expect(screen.getByText('Con aviso')).toBeInTheDocument()
     expect(screen.getByText('todo en rango')).toBeInTheDocument()
     expect(screen.getByText('Correcto')).toBeInTheDocument()
-    expect(
-      screen.getByText(
-        'Solo estaciones con cobertura AEMET · Pasadena sigue en Resumen y Estación.',
-      ),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Solo estaciones con cobertura AEMET.')).toBeInTheDocument()
   })
 
   it('renders a retry action on error', () => {

@@ -824,12 +824,12 @@ class TestDryRunOffline:
     def test_fallback_cities_are_the_shared_seed_tuple(self):
         """The offline fallback is the API's seed list, not a second registry.
 
-        It used to be a private 14-station dict with no Pasadena, so an offline
-        dry run planned one station fewer than the app ingests.
+        It used to be a private dict in this script, so an offline dry run
+        planned a different station set than the app ingests.
         """
-        assert len(bh.FALLBACK_CITIES) == 15
-        assert bh.FALLBACK_CITIES["Pasadena"] == (34.1478, -118.1445)
+        assert len(bh.FALLBACK_CITIES) == 14
         assert bh.FALLBACK_CITIES["Malaga"] == (36.7213, -4.4214)  # unaccented on purpose
+        assert "Pasadena" not in bh.FALLBACK_CITIES  # removed 2026-11-11
         assert set(bh.FALLBACK_CITIES) == {name for name, _, _ in bh.DEFAULT_CITIES}
 
     def test_unreachable_mongo_falls_back_to_the_seed_stations(self, monkeypatch, capsys):

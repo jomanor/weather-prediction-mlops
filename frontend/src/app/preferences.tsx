@@ -20,14 +20,19 @@ const BASEMAP_KEY = 'meteoml.basemap'
 export type BasemapId = 'positron' | 'dark' | 'topo'
 const BASEMAPS = ['positron', 'dark', 'topo'] as const
 
+/**
+ * The map's two independent overlays. There is exactly one elevation setting:
+ * `hillshade`. The former `terrain3d`/`buildings3d` keys are gone (audit 16) —
+ * a stored blob from an older build keeps them in JSON, and `readMap` simply
+ * drops them; there is no migration, because both settings had no state worth
+ * carrying over.
+ */
 export interface MapLayers {
   hillshade: boolean
   radar: boolean
-  terrain3d: boolean
-  buildings3d: boolean
 }
 
-const DEFAULT_MAP: MapLayers = { hillshade: false, radar: false, terrain3d: false, buildings3d: true }
+const DEFAULT_MAP: MapLayers = { hillshade: false, radar: false }
 
 function readMap(): MapLayers {
   try {
@@ -36,13 +41,7 @@ function readMap(): MapLayers {
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return DEFAULT_MAP
     const record = parsed as Record<string, unknown>
-    return {
-      hillshade: record.hillshade === true,
-      radar: record.radar === true,
-      terrain3d: record.terrain3d === true,
-      /* Older stored preferences predate the buildings layer; on by default. */
-      buildings3d: record.buildings3d !== false,
-    }
+    return { hillshade: record.hillshade === true, radar: record.radar === true }
   } catch {
     return DEFAULT_MAP
   }
@@ -137,7 +136,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const setMapLayers = useCallback((next: MapLayers) => {
     setMapLayersState(next)
     try {
-      localStorage.setItem(MAP_KEY, JSON.stringify(next))
+      /* Serialised field by field: a stale key cannot survive a write. */
+      localStorage.setItem(
+        MAP_KEY,
+        JSON.stringify({ hillshade: next.hillshade, radar: next.radar }),
+      )
     } catch {
       /* storage unavailable */
     }

@@ -1,12 +1,12 @@
 /**
  * Cold-burst load check (roadmap: "No k6 cold-burst test yet").
  *
- * Per iteration a VU fires, CONCURRENTLY (``http.batch``), the three cached
- * analytics views the dashboard opens with plus ``/api/v1/health``:
+ * Per iteration a VU fires, CONCURRENTLY (``http.batch``), the two cached
+ * analytics views the station page's climate dialog opens with plus
+ * ``/api/v1/health``:
  *
- *   GET /api/v1/analytics/daily?city=<CITY>&days=<DAYS>   (city is required)
+ *   GET /api/v1/analytics/wind-rose?city=<CITY>&days=<DAYS>   (city is required)
  *   GET /api/v1/analytics/diurnal?days=<DAYS>
- *   GET /api/v1/analytics/correlation?days=<DAYS>
  *   GET /api/v1/health
  *
  * The point is the COLD path, against a free Render instance that sleeps after
@@ -16,14 +16,14 @@
  *   * every request gets a 60 s timeout (no retries -- a cold failure must be
  *     recorded, never papered over);
  *   * the cold burst (VU 1 / iteration 0) is ALSO recorded on its own Trend,
- *     ``cold_start_ms``: the slowest of those four responses. Without it the
+ *     ``cold_start_ms``: the slowest of those three responses. Without it the
  *     boot latency would only be visible as one anonymous sample inside the
  *     overall p95. Note that those samples are still counted in
  *     ``analytics_ms``/``http_req_failed`` -- the budget is the budget; the
  *     cold trend is for diagnosis, not an exemption.
  *   * the cold burst is GATED, not just reported: ``cold_start_ok`` must be
- *     > 0, i.e. all four probe responses were 200. Four 60 s timeouts on a
- *     sleeping instance are 4 requests out of ~2400 in a 45 s run (~0.2 %):
+ *     > 0, i.e. all three probe responses were 200. Three 60 s timeouts on a
+ *     sleeping instance are 3 requests out of ~1800 in a 45 s run (~0.2 %):
  *     they pass ``health_failed`` (< 1 %), ``http_req_failed`` (< 5 %) and the
  *     analytics p95 alike, so without this threshold the exact failure the
  *     script exists to catch would exit 0.
@@ -75,7 +75,7 @@ export const options = {
     health_failed: ['rate<0.01'],
     // Overall failure budget, informational ceiling for the other endpoints.
     http_req_failed: ['rate<0.05'],
-    // The cold probe must have got all four 200s (one sample per run: 1 = pass,
+    // The cold probe must have got all three 200s (one sample per run: 1 = pass,
     // 0 = fail). Separate from the rates above because ~0.2 % of a run's
     // requests can be silent inside them. Not an exemption: the cold samples
     // still count in analytics_ms and http_req_failed.
@@ -96,9 +96,8 @@ export default function () {
   const coldProbe = __VU === 1 && __ITER === 0;
 
   const res = http.batch({
-    daily: get(`${BASE_URL}/api/v1/analytics/daily?city=${encodeURIComponent(CITY)}&days=${DAYS}`, 'analytics'),
+    windRose: get(`${BASE_URL}/api/v1/analytics/wind-rose?city=${encodeURIComponent(CITY)}&days=${DAYS}`, 'analytics'),
     diurnal: get(`${BASE_URL}/api/v1/analytics/diurnal?days=${DAYS}`, 'analytics'),
-    correlation: get(`${BASE_URL}/api/v1/analytics/correlation?days=${DAYS}`, 'analytics'),
     health: get(`${BASE_URL}/api/v1/health`, 'health'),
   });
 

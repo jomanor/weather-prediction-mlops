@@ -33,8 +33,8 @@ from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
 
-#: INE municipality codes for the 14 AEMET-covered stations (Pasadena is the
-#: one US station, so it has no AEMET forecast to compare against).
+#: INE municipality codes for every station in the registry: all fourteen are
+#: Spanish municipalities, so each one has an AEMET forecast to compare against.
 AEMET_INE_CODES: dict[str, str] = {
     "Madrid": "28079",
     "Barcelona": "08019",

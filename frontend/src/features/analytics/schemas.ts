@@ -29,30 +29,6 @@ const sampleCount = z
   .nullish()
   .transform((value) => value ?? 0)
 
-/** `GET /api/analytics/daily` — observed daily aggregates + anomaly/heatwave. */
-export const dailyPointSchema = z.object({
-  date: z.string(),
-  tmin: nullableNumber,
-  tmax: nullableNumber,
-  tmean: nullableNumber,
-  hdd: nullableNumber,
-  cdd: nullableNumber,
-  anomaly: nullableNumber,
-  heatwave: z
-    .boolean()
-    .nullish()
-    .transform((value) => value ?? false),
-})
-export type DailyPoint = z.infer<typeof dailyPointSchema>
-
-export const analyticsDailySchema = z.object({
-  city: z.string(),
-  days: z.number(),
-  generated_at: nullableString,
-  points: z.array(dailyPointSchema),
-})
-export type AnalyticsDaily = z.infer<typeof analyticsDailySchema>
-
 /** `GET /api/analytics/wind-rose` — 16 direction sectors, speed km/h. */
 export const windRoseSectorSchema = z.object({
   sector: z.number(),

@@ -281,6 +281,18 @@
   transition-timing-function: var(--ease-ui);
 }
 
+/* Centred modal enter (audit 16): opacity + a 0.96 scale, 180 ms, never
+ * `transition: all` and never `scale(0)` — a surface that appears out of
+ * nothing reads as a different kind of element, not the same panel arriving. */
+@utility dialog-enter {
+  animation: dialog-in var(--motion-base) var(--ease-ui) both;
+}
+
+/* The backdrop only fades: nothing moves, so reduced motion can keep it. */
+@utility dialog-backdrop {
+  animation: dialog-fade-in var(--motion-base) var(--ease-ui) both;
+}
+
 @utility shadow-ui {
   box-shadow: var(--shadow);
 }
@@ -347,12 +359,40 @@
   }
 }
 
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes dialog-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
+  }
+
+  /* …except the modal fade, which is the part that carries meaning. The rule
+   * above would collapse it together with the movement; reduced motion is
+   * asked to drop the scale, not the appearance. */
+  .dialog-enter {
+    animation-name: dialog-fade-in !important;
+    animation-duration: var(--motion-fast) !important;
   }
 }
 

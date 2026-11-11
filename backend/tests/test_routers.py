@@ -240,7 +240,7 @@ async def test_predictions_latest_fresh_row_is_not_stale(client):
 
 async def test_predictions_latest_flags_a_35_day_old_row_without_dropping_it(client, app, now):
     stale_row = Prediction(
-        city="Pasadena",
+        city="Sevilla",
         source_timestamp=now - timedelta(days=35),
         prediction_timestamp=now - timedelta(days=35) + timedelta(hours=1),
         horizon_hours=1,
@@ -262,9 +262,9 @@ async def test_predictions_latest_flags_a_35_day_old_row_without_dropping_it(cli
     assert response.status_code == 200
     rows = {p["city"]: p for p in response.json()["predictions"]}
     # A stale row stays visible and flagged, never dropped.
-    assert set(rows) == {"Madrid", "Pasadena"}
-    assert rows["Pasadena"]["stale"] is True
-    assert abs(rows["Pasadena"]["source_age_hours"] - 35 * 24) < 0.2
+    assert set(rows) == {"Madrid", "Sevilla"}
+    assert rows["Sevilla"]["stale"] is True
+    assert abs(rows["Sevilla"]["source_age_hours"] - 35 * 24) < 0.2
     assert rows["Madrid"]["stale"] is False
     assert abs(rows["Madrid"]["source_age_hours"] - 1.0) < 0.2
 

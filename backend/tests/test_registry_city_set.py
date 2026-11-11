@@ -37,7 +37,7 @@ async def test_quality_report_reports_the_registry_not_the_seed_tuple():
     report = await WeatherRepository(db).quality_report(days=1, now=OBSERVED_AT)
 
     assert [city.city for city in report] == ["Barcelona", "Madrid"]
-    # One equality-prefixed query per registry station: 2, not the 15 seed
+    # One equality-prefixed query per registry station: 2, not the 14 seed
     # stations and not ``distinct("city")`` (which would add Alicante).
     assert len(features.find_calls) == 2
     assert {call[0]["city"] for call in features.find_calls} == {"Barcelona", "Madrid"}
