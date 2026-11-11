@@ -87,6 +87,12 @@ for onboarding is `.env.example`. Local Mongo container `weather-mongodb` runs o
 
 ## Verifying a deploy actually happened
 
+**Netlify deploys are live again** (2026-11-11, Batch F, owner go-ahead): the
+`ignore = "exit 0"` pause is gone from `netlify.toml`, so a push to `main` publishes. The first
+deliberate deploy of this era (commit `be59f76`) served `assets/index-CEeMaJ7v.js`, byte-identical
+to the local `npm run build` of `4cd86da`, and `GET /panel` returned 200 behind the SPA fallback.
+To pause again, restore `ignore = "exit 0"`.
+
 Do not trust the dashboard. Compare the served asset hashes with a local build:
 
 ```bash
@@ -1152,3 +1158,25 @@ their own dashboard from them, **persisted in the browser, not on a server**.
   Backend untouched by this batch.
 - **Unverified:** the rendered 320/390 px layout and the focus ring — this repo still has no browser
   harness, so the check was jsdom plus class inspection.
+
+## 2026-11-11 — Batch F: deploys reopened (Netlify verified, Render pending CI)
+
+Owner instruction: "deploy in netlify, now you can".
+
+- **Netlify.** Removed the 2026-10-31 `ignore = "exit 0"` line, so a push to `main` builds and
+  publishes again (the comment now says how to restore the pause). The commit that flipped the flag
+  (`be59f76`) triggered the first build of this era; it published the frontend as of `4cd86da`
+  (Batch D + the `/panel` dashboard).
+- **Verified the way this file demands, not the dashboard:** local `npm run build` →
+  `dist/assets/index-CEeMaJ7v.js`; served page → `assets/index-CEeMaJ7v.js` (same hash), all four
+  referenced chunks 200, `GET /panel` → 200 through the SPA fallback, and the edge proxy answered
+  `GET /api/v1/weather/current` with `count: 14` (Pasadena gone).
+- **Render is one commit behind.** The live API still serves the six `/analytics/*` routes
+  (`/analytics/daily` → 200, `openapi.json` lists all six), i.e. it runs pre-Batch-D code; the
+  registry shows 14 because that is a database fact, not an image fact. Two CI runs
+  (`43095181482`, `43103363120`) sat **queued with zero jobs** for over an hour — GitHub's runner
+  queue, not a repo failure — so the guarded Render deploy has not fired. The frontend is safe
+  against the older image: it calls only `/analytics/diurnal`, `/analytics/wind-rose`, `/weather/*`,
+  `/map/stations`, `/cities`, `/models`, `/predictions/*` and `/benchmark/*`, all of which exist in
+  both versions. Re-check the hash recipe above once CI drains; expected live API after that:
+  `/analytics/{daily,climatology,correlation,error-by-hour}` → 404.
