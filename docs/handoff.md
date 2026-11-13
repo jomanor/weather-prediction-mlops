@@ -1,11 +1,88 @@
 # Handoff — operational notes for the next session
 
-**Start here:** `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller
-items, batches A–F, and the owner decisions). Batches A, B, C, D and D2 (the user-composable `/panel`
-dashboard) are done and on `main`; finding 7 (`POST /refresh`) is resolved by deletion (`decaba5`). Pick a batch from its *Suggested order* table, fall back to
-`docs/roadmap.md` *Accepted follow-ups* when it is exhausted. **Next is E** (drop Spark), blocked on the
-owner's Spark answer; **F** (reopen deploys) stays paused until the owner asks for a deliberate deploy.
-Do not start a batch before answering the owner questions that batch depends on.
+**Start here.** Batches A, B, C, D and D2 (the user-composable `/panel` dashboard) are on `main`; Batch F
+reopened Netlify deploys and was verified. Finding 7 (`POST /refresh`) is resolved by deletion
+(`decaba5`). `docs/audit-2026-10-31.md` is the queued work list (20 findings + 12 smaller items, batches
+A–F, and the answered owner decisions); `docs/roadmap.md` holds the plan and the status checklist. What
+is left is **Batch E (drop Spark)**, which is blocked on the owner's answer to audit open question 1,
+and the P0 below (the ingest job fails when the weather provider stalls). Do not start E before that
+answer, and do not reopen a batch that the audit marks done.
+
+## Current state (measured 2026-11-13, after Batch F)
+
+| Surface | State | How it was proved |
+| --- | --- | --- |
+| `main` | `4314300` (Batch D + D2 + F) | `git log --oneline -5` |
+| CI on that commit | **green** (run `43103645030`); two earlier runs sat queued for an hour with zero jobs, which was GitHub's runner queue, not the repo | `gh run list --workflow=ci.yml --branch main` |
+| Netlify | **live and publishing.** Serves `assets/index-CEeMaJ7v.js`, byte-identical to a local `npm run build` of the same commit; `GET /panel` → 200; `/api/*` edge proxy answered `count: 14` | served hash vs `ls frontend/dist/assets` |
+| Render | **live on the Batch-D API**: `/openapi.json` has 38 paths and only `/analytics/diurnal` + `/analytics/wind-rose` (the other four are 404) | `curl -s https://weather-prediction-mlops.onrender.com/openapi.json` |
+| Atlas `weather_db` | 14 cities; `raw_weather` 58 959 docs (newest `2026-11-13T11:30Z`), `weather_features` 58 945 (newest `07:00Z`), `weather_predictions` 8 533, `model_registry` 35 | read-only `count_documents` / newest-doc query |
+
+Scheduled `ml-pipeline.yml` runs failed at 09:54 and 14:03 on 2026-11-13 and succeeded at 06:57: that is
+the P0 below, not a regression from Batches C–F.
+
+## P0 for the next session — the ingest step fails when the provider stalls
+
+**Evidence.** Runs `43404992991` and `43439171188` died in `Run Spark jobs` → `Ingest current
+observations`: all 14 stations logged `HTTPSConnectionPool(host='api.open-meteo.com', port=443): Read
+timed out. (read timeout=30)`, then `Stored 0/14 observation(s) in raw_weather`, then exit 1. The 06:57
+run was green, so the provider recovered without any code change. `scripts/ingest_weather.py:103` makes
+one attempt per station with `timeout=30`, and `sys.exit(ingest())` turns any failure count into a red
+job.
+
+**Why it matters.** A red ingest run also skips the feature/train/inference stages that follow it, so a
+provider stall costs a whole cycle: `raw_weather` stops growing and the freshness line and the watchdog
+then report a data gap that the code did not cause. Two failed cycles in a day is already visible.
+
+**Options, smallest first** (pick with the owner; do not silently swallow real write failures — the
+Batch-A rule is that a writer must tell the truth):
+1. Retry only on `requests.Timeout`/connection errors, 2 attempts with a short backoff, keeping a hard
+   failure when every attempt fails. Smallest diff, no new flag.
+2. Give `ingest_weather.py` a `--best-effort` mode like `backfill_historical_data.py` already has
+   (`ml-pipeline.yml` uses it with `continue-on-error: true` for the backfill step), and make the
+   workflow's ingest step report a `::warning` + a `$GITHUB_STEP_SUMMARY` line instead of failing. Then
+   the downstream stages run on the data that does exist.
+3. Leave it; accept that a provider stall reddens the pipeline and rely on `watchdog.yml` for the
+   staleness signal.
+
+Add a test either way: the retry/flag decision must be pinned by a fake transport that times out once
+and then succeeds, and by a case where every attempt times out and the exit code is still non-zero.
+
+## Next session work list, in order
+
+1. **P0 above** — decide the retry/best-effort shape, implement, gate with the pipeline suite, and
+   re-dispatch `gh workflow run ml-pipeline.yml --ref main -f job=all` once to prove the full path
+   (this also refreshes `weather_features`, which is 6 h old by design).
+2. **Batch E (drop Spark)** — blocked on the owner's Spark answer (audit open question 1). Gate from the
+   audit: one full `features → train → inference` run under the new stack, `/api/models` payload
+   unchanged, `job=all` wall time recorded, retrain + promote. Deleting Spark also lets the three
+   Python-3.11 CI jobs move to 3.13 and the `pandas==2.0.3` pin go.
+3. **Netlify credential cleanup** — the `NETLIFY_AUTH_TOKEN` kept in `.env.dropped-keys` returns
+   `401 Access Denied` (checked against `/api/v1/sites`), so it is useless and should not be carried
+   forward: deploys now run through the git integration and need no token. Delete the file, or replace
+   the token only if a human still wants CLI deploys.
+4. **Nothing else is queued.** `docs/roadmap.md` *Accepted follow-ups* still carries L1 (15-min ingest,
+   deferred: ~637 MiB projected against the 512 MB M0 cap — re-measure before starting) and the
+   deliberately-deferred MVP cuts of the dashboard (drag-and-drop, per-tile span, URL deep links,
+   cross-tab sync, export/import).
+
+## Traps that cost time (append-only)
+
+- **Bare `pytest` at the repo root does not work** and `testpaths` does not fix it: both suites are
+  packages named `tests`, so collection raises `ImportPathMismatchError`; `--import-mode=importlib`
+  fails too (duplicate conftest plugin name). Use the two per-directory commands in *Commands* below.
+- **Spark 3.5.5 imports `distutils`**, removed in Python 3.12. `pipeline-test`, `integration-tests` and
+  `ml-pipeline.yml` must stay on 3.11; the local 3.13 venv only works because setuptools ships a shim.
+- **`Stored 0/14` in an ingest log means the provider timed out, not bad credentials**; DB auth failures
+  surface differently and mention TLS/authentication.
+- **Prove a Render deploy with `/openapi.json`**, not `/api/health/ready` (the latter predates Batch 3
+  and always answers 200). Prove a Netlify deploy by comparing served asset hashes with a local build;
+  the dashboard is not evidence.
+- **The Netlify CLI is not installed** on this machine and there is no site link in `.netlify/`; the
+  deploy path is the git integration (`netlify.toml`, base `frontend`, Node 22).
+- **Never `source .env`** (the password contains `&`) and never print `MONGO_URI`.
+- Local Node is v26 while Netlify builds on Node 22: the produced asset hash matched anyway, but compare
+  the hash rather than assuming.
 
 Read this **before** `docs/roadmap.md`. The roadmap holds the plan and the status
 checklist; this file holds the environment, the hard rules and the traps that are not
@@ -18,7 +95,7 @@ live in `docs/batch4-contract.md`.
 | --- | --- | --- |
 | Repo | `jomanor/weather-prediction-mlops`, branch `main` | Public repo → standard GitHub Actions minutes are unlimited. |
 | API | Render service `meteoml-api`, deployed from `main` | `render.yaml`: docker, `backend/Dockerfile`, free plan, `autoDeploy: true`, health `GET /api/health`. Dashboard branch was the trap that caused stale deploys; it is now `main`. A deploy hook exists in the Render dashboard to force a deploy; the key is a secret, so it must never be committed to this public repo. |
-| Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing is currently **off** (`ignore = "exit 0"`); see the 2026-10-31 entry. |
+| Frontend | Netlify site `meteoml` (`https://meteoml.netlify.app`) | Linked to `main` with base dir `frontend`, `npm ci && npm run build`, publish `dist`. `netlify.toml` is the source of truth (base, NODE_VERSION 22, headers, SPA redirects, `/api/*` edge proxy to Render). Auto publishing is **on** again since Batch F (2026-11-11): the 2026-10-31 `ignore = "exit 0"` pause was removed on the owner's go-ahead, so a push to `main` publishes; restore that line to pause. |
 | DB | Atlas M0 `weather_db` (512 MB) | Re-measured 2026-09-25: `collStats.avgObjSize` `raw_weather` 1362 B, `weather_features` 3856 B, `weather_predictions` **437 B** (Batch-3 interval columns; the old 405 B is stale), live city count **15** — the measurement date matters: Pasadena was **removed on 2026-11-11** (owner decision, audit finding 16) and the live `cities` collection is **14** docs, so the 15-city figures in this row are a conservative upper bound, not the current state. Pasadena rows deleted: `raw_weather` 3 390, `weather_features` 3 385, `weather_predictions` 153, `cities` 1 (`weather_data` had none) — 6 929 in total. Projected steady state **~380.5 MiB** against a 384 MiB (75 %) budget → **~3.5 MiB hard headroom**, after charging the L6 refresh endpoint's 48 accepted `raw_weather` writes/day against the same 180-day TTL (that endpoint was deleted 2026-10-31, so the charge is spare headroom now, not a cost). Prediction rows are keyed `(city, source_timestamp, horizon)` and written as upsert, so growth follows the ~6 h feature-rebuild cadence, not the hourly inference schedule; the storage-budget test's tripwire is **≥10 rebuilds/day** (8/day is modelled as cadence-jitter headroom; it was ≥14 before the refresh rows). `weather_features` is the largest collection and is a single overwritten snapshot, not an accumulator. The other breach axis is extending the raw TTL — re-measure before changing it. No TTL change in Batch 4: `weather_predictions` stays 90 d. |
 | Cron | GitHub Actions | `ingest.yml` declared hourly `:50` (see the live caveat below); `ml-pipeline.yml` inference hourly `:05`, features `20 */6`, train nightly `35 2`; `backfill.yml` manual. |
 
@@ -1058,10 +1135,13 @@ working tree, not deployed*. No `gh workflow run` was issued. Reviewer/QA verdic
 
 ## 2026-11-11 — Batch D: UI one-thing-per-screen (audit 15, 16 + S3, S10) and the registry decision
 
-**Local and uncommitted as of 2026-11-11; not pushed, no Netlify deployment** — auto publishing stays
-paused (`netlify.toml` `ignore = "exit 0"`), so the state of this batch is *in the working tree, not
-deployed*. No `gh workflow run` was issued and nothing was pushed. Reviewer/QA verdicts for this batch are
-**not recorded here**; only the gates below were measured, by the docs pass, on this tree.
+**Shipped as `f6fa89f`** (with `4cd86da` for D2 right after it) and pushed to `main`. CI run `43103645030`
+is green on that commit and the guarded Render deploy landed, so the live API now serves only
+`/analytics/diurnal` and `/analytics/wind-rose`. Netlify was still paused when this batch landed; Batch F
+published the frontend a few commits later. Reviewer and QA verdicts: the diff was reviewed by a
+reviewer pass and its findings were applied (the false "Pasadena sigue en Resumen" footnote, the stale
+`registry.ts` comment, the 10 px warn text, and the storage-budget comment); waived NITs are recorded in
+the Batch D2 section below and in the review notes.
 
 - **Owner decisions (answered 2026-11-11).**
   - **Pasadena: removed from the registry.** It was the only US station. Code and Atlas are clean:
@@ -1171,12 +1251,13 @@ Owner instruction: "deploy in netlify, now you can".
   `dist/assets/index-CEeMaJ7v.js`; served page → `assets/index-CEeMaJ7v.js` (same hash), all four
   referenced chunks 200, `GET /panel` → 200 through the SPA fallback, and the edge proxy answered
   `GET /api/v1/weather/current` with `count: 14` (Pasadena gone).
-- **Render is one commit behind.** The live API still serves the six `/analytics/*` routes
-  (`/analytics/daily` → 200, `openapi.json` lists all six), i.e. it runs pre-Batch-D code; the
-  registry shows 14 because that is a database fact, not an image fact. Two CI runs
-  (`43095181482`, `43103363120`) sat **queued with zero jobs** for over an hour — GitHub's runner
-  queue, not a repo failure — so the guarded Render deploy has not fired. The frontend is safe
-  against the older image: it calls only `/analytics/diurnal`, `/analytics/wind-rose`, `/weather/*`,
-  `/map/stations`, `/cities`, `/models`, `/predictions/*` and `/benchmark/*`, all of which exist in
-  both versions. Re-check the hash recipe above once CI drains; expected live API after that:
-  `/analytics/{daily,climatology,correlation,error-by-hour}` → 404.
+- **Render caught up.** At the moment of the Netlify check the API was two commits behind (it still
+  served the six `/analytics/*` routes, and the registry showed 14 only because that is a database
+  fact, not an image fact); two CI runs (`43095181482`, `43103363120`) sat **queued with zero jobs**
+  for over an hour, which was GitHub's runner queue, not a repo failure. Re-checked later the same
+  day: CI `43103645030` is green and Render serves the Batch-D API — `/openapi.json` has 38 paths and
+  only `/analytics/diurnal` + `/analytics/wind-rose`; `/analytics/{daily,climatology,correlation,
+  error-by-hour}` return 404. No action left here.
+- **Second push, same bundle.** The docs commit `4314300` re-triggered a Netlify build and published
+  the identical `index-CEeMaJ7v.js`, so the deploy is deterministic for this source (local Node 26,
+  Netlify Node 22). That is the cheapest proof that a rebuild is safe.
